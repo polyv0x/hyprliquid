@@ -430,7 +430,15 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         [](eRenderStage stage) {
             if (stage == RENDER_PRE_WINDOW)
                 drawGlassForFullscreenWindow();
+            if (stage == RENDER_BEGIN)
+                g_pGlobalState->renderBuffers.beginFrame(g_pHyprRenderer->m_renderData.pMonitor.lock());
+            if (stage == RENDER_POST)
+                g_pGlobalState->renderBuffers.endFrame();
         }));
+    g_pGlobalState->listeners.push_back(Event::bus()->m_events.monitor.removed.listen(
+        [](PHLMONITOR monitor) { WindowScene::retireMonitor(monitor->m_id); }));
+    g_pGlobalState->listeners.push_back(Event::bus()->m_events.monitor.destroyMon.listen(
+        [](PHLMONITOR monitor) { WindowScene::retireMonitor(monitor->m_id); }));
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.window.moveToWorkspace.listen(
         [=](PHLWINDOW w, PHLWORKSPACE) { bumpWindowMonitor(w); }));
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.workspace.active.listen(
@@ -558,6 +566,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     }
 
     g_pGlobalState->layerSurfaces.clear();
+    g_pGlobalState->renderBuffers.shutdown();
     g_pGlobalState->shaderManager.destroy();
     g_pGlobalState.reset();
 }

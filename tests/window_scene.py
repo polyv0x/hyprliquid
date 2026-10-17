@@ -13,6 +13,7 @@ def verify_window_scene(ctl, env, log, clients, build, wait):
             client.wait(timeout=5)
     wait(lambda: not json.loads(ctl('-j', 'clients')))
     ctl('reload')
+    ctl('dismissnotify')
     ctl('eval', 'hl.config({ general = { border_size = 0, gaps_in = 8, gaps_out = 20 }, '
         'decoration = { active_opacity = 1, inactive_opacity = 1, dim_inactive = false, shadow = { enabled = false } }, '
         'cursor = { no_warps = true, inactive_timeout = 0.1 } })')
@@ -55,6 +56,38 @@ while True:
     assert all(not w['floating'] and w['fullscreen'] == 0 for w in windows), windows
     assert windows[0]['at'][0] + windows[0]['size'][0] < windows[1]['at'][0], windows
     (build / 'scene-clients.json').write_text(json.dumps(windows, indent=2))
+
+    def buffers():
+        reply = json.loads(ctl('hyprliquid:control', '{"op":"buffers"}'))
+        return reply.get('buffers') if reply['ok'] else None
+
+    initial_buffers = buffers()
+    if initial_buffers:
+        assert initial_buffers['window_pool']['hits'] > 0, initial_buffers
+        assert initial_buffers['window_pool']['leased_bytes'] == 0
+        scene = [b for b in initial_buffers['buffers'] if b['role'].startswith('scene-')]
+        assert len(scene) == 2, scene
+        (build / 'scene-buffers-warm.json').write_text(json.dumps(initial_buffers, indent=2))
+
+        # These materials have the same 97-pixel padding and therefore share
+        # exact-size samples. Zero blur must not destroy the pooled blur target
+        # needed by the next consumer with blur enabled.
+        allocations = None
+        last_frame = initial_buffers['frame']
+        for sigma in (10, 0, 10, 0, 10, 0, 10):
+            request = {'op': 'apply', 'profile': {'base_preset': 'lens', 'overrides': {
+                'blur_sigma': sigma, 'outer_refraction_amount': 95 if sigma == 0 else 50,
+                'inner_refraction_amount': 0, 'aberration_amount': 0, 'edge_bleed_opacity': 0}}}
+            assert json.loads(ctl('hyprliquid:control', json.dumps(request)))['ok']
+            wait(lambda: buffers()['frame'] > last_frame)
+            current = buffers()
+            assert all(w['padding'] == 97 for w in current['windows'])
+            if allocations is None:
+                allocations = current['allocations']
+            assert current['allocations'] == allocations, 'Zero blur discarded reusable pooled storage'
+            last_frame = current['frame']
+        assert json.loads(ctl('hyprliquid:control', '{"op":"reset"}'))['ok']
+        print('PASS: alternating zero/nonzero blur reuses matching storage without allocation churn', flush=True)
 
     def focus(window):
         ctl('dispatch', 'hl.dsp.focus({ window = ' + json.dumps('address:' + window['address']) + ' })')
@@ -136,3 +169,15 @@ while True:
     assert not any(max(pixel[1:]) > pixel[0] + 20 and max(pixel[1:]) > 60
                    for pixel in inside(stable, remaining).getdata()), 'Closed neighbour left coloured pixels in the remaining pane'
     print('PASS: neighbour close discards the scene and settles without stale-frame feedback', flush=True)
+    if initial_buffers:
+        time.sleep(3.2)
+        retired = buffers()
+        assert not any(b['role'].startswith('scene-') for b in retired['buffers']), retired
+        idle_frame = retired['frame']
+        time.sleep(6.2)
+        idle = buffers()
+        assert idle['window_pool']['bytes'] == 0, idle
+        assert idle['frame'] == idle_frame, 'Storage cleanup scheduled idle redraws'
+        assert idle['allocation_failures'] == 0
+        (build / 'scene-buffers-idle.json').write_text(json.dumps(idle, indent=2))
+        print('PASS: scene retirement, idle pool eviction and no cleanup redraws', flush=True)

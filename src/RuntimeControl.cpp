@@ -1,5 +1,6 @@
 #include "RuntimeControl.hpp"
 #include "Globals.hpp"
+#include "GlassDecoration.hpp"
 
 #include <hyprland/src/state/MonitorState.hpp>
 #include <json-c/json.h>
@@ -106,7 +107,7 @@ json_object* state() {
 }
 void describe(json_object* result) {
     auto* capabilities = json_object_new_array();
-    for (const auto* name : {"default_material", "atomic_apply", "revision_guard", "field_reset"})
+    for (const auto* name : {"default_material", "atomic_apply", "revision_guard", "field_reset", "buffers"})
         json_object_array_add(capabilities, string(name));
     put(result, "capabilities", capabilities);
     auto* parameters = json_object_new_array();
@@ -204,9 +205,37 @@ std::string dispatch(eHyprCtlOutputFormat, std::string request) {
         auto input = own(json_tokener_parse_ex(tokener.get(), payload.c_str(), payload.size() + 1));
         require(json_tokener_get_error(tokener.get()) == json_tokener_success && input, "invalid JSON");
         const auto op = text(get(input.get(), "op"));
-        if (op == "describe" || op == "state") {
+        if (op == "describe" || op == "state" || op == "buffers") {
             keys(input.get(), {"op"});
             if (op == "describe") describe(response.get());
+            if (op == "buffers") {
+                auto* diagnostic = g_pGlobalState->renderBuffers.diagnostics();
+                auto* windows = json_object_new_array();
+                for (const auto& decoration : g_pGlobalState->decorations)
+                    if (decoration) json_object_array_add(windows, decoration->diagnostics());
+                put(diagnostic, "windows", windows);
+                auto* layers = json_object_new_array();
+                for (const auto& [_, layer] : g_pGlobalState->layerSurfaces)
+                    json_object_array_add(layers, layer->diagnostics());
+                put(diagnostic, "layers", layers);
+                auto* monitors = json_object_new_array();
+                for (const auto& monitor : State::monitorState()->monitors()) {
+                    auto* item = object();
+                    put(item, "id", json_object_new_int64(monitor->m_id));
+                    put(item, "name", string(monitor->m_name));
+                    put(item, "width", json_object_new_double(monitor->m_pixelSize.x));
+                    put(item, "height", json_object_new_double(monitor->m_pixelSize.y));
+                    put(item, "scale", json_object_new_double(monitor->m_scale));
+                    put(item, "refresh_hz", json_object_new_double(monitor->m_refreshRate));
+                    put(item, "transform", json_object_new_int(monitor->m_transform));
+                    put(item, "fp16", json_object_new_boolean(monitor->useFP16()));
+                    if (monitor->m_imageDescription)
+                        put(item, "color_description", string(std::format("{}", monitor->m_imageDescription->value())));
+                    json_object_array_add(monitors, item);
+                }
+                put(diagnostic, "monitors", monitors);
+                put(response.get(), "buffers", diagnostic);
+            }
         } else if (op == "apply" || op == "reset") {
             if (op == "reset") keys(input.get(), {"op", "if_epoch", "if_revision"});
             else keys(input.get(), {"op", "if_epoch", "if_revision", "profile", "patch"});

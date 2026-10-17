@@ -42,6 +42,10 @@ def main():
                    XDG_CACHE_HOME=str(BUILD / 'nested-cache'), XDG_STATE_HOME=str(BUILD / 'nested-state'),
                    WAYLAND_DISPLAY=str(parent_socket), HYPRLAND_NO_SD_VARS='1', HYPRLAND_NO_SD_NOTIFY='1')
         env.pop('HYPRLAND_INSTANCE_SIGNATURE', None)
+        # A nested compositor must not acquire the host's logind seat. A failed
+        # DRM probe can otherwise leave Aquamarine with an inactive session.
+        env['LIBSEAT_BACKEND'] = 'seatd'
+        env['SEATD_SOCK'] = str(runtime / 'no-seatd.sock')
         clients = []
         with (BUILD / 'nested.log').open('w') as log:
             compositor = subprocess.Popen(['Hyprland', '--config', str(ROOT / 'tests/nested.lua')], env=env, stdout=log, stderr=log)
@@ -77,6 +81,7 @@ def main():
                 assert shadow.get('bool', shadow.get('int')) == 1, shadow
                 print('PASS: load and Lua configuration (including signed preset values)', flush=True)
                 control = verify_control(ctl)
+                ctl('dismissnotify')
 
                 if shutil.which('kitty') and shutil.which('grim'):
                     backdrop = "import time; print('\\x1b[2J\\x1b[H' + '\\n'.join(''.join('\\x1b[48;2;%d;%d;%dm  ' % (((x//6+y//4)%3==0)*150+20, ((x//6+y//4)%3==1)*140+20, ((x//6+y//4)%3==2)*160+30) for x in range(90)) for y in range(50)), flush=True); time.sleep(120)"
@@ -139,9 +144,22 @@ def main():
                     assert capture('nested-control-tagged-edit') == tagged, 'Runtime edit leaked into an explicitly tagged preset'
                     assert control('reset')['ok']
                     ctl('reload')
+                    # Recreate the foreground after testing dynamic tags: a
+                    # native config reload can retain tags/stacking on the old
+                    # floating fixture, hiding the pane behind its backdrop.
+                    clients[-1].terminate()
+                    clients[-1].wait(timeout=5)
+                    wait_for(lambda: not any(c['class'] == 'hyprliquid-test' for c in json.loads(ctl('-j', 'clients'))), compositor)
+                    clients.append(subprocess.Popen(command, env=env, stdout=log, stderr=log))
+                    fresh = wait_for(lambda: next((c for c in json.loads(ctl('-j', 'clients')) if c['class'] == 'hyprliquid-test'), None), compositor)
+                    address = fresh['address']
+                    window_action(address, 'float', 'action = "enable"')
+                    window_action(address, 'resize', f'x = {width}, y = {height}, relative = false')
+                    window_action(address, 'move', position)
                     print('PASS: idle live edit/reset and per-window preset isolation', flush=True)
                     for preset in ['measured', 'platform', 'lens']:
                         ctl('eval', 'hl.plugin.hyprliquid.config({ default_preset = ' + json.dumps(preset) + ' })')
+                        window_action(address, 'alter_zorder', 'mode = "top"')
                         option = json.loads(ctl('-j', 'getoption', 'plugin:hyprliquid:default_preset'))
                         assert option.get('str') == preset, option
                         window_action(address, 'move', shifted)

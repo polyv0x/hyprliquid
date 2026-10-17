@@ -1,5 +1,7 @@
 #pragma once
 
+struct json_object;
+
 #include "GlassRenderer.hpp"
 #include "PluginConfig.hpp"
 #include "WindowScene.hpp"
@@ -27,6 +29,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
     void                    renderPass(PHLMONITOR monitor, const float& alpha,
                                        const std::shared_ptr<SWindowScene>& scene = {}, bool sceneBase = false);
     [[nodiscard]] bool      usesGlass() const { return resolveEnabled(); }
+    [[nodiscard]] json_object* diagnostics() const;
     void                    onFullscreenStateChanged();
 
     WP<CGlassDecoration> m_self;
@@ -35,9 +38,6 @@ class CGlassDecoration : public IHyprWindowDecoration {
 
   private:
     PHLWINDOWREF m_window;
-    SP<Render::IFramebuffer> m_sampleFramebuffer;
-    SP<Render::IFramebuffer> m_blurredFramebuffer;
-    Vector2D     m_samplePaddingRatio;
 
     // Track last rendered position/size to detect actual changes and seed damage
     Vector2D m_lastPosition;

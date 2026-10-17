@@ -1,5 +1,7 @@
 #pragma once
 
+struct json_object;
+
 #include "GlassRenderer.hpp"
 #include "PluginConfig.hpp"
 
@@ -35,6 +37,7 @@ class CGlassLayerSurface {
     [[nodiscard]] PHLLS getLayerSurface() const;
 
     [[nodiscard]] int samplingPadding(PHLMONITOR monitor) const;
+    [[nodiscard]] json_object* diagnostics() const;
 
   private:
     PHLLSREF     m_layerSurface;

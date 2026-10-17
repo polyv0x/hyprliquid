@@ -5,6 +5,7 @@ Hyprliquid exposes a local JSON request through the plugin's Hyprland IPC hook:
 ```sh
 hyprctl hyprliquid:control '{"op":"describe"}'
 hyprctl hyprliquid:control '{"op":"state"}'
+hyprctl hyprliquid:control '{"op":"buffers"}'
 hyprctl hyprliquid:control '{"op":"apply","profile":{"base_preset":"platform","theme":"dark","enabled":true,"overrides":{"inner_refraction_amount":-20,"rim_opacity":0.4}}}'
 hyprctl hyprliquid:control '{"op":"apply","patch":{"overrides":{"coverage_offset":-0.3}}}'
 hyprctl hyprliquid:control '{"op":"apply","patch":{"reset_fields":["rim_opacity"]}}'
@@ -81,6 +82,39 @@ revision, allowing terminal edits to take control. Plugin unload destroys the
 layer and unregisters the IPC command; a subsequent load gets a new epoch.
 Frontend exit does not affect the renderer: the last accepted runtime material
 remains until reset, a configuration edit/reload, or unload.
+
+`buffers` is available when `describe.capabilities` contains `"buffers"`. It
+adds a `buffers` object without changing state, revisions, damage, allocation,
+or cleanup scheduling. This is an observation of plugin-owned storage; native
+Hyprland work buffers, client surfaces, scanout, driver caches, and physical
+residency are outside its totals.
+
+| Diagnostic field | Meaning |
+| --- | --- |
+| `buffers` | Live allocations, deduplicated by texture; each has an epoch-local `id`, `role`, `owner`, dimensions, `drm_format`, color description/ID, `nominal_bytes`, allocation/reallocation counters, and `last_used_frame` |
+| `retained_bytes` | Nominal bytes in all currently live registered storage |
+| `peak_retained_bytes` | High-water nominal storage observed at allocation points since plugin load |
+| `last_frame_bytes` | Currently live storage touched in the most recent monitor render; expired buffers and other monitors' earlier frames are excluded |
+| `frame`, `last_monitor_id` | Last render serial and monitor; serials are shared across monitors |
+| `allocations`, `reallocations`, `allocation_failures` | Cumulative counts since load, including allocations whose buffers have since expired; reallocations are a subset of successful allocations |
+| `window_pool` | Pair count, nominal bytes, leased bytes, hits, misses, evictions, idle limits and timeout |
+| `cpu_frame_ms` | Up to 256 CPU submission intervals from render begin through post-render; these are not GPU execution or presentation times |
+| `windows`, `layers` | Resolved materials, preset/theme, owner and monitor, geometry; windows also report enablement and padding, layers report namespace and cache state |
+| `monitors` | Output names/IDs, physical size, scale, transform, refresh, FP16 status and color metadata |
+
+Roles distinguish `window-sharp`, `window-blurred`, `scene-background`,
+`scene-windows`, `layer-sharp`, `layer-blurred`, `layer-temp`, `blur-pyramid`, and
+`blur-temp`. Window samples belong to `pool:<id>`, rather than a particular
+window. Owners and color IDs are runtime identifiers, not persistent keys.
+Nominal byte counts use the DRM format's stride/block geometry and exclude
+driver alignment, metadata and compression.
+
+The pool retains at most eight idle pairs or 128 MiB, with one oversized-pair
+exception to avoid allocating on every draw of a large HDR window. Active leases
+are excluded from those idle limits. Unused pairs expire after five seconds;
+unused scenes retire after two. A one-second cleanup timer can add up to one
+second to these delays and never requests redraws. Layer caches remain owned by
+their layer surfaces. See [the allocation and validation report](vram-optimization.md).
 
 Verification:
 

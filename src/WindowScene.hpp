@@ -17,6 +17,10 @@ struct SWindowScene {
 namespace WindowScene {
 bool initialize();
 void destroy();
+void collectUnused();
+bool hasRetired();
+void retireMonitor(MONITORID monitor);
+void finishFrame(MONITORID monitor, uint64_t frame);
 std::shared_ptr<SWindowScene> queuedFor(PHLWINDOW window);
 bool buildingBase();
 }

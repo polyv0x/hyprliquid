@@ -12,6 +12,12 @@ def verify_control(ctl):
     assert len(description['parameters']) == 32
     assert 'superness' not in {p['name'] for p in description['parameters']}
     assert 'test' in {p['id'] for p in description['presets']}
+    if 'buffers' in description['capabilities']:
+        diagnostic = request('buffers')
+        assert diagnostic['ok'] and diagnostic['state'] == description['state']
+        assert diagnostic['buffers']['window_pool']['leased_bytes'] == 0
+        assert diagnostic['buffers']['allocation_failures'] == 0
+        assert diagnostic['buffers']['monitors']
     baseline = description['state']
     assert baseline['base_preset'] == 'test' and not baseline['active'], baseline
     assert math.isclose(baseline['material']['inner_refraction_amount'], -11)

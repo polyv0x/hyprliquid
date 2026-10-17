@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <json-c/json.h>
 #include <hyprland/src/desktop/Workspace.hpp>
 #include <GLES3/gl32.h>
 #include <hyprland/src/render/OpenGL.hpp>
@@ -262,12 +263,11 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
     // limited/no alpha, which would quantize mask values and break the discard.
     DRMFormat tempFormat = (monitor->useFP16()) ? source->m_drmFormat : DRM_FORMAT_ARGB8888;
 
-    if (!m_surfaceTempFramebuffer)
-        m_surfaceTempFramebuffer = g_pHyprRenderer->createFB("hyprliquid-layer-temp");
-
-    if (m_surfaceTempFramebuffer->m_size.x != monitorWidth || m_surfaceTempFramebuffer->m_size.y != monitorHeight ||
-        m_surfaceTempFramebuffer->m_drmFormat != tempFormat)
-        m_surfaceTempFramebuffer->alloc(monitorWidth, monitorHeight, tempFormat);
+    const auto owner = std::format("layer:{:p}", static_cast<void*>(layerSurface.get()));
+    if (!g_pGlobalState->renderBuffers.prepare(m_surfaceTempFramebuffer, monitorWidth, monitorHeight, tempFormat, "layer-temp", owner))
+        return;
+    g_pGlobalState->renderBuffers.identify(m_sampleFramebuffer, "layer-sharp", owner);
+    g_pGlobalState->renderBuffers.identify(m_blurredFramebuffer, "layer-blurred", owner);
 
     m_savedCurrentFB = source;
 
@@ -404,4 +404,30 @@ int CGlassLayerSurface::samplingPadding(PHLMONITOR monitor) const {
     const SResolveContext ctx{preset, resolveThemeIsDark(), g_pGlobalState->config, g_pGlobalState->customPresets};
     const auto material = resolveMaterial(ctx);
     return materialPadding(material, (monitor ? monitor->m_scale : 1.0f) * material.effect_scale);
+}
+
+json_object* CGlassLayerSurface::diagnostics() const {
+    auto* result = json_object_new_object();
+    const auto layer = m_layerSurface.lock();
+    const auto preset = resolvePresetName();
+    const auto material = resolveMaterial({preset, resolveThemeIsDark(), g_pGlobalState->config, g_pGlobalState->customPresets});
+    json_object_object_add(result, "owner", json_object_new_string(std::format("layer:{:p}", static_cast<void*>(layer.get())).c_str()));
+    json_object_object_add(result, "namespace", json_object_new_string(layer ? layer->m_namespace.c_str() : ""));
+    json_object_object_add(result, "preset", json_object_new_string(preset.c_str()));
+    json_object_object_add(result, "dark", json_object_new_boolean(resolveThemeIsDark()));
+    json_object_object_add(result, "cached", json_object_new_boolean(m_hasCachedSample));
+    auto* values = json_object_new_object();
+#define GLASS_PARAM(name, value, lo, hi) json_object_object_add(values, #name, json_object_new_double(material.name));
+#include "MaterialParams.inc"
+#undef GLASS_PARAM
+    json_object_object_add(result, "material", values);
+    if (layer) if (const auto monitor = layer->m_monitor.lock()) {
+        json_object_object_add(result, "monitor_id", json_object_new_int64(monitor->m_id));
+        if (const auto box = LayerGeometry::computeLayerBox(layer, monitor)) {
+            auto* geometry = json_object_new_array();
+            for (double v : {box->x, box->y, box->width, box->height}) json_object_array_add(geometry, json_object_new_double(v));
+            json_object_object_add(result, "pixel_box", geometry);
+        }
+    }
+    return result;
 }

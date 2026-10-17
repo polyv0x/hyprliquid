@@ -34,6 +34,13 @@ build/render-test: tests/render.cpp src/Material.hpp src/MaterialParams.inc src/
 test: build/render-test
 	LIBGL_ALWAYS_SOFTWARE=1 ./build/render-test
 
+# Optional disposable-compositor instrumentation; never part of hyprliquid.so.
+build/capture-test.so: tests/capture.cpp | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared $< $(LDLIBS) -o $@
+
+build/layer-test: tests/layer.cpp | build
+	$(CXX) $(CXXFLAGS) $< -o $@ $$(pkg-config --cflags --libs gtk4 gtk4-layer-shell-0)
+
 build/demo-scene: demo/render.cpp | build
 	$(CXX) $(CXXFLAGS) $< -o $@ $$(pkg-config --cflags --libs egl glesv2)
 

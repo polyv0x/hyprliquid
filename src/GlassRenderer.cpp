@@ -42,11 +42,10 @@ bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IF
     const int dx0 = sx0 - x0, dy0 = sy0 - y0;
     const int dx1 = sx1 - x0, dy1 = sy1 - y0;
 
-    if (!sampleFramebuffer)
-        sampleFramebuffer = g_pHyprRenderer->createFB("hyprliquid-sharp");
-    if (sampleFramebuffer->m_size.x != width || sampleFramebuffer->m_size.y != height ||
-        sampleFramebuffer->m_drmFormat != sourceFramebuffer->m_drmFormat)
-        sampleFramebuffer->alloc(width, height, sourceFramebuffer->m_drmFormat);
+    if (!g_pGlobalState->renderBuffers.prepare(sampleFramebuffer, width, height, sourceFramebuffer->m_drmFormat, "sharp"))
+        return false;
+    g_pGlobalState->renderBuffers.touch(sourceFramebuffer);
+    g_pGlobalState->renderBuffers.touch(neighbours);
 
     outPaddingRatio = Vector2D(static_cast<double>(padding) / width, static_cast<double>(padding) / height);
     g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
@@ -110,14 +109,11 @@ void blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFram
     const int sourceHeight = static_cast<int>(sampleFramebuffer->m_size.y);
     int width = std::max(1, (sourceWidth + 1) / 2);
     int height = std::max(1, (sourceHeight + 1) / 2);
-    auto allocate = [&](SP<Render::IFramebuffer>& framebuffer, int w, int h) {
-        if (!framebuffer)
-            framebuffer = g_pHyprRenderer->createFB("hyprliquid-blur");
-        if (framebuffer->m_size.x != w || framebuffer->m_size.y != h ||
-            framebuffer->m_drmFormat != sampleFramebuffer->m_drmFormat)
-            framebuffer->alloc(w, h, sampleFramebuffer->m_drmFormat);
+    auto allocate = [&](SP<Render::IFramebuffer>& framebuffer, int w, int h, const char* role) {
+        return g_pGlobalState->renderBuffers.prepare(framebuffer, w, h, sampleFramebuffer->m_drmFormat, role);
     };
-    allocate(blurredFramebuffer, width, height);
+    if (!allocate(blurredFramebuffer, width, height, "blurred"))
+        return;
 
     // Preserve the half-resolution result, but prefilter into smaller levels
     // until the Gaussian's taps overlap. Merely stretching the fixed kernel
@@ -131,11 +127,13 @@ void blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFram
         const size_t index = levels.size() - 1;
         if (pyramid.size() <= index)
             pyramid.emplace_back();
-        allocate(pyramid[index], width, height);
+        if (!allocate(pyramid[index], width, height, "blur-pyramid"))
+            return;
         levels.push_back(pyramid[index]);
     }
     auto& temporary = g_pGlobalState->blurTempFramebuffer;
-    allocate(temporary, width, height);
+    if (!allocate(temporary, width, height, "blur-temp"))
+        return;
 
     static constexpr std::array<float, 9> projection{2, 0, 0, 0, 2, 0, -1, -1, 1};
     auto& manager = g_pGlobalState->shaderManager;
@@ -190,6 +188,8 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
                       const Vector2D& paddingRatio, const SResolveContext& resolveContext, const SMaskInfo* mask) {
     if (!sampleFramebuffer || !targetFramebuffer)
         return;
+    g_pGlobalState->renderBuffers.touch(sampleFramebuffer);
+    g_pGlobalState->renderBuffers.touch(blurredFramebuffer);
     auto& manager = g_pGlobalState->shaderManager;
     const auto& uniforms = manager.glassUniforms;
     const auto material = resolveMaterial(resolveContext);

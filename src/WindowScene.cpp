@@ -26,6 +26,9 @@ struct SBuffers {
     PHLMONITORREF monitor;
     SP<Render::IFramebuffer> background;
     SP<Render::IFramebuffer> image;
+    std::weak_ptr<SWindowScene> scene;
+    std::optional<CRenderBuffers::Clock::time_point> retired;
+    uint64_t frame = 0;
 };
 std::unordered_map<MONITORID, SBuffers> buffers;
 
@@ -72,10 +75,11 @@ class CWindowScenePassElement : public IPassElement {
             g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, scissor);
         });
 
-        for (auto& fb : {m_scene->background, m_scene->image}) {
-            if (fb->m_size != source->m_size || fb->m_drmFormat != source->m_drmFormat)
-                if (!fb->alloc(source->m_size.x, source->m_size.y, source->m_drmFormat))
-                    return {};
+        for (auto* framebuffer : {&m_scene->background, &m_scene->image}) {
+            auto& fb = *framebuffer;
+            if (!g_pGlobalState->renderBuffers.prepare(fb, source->m_size.x, source->m_size.y, source->m_drmFormat,
+                    fb == m_scene->background ? "scene-background" : "scene-windows", std::format("monitor:{}", monitor->m_id)))
+                return {};
             fb->setImageDescription(source->imageDescription());
             g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
             glBindFramebuffer(GL_READ_FRAMEBUFFER, fbId(source));
@@ -141,20 +145,33 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
 void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWORKSPACE workspace, const Time::steady_tp& now) {
     auto original = reinterpret_cast<RenderWorkspace>(workspaceHook->m_original);
     auto scene = collectScene(renderer, monitor, workspace);
+    // Ineligible scenes used to return before expired-monitor cleanup. Retirement
+    // drops only the cache's references: queued passes keep their images alive.
+    for (auto& [_, storage] : buffers)
+        if (!storage.monitor && !storage.retired) storage.retired = CRenderBuffers::Clock::now();
     if (!scene) {
+        if (hasRetired()) g_pGlobalState->renderBuffers.scheduleCleanup();
         original(renderer, monitor, workspace, now);
         return;
     }
 
-    std::erase_if(buffers, [](const auto& item) { return !item.second.monitor; });
     auto& storage = buffers[monitor->m_id];
     storage.monitor = monitor;
+    storage.retired.reset();
+    storage.frame = g_pGlobalState->renderBuffers.frame();
+    // Two workspaces can be queued in one frame during transitions. Never
+    // overwrite an earlier queued scene's immutable background or neighbour map.
+    if (!storage.scene.expired()) {
+        storage.background.reset();
+        storage.image.reset();
+    }
     if (!storage.background)
         storage.background = renderer->createFB("hyprliquid-scene-background");
     if (!storage.image)
         storage.image = renderer->createFB("hyprliquid-scene-windows");
     scene->background = storage.background;
     scene->image = storage.image;
+    storage.scene = scene;
 
     auto capture = makeUnique<CWindowScenePassElement>(scene);
     const auto previousScene = queuedScene;
@@ -227,4 +244,32 @@ std::shared_ptr<SWindowScene> queuedFor(PHLWINDOW window) {
 }
 
 bool buildingBase() { return queuingBase; }
+
+void collectUnused() {
+    const auto now = CRenderBuffers::Clock::now();
+    std::erase_if(buffers, [&](const auto& item) {
+        return !item.second.monitor || (item.second.retired && now - *item.second.retired >= std::chrono::seconds(2));
+    });
+}
+
+bool hasRetired() {
+    return std::ranges::any_of(buffers, [](const auto& item) { return !item.second.monitor || item.second.retired.has_value(); });
+}
+
+void retireMonitor(MONITORID monitor) {
+    if (auto it = buffers.find(monitor); it != buffers.end()) {
+        it->second.monitor.reset();
+        it->second.retired = CRenderBuffers::Clock::now();
+        g_pGlobalState->renderBuffers.scheduleCleanup();
+    }
+}
+
+void finishFrame(MONITORID monitor, uint64_t frame) {
+    // This also covers fullscreen/solitary and empty-workspace frames which
+    // bypass renderWorkspaceWindows entirely. Other monitors keep their cache.
+    if (auto it = buffers.find(monitor); it != buffers.end() && it->second.frame != frame && !it->second.retired) {
+        it->second.retired = CRenderBuffers::Clock::now();
+        g_pGlobalState->renderBuffers.scheduleCleanup();
+    }
+}
 } // namespace WindowScene

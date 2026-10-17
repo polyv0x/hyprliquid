@@ -6,6 +6,7 @@
 #include "WindowGeometry.hpp"
 
 #include <algorithm>
+#include <json-c/json.h>
 #include <GLES3/gl32.h>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/desktop/rule/windowRule/WindowRuleApplicator.hpp>
@@ -231,10 +232,30 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     // neighbouring panes outside its bounds and the true backdrop inside.
     const auto backdrop = sceneBase && scene ? scene->background : source;
     const auto neighbours = !sceneBase && scene && scene->ready ? scene->image : nullptr;
-    if (!GlassRenderer::sampleBackground(m_sampleFramebuffer, backdrop, transformBox, m_samplePaddingRatio,
-                                          materialPadding(material, effectScale), neighbours))
+    const int padding = materialPadding(material, effectScale);
+    const int width = std::max(1, static_cast<int>(std::ceil(transformBox.width))) + 2 * padding;
+    const int height = std::max(1, static_cast<int>(std::ceil(transformBox.height))) + 2 * padding;
+    // The lease begins at execution, never while passes are queued. Both the
+    // auxiliary scene and snapshots consume their samples completely here.
+    // All blits/draws use the same GL context and are ordered before the next
+    // lease can overwrite them; no CPU/GPU wait or cross-context reuse is needed.
+    auto samples = g_pGlobalState->renderBuffers.acquire(width, height, backdrop);
+    Vector2D paddingRatio;
+    if (!GlassRenderer::sampleBackground(samples->sharp, backdrop, transformBox, paddingRatio,
+                                          padding, neighbours))
         return;
-    GlassRenderer::blurBackground(m_sampleFramebuffer, m_blurredFramebuffer, material.blur_sigma * effectScale, source);
+    samples->sharp->setImageDescription(backdrop->imageDescription());
+    // A zero-blur consumer passes a null result to the glass shader, but must
+    // not discard storage that another matching window can use next.
+    auto blurred = samples->blurred;
+    GlassRenderer::blurBackground(samples->sharp, blurred, material.blur_sigma * effectScale, source);
+    if (blurred) {
+        samples->blurred = blurred;
+        blurred->setImageDescription(backdrop->imageDescription());
+    }
+    const auto owner = std::format("pool:{}", samples->id);
+    g_pGlobalState->renderBuffers.identify(samples->sharp, "window-sharp", owner);
+    g_pGlobalState->renderBuffers.identify(samples->blurred, "window-blurred", owner);
 
     float monitorScale  = monitor->m_scale;
 
@@ -253,9 +274,37 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     if (const auto workspace = window->m_workspace; workspace && !window->m_pinned)
         glassAlpha *= workspace->m_alpha->value();
 
-    GlassRenderer::applyGlassEffect(m_sampleFramebuffer, m_blurredFramebuffer, source,
+    GlassRenderer::applyGlassEffect(samples->sharp, blurred, source,
                                      windowBox, transformBox, glassAlpha,
-                                     cornerRadius, roundingPower, m_samplePaddingRatio, ctx);
+                                     cornerRadius, roundingPower, paddingRatio, ctx);
+}
+
+json_object* CGlassDecoration::diagnostics() const {
+    auto* result = json_object_new_object();
+    const auto window = m_window.lock();
+    const auto preset = resolvePresetName();
+    const auto material = resolveMaterial({preset, resolveThemeIsDark(), g_pGlobalState->config,
+                                          g_pGlobalState->customPresets, runtimeOverrides()});
+    json_object_object_add(result, "owner", json_object_new_string(std::format("window:{:p}", static_cast<void*>(window.get())).c_str()));
+    json_object_object_add(result, "preset", json_object_new_string(preset.c_str()));
+    json_object_object_add(result, "enabled", json_object_new_boolean(resolveEnabled()));
+    json_object_object_add(result, "dark", json_object_new_boolean(resolveThemeIsDark()));
+    auto* values = json_object_new_object();
+#define GLASS_PARAM(name, value, lo, hi) json_object_object_add(values, #name, json_object_new_double(material.name));
+#include "MaterialParams.inc"
+#undef GLASS_PARAM
+    json_object_object_add(result, "material", values);
+    if (window) if (const auto monitor = window->m_monitor.lock()) {
+        json_object_object_add(result, "monitor_id", json_object_new_int64(monitor->m_id));
+        if (const auto box = WindowGeometry::computeWindowBox(window, monitor)) {
+            auto* geometry = json_object_new_array();
+            for (double v : {box->x, box->y, box->width, box->height})
+                json_object_array_add(geometry, json_object_new_double(v));
+            json_object_object_add(result, "pixel_box", geometry);
+        }
+        json_object_object_add(result, "padding", json_object_new_int(materialPadding(material, monitor->m_scale * material.effect_scale)));
+    }
+    return result;
 }
 
 eDecorationType CGlassDecoration::getDecorationType() {

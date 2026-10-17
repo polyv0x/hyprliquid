@@ -3,6 +3,7 @@
 #include "GlassLayerSurface.hpp"
 #include "PluginConfig.hpp"
 #include "RuntimeControl.hpp"
+#include "RenderBuffers.hpp"
 #include "ShaderManager.hpp"
 
 #include <hyprland/src/plugins/PluginAPI.hpp>
@@ -28,6 +29,7 @@ struct SGlobalState {
     CShaderManager                    shaderManager;
     SPluginConfig                     config;
     SRuntimeControl                   runtimeControl;
+    CRenderBuffers                     renderBuffers;
 
     // User-defined presets (populated from config keyword, swapped in on configReloaded)
     std::unordered_map<std::string, SCustomPreset> customPresets;
