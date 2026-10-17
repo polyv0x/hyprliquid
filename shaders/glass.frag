@@ -5,6 +5,10 @@ precision highp float;
 // Hyprland supplies a cropped, padded backdrop, window geometry and fade alpha.
 uniform sampler2D tex;               // sharp backdrop
 uniform sampler2D blur_texture;
+uniform sampler2D clean_texture;
+uniform sampler2D clean_blur_texture;
+uniform int useNeighborFalloff;
+uniform float neighbor_falloff;
 uniform vec2 fullSize;               // window extent in framebuffer pixels
 uniform vec2 uvPadding;
 uniform float radius;
@@ -113,9 +117,16 @@ float blur_ramp(float depth) {
     return mix(t, a.w, smoothstep(d.z, d.w, depth));
 }
 
-vec3 sample_backdrop(vec2 uv, float blur_t) {
+vec3 sample_backdrop(vec2 uv, float blur_t, float neighborWeight) {
     vec2 padded = backdropUV(uv);
-    return mix(texture(tex, padded).rgb, texture(blur_texture, padded).rgb, blur_t);
+    vec3 sampled = mix(texture(tex, padded).rgb, texture(blur_texture, padded).rgb, blur_t);
+    if (useNeighborFalloff == 1) {
+        // Both backdrops receive identical blur/refraction. Only their
+        // neighbour difference fades; the main frost remains fully present.
+        vec3 clean = mix(texture(clean_texture, padded).rgb, texture(clean_blur_texture, padded).rgb, blur_t);
+        return mix(clean, sampled, neighborWeight);
+    }
+    return sampled;
 }
 
 void main() {
@@ -149,6 +160,10 @@ void main() {
 
     vec2 n = sdf_normal(p);
     float depth = max(-d, 0.0);
+    // A smooth artistic falloff in logical pixels, measured at the receiving
+    // glass surface (including rounded corners), not at displaced sample UVs.
+    // Strength 0.5 halves the neighbour contribution every 16 logical pixels.
+    float neighborWeight = useNeighborFalloff == 1 ? exp2(-depth * neighbor_falloff / 8.0) : 1.0;
     vec2 opticalN = optical_normal(p, depth, n);
     vec3 bg = texture(tex, backdropUV(uv)).rgb;
     float h_outer = clamp(1.0 - depth * outer_refraction_inv_height, 0.0, 1.0);
@@ -163,13 +178,16 @@ void main() {
     vec2 invSize = pixelScale / fullSize;
     float blur_t = blur_ramp(depth);
     vec3 refr = vec3(
-        sample_backdrop(uv + (disp + ab) * invSize, blur_t).r,
-        sample_backdrop(uv + disp * invSize, blur_t).g,
-        sample_backdrop(uv + (disp - ab) * invSize, blur_t).b
+        sample_backdrop(uv + (disp + ab) * invSize, blur_t, neighborWeight).r,
+        sample_backdrop(uv + disp * invSize, blur_t, neighborWeight).g,
+        sample_backdrop(uv + (disp - ab) * invSize, blur_t, neighborWeight).b
     );
 
     float bleed = clamp(1.0 - depth * edge_bleed_inv_height, 0.0, 1.0);
-    vec3 bleed_c = texture(blur_texture, backdropUV(uv + opticalN * edge_bleed_amount * invSize)).rgb;
+    vec2 bleedUV = backdropUV(uv + opticalN * edge_bleed_amount * invSize);
+    vec3 bleed_c = texture(blur_texture, bleedUV).rgb;
+    if (useNeighborFalloff == 1)
+        bleed_c = mix(texture(clean_blur_texture, bleedUV).rgb, bleed_c, neighborWeight);
     bleed_c *= 1.0 - bleed_darken * bleed;
     refr = mix(refr, bleed_c, bleed * edge_bleed_opacity);
     refr = mix(refr, face_color_matrix(refr), face_opacity);

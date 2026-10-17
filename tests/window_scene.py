@@ -34,7 +34,7 @@ while True:
         out = '\x1b[?25l\x1b[0m\x1b[2J'
         for row in range(size.lines):
             out += '\x1b[%d;1H' % (row + 1)
-            if (row // 4) % 2 == data['phase']:
+            if data.get('solid') or (row // 4) % 2 == data['phase']:
                 out += '\x1b[48;2;%d;%d;%dm' % tuple(data['color']) + ' ' * (size.columns - 1) + '\x1b[0m'
         print(out, end='', flush=True)
     time.sleep(0.05)
@@ -132,6 +132,139 @@ while True:
         assert inside(again, window).tobytes() == inside(updated, window).tobytes(), 'Updated reflection changed on focus'
     print(f'PASS: neighbour repaint updates {changed} pixels in the earlier pane without feedback', flush=True)
 
+    def contribution(value):
+        request = {'op': 'apply', 'patch': {'overrides': {'neighbor_contribution': value}}}
+        reply = json.loads(ctl('hyprliquid:control', json.dumps(request)))
+        assert reply['ok'], reply
+        return reply['state']['material']
+
+    allocations = buffers()['allocations'] if initial_buffers else None
+    strengths = {}
+    material = json.loads(ctl('hyprliquid:control', '{"op":"state"}'))['state']['material']
+    for strength in (1, 0.5, 0):
+        current = contribution(strength)
+        assert current == {**material, 'neighbor_contribution': strength}, 'Contribution changed other material settings'
+        focus(windows[0])
+        first = capture(f'scene-contribution-{strength}-left')
+        focus(windows[1])
+        second = capture(f'scene-contribution-{strength}-right')
+        for window in windows:
+            assert inside(first, window).tobytes() == inside(second, window).tobytes(), \
+                f'Contribution {strength} changed on focus'
+        strengths[strength] = second
+    x, y = windows[0]['at']
+    w, h = windows[0]['size']
+    center = (x + w // 3, y + h // 3, x + 2 * w // 3, y + 2 * h // 3)
+    assert len({frame.crop(center).tobytes() for frame in strengths.values()}) == 1, 'Contribution changed the main frost'
+    zero = inside(strengths[0], windows[0], True)
+    distance = {s: sum(sum(p) for p in ImageChops.difference(zero, inside(frame, windows[0], True)).getdata())
+                for s, frame in strengths.items()}
+    assert 0 < distance[0.5] < distance[1], f'Contribution did not weaken the neighbour: {distance}'
+    controls[side].write_text(json.dumps({'color': [20, 200, 70], 'phase': side}))
+    hidden = capture('scene-contribution-zero-repaint')
+    assert inside(hidden, windows[0]).tobytes() == inside(strengths[0], windows[0]).tobytes(), \
+        'Zero contribution leaked the neighbour through the native backdrop'
+    if initial_buffers:
+        assert buffers()['allocations'] == allocations, 'Contribution allocated extra framebuffer storage'
+    assert json.loads(ctl('hyprliquid:control', json.dumps({'op': 'apply', 'patch': {
+        'reset_fields': ['neighbor_contribution']}})))['ok']
+    controls[side].write_text(json.dumps({'color': [30, 60, 240], 'phase': side}))
+    print('PASS: neighbour strength 0/0.5/1, unchanged main frost, focus stability and no extra framebuffers', flush=True)
+
+    def falloff(value):
+        request = {'op': 'apply', 'patch': {'overrides': {'neighbor_falloff': value}}}
+        reply = json.loads(ctl('hyprliquid:control', json.dumps(request)))
+        assert reply['ok'], reply
+
+    full = capture('scene-falloff-zero')
+    falloff_distances = []
+    allocations = None
+    for rate in (0.25, 0.5, 1):
+        falloff(rate)
+        focus(windows[0])
+        first = capture(f'scene-falloff-{rate}-left')
+        focus(windows[1])
+        second = capture(f'scene-falloff-{rate}-right')
+        for window in windows:
+            assert inside(first, window).tobytes() == inside(second, window).tobytes(), f'Falloff {rate} changed on focus'
+        assert second.crop(center).tobytes() == full.crop(center).tobytes(), 'Falloff faded the main frost'
+        distance = sum(sum(p) for p in ImageChops.difference(zero, inside(second, windows[0], True)).getdata())
+        falloff_distances.append(distance)
+        if initial_buffers:
+            current = buffers()
+            assert current['window_pool']['leased_bytes'] == 0, 'Falloff retained a sample lease'
+            assert current['allocation_failures'] == 0
+            assert any(b['role'] == 'window-clean-blurred' for b in current['buffers']), 'Falloff never sampled the clean frost'
+            if allocations is None:
+                allocations = current['allocations']
+            assert current['allocations'] == allocations, 'Falloff adjustment churned framebuffer allocations'
+    assert falloff_distances[0] > falloff_distances[1] > falloff_distances[2] > 0, falloff_distances
+    contribution(0)
+    no_neighbor = capture('scene-falloff-no-neighbor')
+    assert inside(no_neighbor, windows[0]).tobytes() == inside(strengths[0], windows[0]).tobytes(), 'Falloff changed zero contribution'
+    contribution(1)
+    falloff(0)
+    reset = capture('scene-falloff-reset')
+    assert inside(reset, windows[0]).tobytes() == inside(full, windows[0]).tobytes(), 'Falloff zero did not restore identical pixels'
+    # Exercise the additional sample pair while tile geometry overlaps too.
+    falloff(0.25)
+    print('PASS: progressive neighbour falloff, unchanged main frost, exact reset and pooled sample reuse', flush=True)
+
+    # Splitting the right tile creates a temporary overlap: the old neighbour
+    # is still shrinking while the new one opens below it. Neither reflection
+    # may disappear from the unchanged left tile during that transition.
+    focus(windows[1])
+    controls[side].write_text(json.dumps({'color': [30, 60, 240], 'phase': side, 'solid': True}))
+    ctl('eval', 'hl.config({ animations = { enabled = true } }); '
+        'hl.animation({ leaf = "windows", enabled = true, speed = 30, bezier = "linear" }); '
+        'hl.animation({ leaf = "windowsIn", enabled = true, speed = 30, bezier = "linear", style = "popin 92%" }); '
+        'hl.animation({ leaf = "fade", enabled = false })')
+    path = build / 'scene-color-new.json'
+    path.write_text(json.dumps({'color': [20, 200, 70], 'phase': 0, 'solid': True}))
+    new_client = subprocess.Popen([
+        'kitty', '--start-as=normal', '--class', 'hyprliquid-scene-new',
+        '-o', 'remember_window_size=no', '-o', 'background_opacity=0',
+        '-o', 'cursor_blink_interval=0', '-o', 'font_size=16',
+        'python3', '-c', pattern, str(path), '2',
+    ], env=env, stdout=log, stderr=log)
+    clients.append(new_client)
+    wait(lambda: len(json.loads(ctl('-j', 'clients'))) == 3)
+    opening = []
+    for frame in range(3):
+        pixels = inside(capture(f'scene-split-opening-{frame}'), windows[0], True)
+        upper = pixels.crop((0, 0, pixels.width, pixels.height // 2))
+        lower = pixels.crop((0, pixels.height // 2, pixels.width, pixels.height))
+        blue = sum(b > max(r, g) + 20 and b > 60 for r, g, b in upper.getdata())
+        green = sum(g > max(r, b) + 20 and g > 60 for r, g, b in lower.getdata())
+        sample = {'blue': blue, 'green': green}
+        if initial_buffers:
+            sample['boxes'] = [w['pixel_box'] for w in buffers()['windows']]
+        opening.append(sample)
+    (build / 'scene-split-opening.json').write_text(json.dumps(opening, indent=2))
+    if initial_buffers:
+        overlaps = []
+        for sample in opening:
+            right = sorted(sample['boxes'], key=lambda b: b[0])[1:]
+            assert len(right) == 2, sample
+            a, b = right
+            overlaps.append(min(a[1] + a[3], b[1] + b[3]) > max(a[1], b[1]))
+        assert any(overlaps), f'Fixture did not exercise overlapping animated tiles: {opening}'
+        assert opening[0]['boxes'] != opening[-1]['boxes'], 'Fixture captured settled geometry'
+    assert all(p['blue'] > 100 and p['green'] > 100 for p in opening), \
+        f'Opening a right-hand split lost neighbour reflections on the left: {opening}'
+    time.sleep(3)
+    new_client.terminate()
+    new_client.wait(timeout=5)
+    wait(lambda: len(json.loads(ctl('-j', 'clients'))) == 2)
+    closing = inside(capture('scene-split-closing'), windows[0], True)
+    assert sum(b > max(r, g) + 20 and b > 60 for r, g, b in closing.getdata()) > 100, \
+        'Closing a right-hand split lost the remaining neighbour reflection'
+    time.sleep(3)
+    ctl('eval', 'hl.config({ animations = { enabled = false } })')
+    controls[side].write_text(json.dumps({'color': [30, 60, 240], 'phase': side}))
+    falloff(0)
+    print('PASS: opening and closing a right-hand split preserve neighbour reflections during animation', flush=True)
+
     monitor_name = json.loads(ctl('-j', 'monitors'))[0]['name']
     for scale, transform in ((1.25, 0), (1, 1)):
         ctl('eval', 'hl.monitor({ output = ' + json.dumps(monitor_name) +
@@ -140,18 +273,23 @@ while True:
         windows = sorted(json.loads(ctl('-j', 'clients')), key=lambda w: tuple(w['at']))
         side = int(windows[1]['class'].rsplit('-', 1)[1])
         phase = 0 if transform else side
-        controls[side].write_text(json.dumps({'color': [30, 60, 240], 'phase': phase}))
-        focus(windows[0])
-        first = capture(f'scene-scale-{scale}-transform-{transform}-left')
-        focus(windows[1])
-        second = capture(f'scene-scale-{scale}-transform-{transform}-right')
-        for window in windows:
-            assert inside(first, window).tobytes() == inside(second, window).tobytes(), f'Focus changed optics at scale {scale}, transform {transform}'
-        controls[side].write_text(json.dumps({'color': [20, 200, 70], 'phase': phase}))
-        updated = capture(f'scene-scale-{scale}-transform-{transform}-repaint')
-        difference = ImageChops.difference(inside(second, windows[0]), inside(updated, windows[0]))
-        assert sum(max(pixel) > 4 for pixel in difference.getdata()) > 100, f'Neighbour missing at scale {scale}, transform {transform}'
-        print(f'PASS: live, focus-stable neighbour optics at scale {scale}, transform {transform}', flush=True)
+        for strength, rate in ((0, 0), (0, 1), (0.5, 0), (0.5, 0.5), (1, 0), (1, 0.5)):
+            contribution(strength)
+            falloff(rate)
+            controls[side].write_text(json.dumps({'color': [30, 60, 240], 'phase': phase}))
+            name = f'scene-scale-{scale}-transform-{transform}-contribution-{strength}-falloff-{rate}'
+            focus(windows[0])
+            first = capture(name + '-left')
+            focus(windows[1])
+            second = capture(name + '-right')
+            for window in windows:
+                assert inside(first, window).tobytes() == inside(second, window).tobytes(), f'Focus changed optics: {name}'
+            controls[side].write_text(json.dumps({'color': [20, 200, 70], 'phase': phase}))
+            updated = capture(name + '-repaint')
+            difference = ImageChops.difference(inside(second, windows[0]), inside(updated, windows[0]))
+            changed = sum(max(pixel) > 4 for pixel in difference.getdata())
+            assert (changed == 0 if strength == 0 else changed > 100), f'Wrong neighbour contribution: {name}, {changed}'
+        print(f'PASS: focus-stable neighbour contribution and falloff at scale {scale}, transform {transform}', flush=True)
 
     # Closing the neighbour must not leave its old capture behind. Repeated
     # captures of the remaining resized pane should settle to the same pixels.

@@ -7,7 +7,8 @@
 
 namespace WindowGeometry {
 
-[[nodiscard]] inline std::optional<CBox> computeWindowBox(PHLWINDOW window, PHLMONITOR monitor) {
+[[nodiscard]] inline std::optional<CBox> computeWindowBox(PHLWINDOW window, PHLMONITOR monitor,
+        Desktop::View::IGeometric::eGeometricValueType geometry = Desktop::View::IGeometric::GEOMETRIC_CURRENT) {
     if (!window || !monitor)
         return std::nullopt;
 
@@ -16,7 +17,7 @@ namespace WindowGeometry {
         ? workspace->m_renderOffset->value()
         : Vector2D();
 
-    auto box = window->getWindowMainSurfaceBox();
+    auto box = window->geometricBox(geometry);
     box.translate(workspaceOffset);
     box.translate(-monitor->m_position + window->m_floatingOffset);
     box.scale(monitor->m_scale);

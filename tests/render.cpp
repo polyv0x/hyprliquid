@@ -119,6 +119,7 @@ static void parameters(const Program& p, const SMaterial& m, float scale, int wi
 #undef GLASS_PARAM
     if (!reference) {
         p.i("tex", 0); p.i("blur_texture", 1); p.i("maskTex", 2); p.i("useMask", 0);
+        p.i("clean_texture", 3); p.i("clean_blur_texture", 4); p.i("useNeighborFalloff", 0);
         p.v2("fullSize", ww, wh);
         p.v2("uvPadding", float(width - ww) / (2 * width), float(height - wh) / (2 * height));
         p.f("radius", 56 * scale); p.f("roundingPower", roundingPower); p.f("pixelScale", scale); p.f("fadeAlpha", 1);
@@ -245,6 +246,111 @@ static void opticalCorners(const Program& native, const Program& legacy) {
     std::cout << "PASS: " << comparisons << " corner continuity checks, unchanged straight edges, coverage and rim.\n";
 }
 
+static void neighborFalloff(const Program& shader) {
+    // Uniform, contrasting backdrops isolate the fade from the refraction
+    // displacement. Check the specified half-distance and output-scale units.
+    constexpr std::array<unsigned char, 4> sceneColor{180, 80, 60, 255}, cleanColor{20, 120, 200, 255};
+    SMaterial material;
+    material.face_opacity = material.rim_opacity = material.shadow_amount = 0;
+    material.edge_bleed_opacity = material.holding_tone_opacity = 0;
+    int comparisons = 0;
+    for (float scale : {1.0f, 1.25f, 2.0f}) {
+        const int w = 160 * scale, h = 96 * scale;
+        std::vector<unsigned char> scenePixels(w * h * 4), cleanPixels(w * h * 4);
+        for (int i = 0; i < w * h; ++i) for (int c = 0; c < 4; ++c) {
+            scenePixels[i * 4 + c] = sceneColor[c];
+            cleanPixels[i * 4 + c] = cleanColor[c];
+        }
+        Target scene(w, h, scenePixels.data()), clean(w, h, cleanPixels.data()), result(w, h);
+        for (float rate : {0.0f, 0.25f, 0.5f, 1.0f}) {
+            material.neighbor_falloff = rate;
+            result.bind(); parameters(shader, material, scale, w, h, w, h, false, 2);
+            shader.f("radius", 0); shader.i("useNeighborFalloff", 1);
+            scene.sample(0); scene.sample(1); clean.sample(3); clean.sample(4);
+            glDisable(GL_BLEND); quad();
+            const auto pixels = result.pixels();
+            for (int y = 3; y < h - 3; ++y) for (int x = 3; x < w - 3; ++x) {
+                const float depth = std::min({x + 0.5f, y + 0.5f, w - x - 0.5f, h - y - 0.5f}) / scale;
+                const float weight = std::exp2(-depth * rate / 8.0f);
+                for (int c = 0; c < 3; ++c) {
+                    const float expected = cleanColor[c] + weight * (sceneColor[c] - cleanColor[c]);
+                    require(std::abs(pixels[(y * w + x) * 4 + c] - expected) <= 0.6f,
+                            "Neighbour falloff changed its curve or logical-pixel distance");
+                }
+                require(pixels[(y * w + x) * 4 + 3] == 255, "Neighbour falloff changed glass opacity");
+            }
+            ++comparisons;
+        }
+        // With no neighbour difference, a frosted material must render exactly
+        // the same pixels. Use distinct sharp/blur colours so losing the blur
+        // or changing edge bleed, tone, rim or fade cannot silently pass.
+        material = presetMaterial("clear-edge");
+        material.neighbor_falloff = 1;
+        std::vector<unsigned char> baseline;
+        for (bool enabled : {false, true}) {
+            result.bind(); parameters(shader, material, scale, w, h, w, h, false, 3.6f);
+            shader.i("useNeighborFalloff", enabled ? 1 : 0);
+            shader.f("fadeAlpha", 0.6f);
+            scene.sample(0); clean.sample(1); scene.sample(3); clean.sample(4);
+            glDisable(GL_BLEND); quad();
+            if (enabled)
+                require(result.pixels() == baseline, "Neighbour falloff faded the main frosted material");
+            else
+                baseline = result.pixels();
+        }
+        // Restore the isolated material for the next output scale.
+        material = SMaterial{};
+        material.face_opacity = material.rim_opacity = material.shadow_amount = 0;
+        material.edge_bleed_opacity = material.holding_tone_opacity = 0;
+        require(glGetError() == GL_NO_ERROR, "Neighbour falloff OpenGL error");
+    }
+    std::cout << "PASS: " << comparisons << " neighbour falloff curves and unchanged frost/opacity at 3 output scales.\n";
+}
+
+static void sceneSampling() {
+    Program shader(read("shaders/scene-sample.frag"), false);
+    // Distinct native/scene/background images catch use of an earlier-drawn
+    // neighbour as the zero-strength backdrop. Asymmetric sizes expose flips.
+    constexpr int w = 19, h = 13, sw = 29, sh = 23;
+    std::array<std::vector<unsigned char>, 3> inputs;
+    for (int source = 0; source < 3; ++source) {
+        inputs[source].resize(w * h * 4);
+        for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x)
+            for (int c = 0; c < 4; ++c)
+                inputs[source][(y * w + x) * 4 + c] = (x * 17 + y * 29 + source * 71 + c * 43) % 256;
+    }
+    Target native(w, h, inputs[0].data()), scene(w, h, inputs[1].data()), background(w, h, inputs[2].data());
+    Target sample(sw, sh);
+    int comparisons = 0;
+    for (const auto& owner : std::array<std::array<int, 4>, 3>{{{3, 2, 15, 10}, {-2, -1, 6, 8}, {13, 8, 23, 17}}}) {
+        const int ox = owner[0] - 5, oy = owner[1] - 5;
+        for (float strength : {0.0f, 0.25f, 0.5f, 1.0f}) {
+            sample.bind(); shader.use();
+            shader.i("tex", 0); shader.i("sceneTex", 1); shader.i("backgroundTex", 2);
+            glUniform2i(shader.loc("sampleOrigin"), ox, oy);
+            glUniform4iv(shader.loc("ownerBounds"), 1, owner.data());
+            shader.f("neighborContribution", strength);
+            native.sample(0); scene.sample(1); background.sample(2);
+            glDisable(GL_BLEND); quad();
+            const auto result = sample.pixels();
+            for (int y = 0; y < sh; ++y) for (int x = 0; x < sw; ++x) {
+                const int px = std::clamp(x + ox, 0, w - 1), py = std::clamp(y + oy, 0, h - 1);
+                const bool inside = px >= owner[0] && py >= owner[1] && px < owner[2] && py < owner[3];
+                for (int c = 0; c < 4; ++c) {
+                    const int src = (py * w + px) * 4 + c, dst = (y * sw + x) * 4 + c;
+                    const float expected = inside ? inputs[0][src] :
+                        inputs[2][src] * (1 - strength) + inputs[1][src] * strength;
+                    require(std::abs(result[dst] - expected) <= (inside ? 0 : 0.51f),
+                            "Scene sampling changed owner pixels, neighbour strength or offscreen gutters");
+                }
+            }
+            require(glGetError() == GL_NO_ERROR, "Scene sampling OpenGL error");
+            ++comparisons;
+        }
+    }
+    std::cout << "PASS: " << comparisons << " neighbour blends, exact owner pixels and clamped offscreen gutters.\n";
+}
+
 int main() try {
     auto display = eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
     require(display != EGL_NO_DISPLAY && eglInitialize(display, nullptr, nullptr), "Cannot initialize surfaceless EGL");
@@ -264,6 +370,8 @@ int main() try {
     const float vertices[]{0,0, 1,0, 0,1, 1,1}; glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
     glDisable(GL_DITHER);
+    sceneSampling();
+    neighborFalloff(native);
     bool passed = true;
     int comparisons = 0;
     std::vector<std::string> presets;

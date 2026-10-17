@@ -9,7 +9,11 @@ def verify_control(ctl, config_path):
 
     description = request('describe')
     assert description['ok'] and description['api'] == 1, description
-    assert len(description['parameters']) == 32
+    assert len(description['parameters']) == 34
+    neighbor = next(p for p in description['parameters'] if p['name'] == 'neighbor_contribution')
+    assert (neighbor['min'], neighbor['max'], neighbor['default']) == (0, 1, 1)
+    falloff = next(p for p in description['parameters'] if p['name'] == 'neighbor_falloff')
+    assert (falloff['min'], falloff['max'], falloff['default']) == (0, 1, 0)
     assert 'superness' not in {p['name'] for p in description['parameters']}
     assert 'test' in {p['id'] for p in description['presets']}
     if 'buffers' in description['capabilities']:
@@ -49,12 +53,15 @@ def verify_control(ctl, config_path):
     assert request('reset')['ok']
 
     applied = request('apply', profile={'base_preset': 'platform', 'theme': 'light', 'enabled': False,
-                                      'overrides': {'inner_refraction_amount': -37, 'coverage_offset': -0.75, 'rim_opacity': 0.12}})
+                                      'overrides': {'inner_refraction_amount': -37, 'coverage_offset': -0.75, 'rim_opacity': 0.12,
+                                                    'neighbor_contribution': 0.375, 'neighbor_falloff': 0.5}})
     assert applied['ok'], applied
     state = applied['state']
     assert not state['enabled'] and state['theme'] == 'light'
     assert state['material']['inner_refraction_amount'] == -37
     assert state['material']['coverage_offset'] == -0.75
+    assert state['material']['neighbor_contribution'] == 0.375
+    assert state['material']['neighbor_falloff'] == 0.5
     assert math.isclose(state['material']['rim_opacity'], 0.12, abs_tol=1e-6)
     assert state['material']['rim_opacity'] != state['inherited']['rim_opacity']
     assert state['baseline'] == baseline['baseline']
@@ -66,6 +73,10 @@ def verify_control(ctl, config_path):
         {'overrides': {'rim_opacity': float('inf')}},
         {'overrides': {'rim_opacity': True}},
         {'overrides': {'rim_opacity': '0.2'}},
+        {'overrides': {'neighbor_contribution': -0.01}},
+        {'overrides': {'neighbor_contribution': 1.01}},
+        {'overrides': {'neighbor_falloff': -0.01}},
+        {'overrides': {'neighbor_falloff': 1.01}},
         {'base_preset': 'absent'}, {'base_preset': 'cycle'},
         {'theme': 'auto'}, {'enabled': 1}, {'surprise': 1},
         {'reset_fields': ['rim_opacity', 'unknown']},

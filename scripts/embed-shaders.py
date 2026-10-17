@@ -5,7 +5,7 @@ import sys
 
 root = Path(__file__).resolve().parent.parent
 entries = []
-for name in ("glass.frag", "blur.frag"):
+for name in ("glass.frag", "blur.frag", "scene-sample.frag"):
     source = (root / "shaders" / name).read_text()
     if ')GLSL"' in source:
         raise ValueError("Shader contains the C++ raw-string delimiter")

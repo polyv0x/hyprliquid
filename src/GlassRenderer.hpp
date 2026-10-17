@@ -41,7 +41,8 @@ struct SMaskInfo {
 
 bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IFramebuffer> sourceFramebuffer,
                        CBox box, Vector2D& outPaddingRatio, int padding = SAMPLE_PADDING_PX,
-                       SP<Render::IFramebuffer> neighbours = nullptr);
+                       SP<Render::IFramebuffer> neighbours = nullptr,
+                       SP<Render::IFramebuffer> sceneBackground = nullptr, float neighborContribution = 1.0f);
 
 // callerFramebuffer is re-bound after the blur ping-pong; the viewport is
 // restored from its size so it always matches the re-bound framebuffer
@@ -57,6 +58,7 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
                        CBox& rawBox, CBox& transformedBox,
                        float alpha, float cornerRadius, float roundingPower,
                        const Vector2D& paddingRatio, const SResolveContext& resolveContext,
-                       const SMaskInfo* mask = nullptr);
+                       const SMaskInfo* mask = nullptr,
+                       SP<Render::IFramebuffer> cleanSample = nullptr, SP<Render::IFramebuffer> cleanBlurred = nullptr);
 
 } // namespace GlassRenderer

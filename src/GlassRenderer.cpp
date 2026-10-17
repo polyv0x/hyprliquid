@@ -24,7 +24,8 @@ static void bindTexture(const SP<Render::IFramebuffer>& framebuffer, GLenum unit
 }
 
 bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IFramebuffer> sourceFramebuffer,
-                      CBox box, Vector2D& outPaddingRatio, int padding, SP<Render::IFramebuffer> neighbours) {
+                      CBox box, Vector2D& outPaddingRatio, int padding, SP<Render::IFramebuffer> neighbours,
+                      SP<Render::IFramebuffer> sceneBackground, float neighborContribution) {
     if (!sourceFramebuffer || !std::isfinite(box.x) || !std::isfinite(box.y) ||
         !std::isfinite(box.width) || !std::isfinite(box.height) || box.width <= 0 || box.height <= 0)
         return false;
@@ -54,6 +55,40 @@ bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IF
                                neighbours->m_drmFormat == sourceFramebuffer->m_drmFormat;
     const int ownX0 = std::floor(box.x), ownY0 = std::floor(box.y);
     const int ownX1 = std::ceil(box.x + box.width), ownY1 = std::ceil(box.y + box.height);
+    if (useNeighbours && neighborContribution < 1.0f && sceneBackground &&
+        sceneBackground->m_size == sourceFramebuffer->m_size && sceneBackground->m_drmFormat == sourceFramebuffer->m_drmFormat) {
+        // The native source may already contain earlier-drawn neighbours.
+        // Fade towards the immutable scene background outside the owner, so
+        // strength zero and partial strengths cannot depend on focus/order.
+        // Keep the owner's real backdrop intact; blur and glass run normally.
+        g_pGlobalState->renderBuffers.touch(sceneBackground);
+        GLint viewport[4];
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        const bool blend = glIsEnabled(GL_BLEND);
+        g_pHyprOpenGL->setCapStatus(GL_BLEND, false);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbId(sampleFramebuffer));
+        g_pHyprOpenGL->setViewport(0, 0, width, height);
+        static constexpr std::array<float, 9> projection{2, 0, 0, 0, 2, 0, -1, -1, 1};
+        auto& manager = g_pGlobalState->shaderManager;
+        auto shader = g_pHyprOpenGL->useShader(manager.sceneSampleShader);
+        shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_FALSE, projection);
+        shader->setUniformInt(SHADER_TEX, 0);
+        glUniform1i(manager.sceneSampleUniforms.sceneTex, 1);
+        glUniform1i(manager.sceneSampleUniforms.backgroundTex, 2);
+        glUniform2i(manager.sceneSampleUniforms.sampleOrigin, x0, y0);
+        glUniform4i(manager.sceneSampleUniforms.ownerBounds, ownX0, ownY0, ownX1, ownY1);
+        glUniform1f(manager.sceneSampleUniforms.neighborContribution, std::clamp(neighborContribution, 0.0f, 1.0f));
+        bindTexture(sourceFramebuffer, GL_TEXTURE0);
+        bindTexture(neighbours, GL_TEXTURE1);
+        bindTexture(sceneBackground, GL_TEXTURE2);
+        glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glBindVertexArray(0);
+        glActiveTexture(GL_TEXTURE0);
+        g_pHyprOpenGL->setViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        g_pHyprOpenGL->setCapStatus(GL_BLEND, blend);
+        return true;
+    }
     auto copy = [&](int ax, int ay, int bx, int by, int cx, int cy, int dx, int dy) {
         glBindFramebuffer(GL_READ_FRAMEBUFFER, fbId(sourceFramebuffer));
         glBlitFramebuffer(ax, ay, bx, by, cx, cy, dx, dy, GL_COLOR_BUFFER_BIT, GL_NEAREST);
@@ -185,11 +220,14 @@ void blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFram
 void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFramebuffer> blurredFramebuffer,
                       SP<Render::IFramebuffer> targetFramebuffer, CBox& rawBox, CBox& transformedBox,
                       float alpha, float cornerRadius, float roundingPower,
-                      const Vector2D& paddingRatio, const SResolveContext& resolveContext, const SMaskInfo* mask) {
+                      const Vector2D& paddingRatio, const SResolveContext& resolveContext, const SMaskInfo* mask,
+                      SP<Render::IFramebuffer> cleanSample, SP<Render::IFramebuffer> cleanBlurred) {
     if (!sampleFramebuffer || !targetFramebuffer)
         return;
     g_pGlobalState->renderBuffers.touch(sampleFramebuffer);
     g_pGlobalState->renderBuffers.touch(blurredFramebuffer);
+    g_pGlobalState->renderBuffers.touch(cleanSample);
+    g_pGlobalState->renderBuffers.touch(cleanBlurred);
     auto& manager = g_pGlobalState->shaderManager;
     const auto& uniforms = manager.glassUniforms;
     const auto material = resolveMaterial(resolveContext);
@@ -205,6 +243,11 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(mask->target, mask->textureId);
     }
+    const bool falloff = cleanSample && material.neighbor_falloff > 0.0f;
+    if (falloff) {
+        bindTexture(cleanSample, GL_TEXTURE3);
+        bindTexture(cleanBlurred ? cleanBlurred : cleanSample, GL_TEXTURE4);
+    }
     glActiveTexture(GL_TEXTURE0);
 
     auto shader = g_pHyprOpenGL->useShader(manager.glassShader);
@@ -214,6 +257,9 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
     shader->setUniformFloat(SHADER_RADIUS, cornerRadius);
     shader->setUniformFloat(SHADER_ROUNDING_POWER, roundingPower);
     glUniform1i(uniforms.blurTexture, 1);
+    glUniform1i(uniforms.cleanTexture, 3);
+    glUniform1i(uniforms.cleanBlurTexture, 4);
+    glUniform1i(uniforms.useNeighborFalloff, falloff ? 1 : 0);
     glUniform1f(uniforms.pixelScale, g_pHyprRenderer->m_renderData.pMonitor->m_scale * material.effect_scale);
     glUniform1f(uniforms.fadeAlpha, std::clamp(alpha, 0.0f, 1.0f));
     glUniform2f(uniforms.uvPadding, paddingRatio.x, paddingRatio.y);

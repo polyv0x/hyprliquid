@@ -12,6 +12,9 @@ struct SGlassUniforms {
     GLint blurTexture = -1;
     GLint pixelScale = -1;
     GLint fadeAlpha = -1;
+    GLint cleanTexture = -1;
+    GLint cleanBlurTexture = -1;
+    GLint useNeighborFalloff = -1;
 
     // Layers only: temp FBO surface mask for content-aware glass
     GLint maskTex = -1;
@@ -29,6 +32,14 @@ struct SBlurUniforms {
     GLint filterMode = -1;
 };
 
+struct SSceneSampleUniforms {
+    GLint sceneTex = -1;
+    GLint backgroundTex = -1;
+    GLint sampleOrigin = -1;
+    GLint ownerBounds = -1;
+    GLint neighborContribution = -1;
+};
+
 class CShaderManager {
   public:
     [[nodiscard]] bool isInitialized() const noexcept { return m_initialized; }
@@ -42,10 +53,14 @@ class CShaderManager {
     SP<CShader>    blurShader = makeShared<CShader>();
     SBlurUniforms  blurUniforms;
 
+    SP<CShader> sceneSampleShader = makeShared<CShader>();
+    SSceneSampleUniforms sceneSampleUniforms;
+
   private:
     bool m_initialized = false;
 
     [[nodiscard]] static std::string loadShaderSource(const char* fileName);
     [[nodiscard]] bool compileGlassShader();
     [[nodiscard]] bool compileBlurShader();
+    [[nodiscard]] bool compileSceneSampleShader();
 };

@@ -242,7 +242,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     auto samples = g_pGlobalState->renderBuffers.acquire(width, height, backdrop);
     Vector2D paddingRatio;
     if (!GlassRenderer::sampleBackground(samples->sharp, backdrop, transformBox, paddingRatio,
-                                          padding, neighbours))
+                                          padding, neighbours, scene ? scene->background : nullptr, material.neighbor_contribution))
         return;
     samples->sharp->setImageDescription(backdrop->imageDescription());
     // A zero-blur consumer passes a null result to the glass shader, but must
@@ -274,9 +274,35 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     if (const auto workspace = window->m_workspace; workspace && !window->m_pinned)
         glassAlpha *= workspace->m_alpha->value();
 
-    GlassRenderer::applyGlassEffect(samples->sharp, blurred, source,
-                                     windowBox, transformBox, glassAlpha,
-                                     cornerRadius, roundingPower, paddingRatio, ctx);
+    auto draw = [&](SP<Render::IFramebuffer> cleanSharp = nullptr, SP<Render::IFramebuffer> cleanBlurred = nullptr) {
+        GlassRenderer::applyGlassEffect(samples->sharp, blurred, source,
+                                         windowBox, transformBox, glassAlpha,
+                                         cornerRadius, roundingPower, paddingRatio, ctx, nullptr,
+                                         cleanSharp, cleanBlurred);
+    };
+    if (neighbours && material.neighbor_contribution > 0.0f && material.neighbor_falloff > 0.0f) {
+        // Keep a second pooled sample only while drawing this window. Its
+        // clean backdrop follows identical optics, so inward falloff removes
+        // neighbour content without fading the receiving pane's main frost.
+        auto clean = g_pGlobalState->renderBuffers.acquire(width, height, backdrop);
+        Vector2D cleanPadding;
+        if (GlassRenderer::sampleBackground(clean->sharp, backdrop, transformBox, cleanPadding,
+                                            padding, neighbours, scene->background, 0.0f)) {
+            clean->sharp->setImageDescription(backdrop->imageDescription());
+            auto cleanBlurred = clean->blurred;
+            GlassRenderer::blurBackground(clean->sharp, cleanBlurred, material.blur_sigma * effectScale, source);
+            if (cleanBlurred) {
+                clean->blurred = cleanBlurred;
+                cleanBlurred->setImageDescription(backdrop->imageDescription());
+            }
+            const auto cleanOwner = std::format("pool:{}", clean->id);
+            g_pGlobalState->renderBuffers.identify(clean->sharp, "window-clean-sharp", cleanOwner);
+            g_pGlobalState->renderBuffers.identify(clean->blurred, "window-clean-blurred", cleanOwner);
+            draw(clean->sharp, cleanBlurred);
+            return;
+        }
+    }
+    draw();
 }
 
 json_object* CGlassDecoration::diagnostics() const {

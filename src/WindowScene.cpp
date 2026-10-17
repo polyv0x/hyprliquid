@@ -124,11 +124,14 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
         if (!ignoreSpecial && workspace->m_isSpecialWorkspace != window->onSpecialWorkspace())
             continue;
 
-        // Overlapping/stacked tiles and transformed windows must keep native
-        // occlusion. Their visible neighbours really can change on focus.
+        // Overlapping/stacked layouts and transformed windows must keep native
+        // occlusion. Test the destination layout: opening a split temporarily
+        // overlaps the new tile with its still-shrinking neighbour. Rejecting
+        // that overlap drops reflections from every pane until motion stops.
+        // Capture and glass sampling still use each frame's animated geometry.
         if (!window->m_transformers.empty())
             return nullptr;
-        const auto box = WindowGeometry::computeWindowBox(window, monitor);
+        const auto box = WindowGeometry::computeWindowBox(window, monitor, Desktop::View::IGeometric::GEOMETRIC_GOAL);
         if (!box)
             return nullptr;
         for (const auto& other : boxes)
