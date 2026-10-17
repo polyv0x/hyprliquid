@@ -43,6 +43,8 @@ struct SPresetValues {
 struct SCustomPreset {
     std::string   name;
     std::string   inherits;
+    // Compatibility aliases stay usable without duplicating the preset picker.
+    bool          hidden = false;
     SPresetValues shared;
     SPresetValues dark;
     SPresetValues light;

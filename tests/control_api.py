@@ -22,6 +22,13 @@ def verify_control(ctl):
     assert baseline['base_preset'] == 'test' and not baseline['active'], baseline
     assert math.isclose(baseline['material']['inner_refraction_amount'], -11)
 
+    # An explicitly customized old name remains selectable under its own id.
+    assert 'frosted-full' in {p['id'] for p in description['presets']}
+    customized = request('apply', profile={'base_preset': 'frosted-full'})
+    assert customized['ok'] and customized['state']['base_preset'] == 'frosted-full'
+    assert customized['state']['material']['blur_sigma'] == 9
+    assert request('reset')['ok']
+
     applied = request('apply', profile={'base_preset': 'platform', 'theme': 'light', 'enabled': False,
                                       'overrides': {'inner_refraction_amount': -37, 'coverage_offset': -0.75, 'rim_opacity': 0.12}})
     assert applied['ok'], applied

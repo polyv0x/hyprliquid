@@ -44,7 +44,7 @@ void registerConfig(HANDLE handle) {
     addConfigValue<Config::Values::Int>(handle, ConfigKeys::ENABLED, Config::INTEGER{1});
     addConfigValue<Config::Values::Int>(handle, ConfigKeys::MANAGE_WINDOW_BLUR, Config::INTEGER{1});
     addConfigValue<Config::Values::String>(handle, ConfigKeys::DEFAULT_THEME, Config::STRING{"dark"});
-    addConfigValue<Config::Values::String>(handle, ConfigKeys::DEFAULT_PRESET, Config::STRING{"measured"});
+    addConfigValue<Config::Values::String>(handle, ConfigKeys::DEFAULT_PRESET, Config::STRING{"frosted"});
 
     // Layer surface support
     addConfigValue<Config::Values::Int>(handle, ConfigKeys::LAYERS_ENABLED, Config::INTEGER{0});
@@ -240,6 +240,7 @@ void commitPendingPresets() {
     auto merged = BuiltInPresets::getAll();
     for (auto& [name, userPreset] : s_pendingPresets) {
         if (auto it = merged.find(name); it != merged.end()) {
+            it->second.hidden = false;
             if (!userPreset.inherits.empty())
                 it->second.inherits = userPreset.inherits;
             mergePresetValues(it->second.shared, userPreset.shared);
@@ -561,7 +562,7 @@ static float resolvePresetFloatImpl(
 
             if (!preset.inherits.empty())
                 return resolvePresetFloatImpl(preset.inherits, isDark, presetField, configField,
-                                             config, customPresets, hardcodedDefault, depth + 1);
+                                             config, customPresets, hardcodedDefault, depth + (preset.hidden ? 0 : 1));
         }
     }
 

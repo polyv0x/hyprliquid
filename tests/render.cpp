@@ -261,6 +261,11 @@ int main() try {
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
     glDisable(GL_DITHER);
     bool passed = true;
+    int comparisons = 0;
+    std::vector<std::string> presets;
+    for (const auto& [name, preset] : BuiltInPresets::getAll())
+        if (!preset.hidden) presets.push_back(name);
+    std::ranges::sort(presets);
     // Cover output scaling and Hyprland's full corner-power range, including
     // triangular and intermediate corners that must not be clamped to circles.
     for (const auto [scale, roundingPower] : std::initializer_list<std::pair<float, float>>{
@@ -277,9 +282,9 @@ int main() try {
         }
         Target sharp(w, h, pixels.data()), temp(w/2, h/2), blurred(w/2, h/2), refBlur(w/2, h/2);
         Target actual(w, h), expected(w, h);
-        for (const std::string name : {"measured", "platform", "lighter", "darker", "ultra_darker", "lens", "no_bleed"}) {
+        for (const auto& name : presets) {
             const auto m = presetMaterial(name);
-            require(name != "platform" || m.inner_refraction_amount == -7.0f, "Negative refraction was lost");
+            require(name != "soft-glass" || m.inner_refraction_amount == -7.0f, "Negative refraction was lost");
             blur(nativeBlur, sharp, temp, blurred, m.blur_sigma * scale, false);
             blur(referenceBlur, sharp, temp, refBlur, m.blur_sigma * scale, true);
             require(blurred.pixels() == refBlur.pixels(), "Blur differs from WebGL");
@@ -300,7 +305,8 @@ int main() try {
             std::cout << name << " @ " << scale << "x, rounding " << roundingPower
                       << ": mean " << mean << "/255, max " << maximum << "/255\n";
             passed &= mean < 0.15 && maximum <= 3;
-            if (scale == 1.0f && (name == "measured" || name == "platform" || name == "lens")) {
+            ++comparisons;
+            if (scale == 1.0f) {
                 copy(sharp, actual); actual.bind(); glViewport(pad, pad, ww, wh);
                 parameters(native, m, scale, w, h, ww, wh, false, roundingPower); sharp.sample(0); blurred.sample(1);
                 glEnable(GL_BLEND); quad(); glDisable(GL_BLEND);
@@ -315,7 +321,7 @@ int main() try {
         }
     }
     require(passed, "Shader parity exceeded tolerance");
-    std::cout << "PASS: 56 reference comparisons with outline optics, exact blur parity, transparent fade.\n";
+    std::cout << "PASS: " << comparisons << " reference comparisons with outline optics, exact blur parity, transparent fade.\n";
     opticalCorners(native, legacy);
     return 0;
 } catch (const std::exception& e) {

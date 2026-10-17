@@ -73,9 +73,9 @@ loaded for `hl.plugin.hyprliquid` to exist. It reloads the configuration on load
 ```lua
 if hl.plugin.hyprliquid then
     local glass = hl.plugin.hyprliquid
-    glass.config({ default_preset = "platform" })
+    glass.config({ default_preset = "soft-glass" })
     glass.preset("my_glass", {
-        inherits = "platform",
+        inherits = "soft-glass",
         blur_sigma = 12,
         inner_refraction_amount = -10,
         rim_opacity = 0.6,
@@ -85,18 +85,30 @@ hl.window_rule({ name = "terminal-glass", match = { class = "^kitty$" },
                  tag = "+hyprliquid_preset_my_glass" })
 ```
 
-The default is `measured`, a frosted material with no added rim, aberration, or
-refraction. Select `platform` or `lens` for stronger refraction and highlights.
+The default is `frosted`, a frosted material with no added rim, aberration, or
+refraction. Select `soft-glass` or `clear-glass` for stronger refraction and highlights.
 
 | Preset | Appearance |
 | --- | --- |
-| `measured` | Soft frosted blur |
-| `platform` | Refraction with rim highlights |
-| `lighter` | Brighter face and rim |
-| `darker` | Lower face opacity and subdued highlights |
-| `ultra_darker` | Lower face opacity with stronger edge darkening |
-| `lens` | Strong refraction and chromatic aberration |
-| `no_bleed` | Platform glass without edge bleed |
+| `frosted` | Soft, even blur without added refraction or rim lighting; default |
+| `soft-glass` | Gentle refraction, soft blur, and rim highlights |
+| `clear-glass` | Sharp backdrop with strong refraction and color fringes |
+| `frosted-glass` | Strong lens refraction with blur across the whole pane |
+| `clear-edge` | Frosted center with a clear, strongly refractive border |
+
+`frosted-glass` preserves the saved `frosted-full` material: the clear-glass
+base with `blur_alpha0 = 0.96` and `blur_alpha3 = 1`. `clear-edge` preserves
+`frosted-clear-edge`: the same base with `blur_alpha0 = 0.02`, `blur_alpha3 = 1`,
+and `blur_dist3 = 38.4`.
+
+Older names remain accepted in configurations, window tags, and saved profiles:
+`default`/`measured` map to `frosted`, `platform` to `soft-glass`, and `lens` to
+`clear-glass`. The retired `lighter`, `darker`, `ultra_darker`, and `no_bleed`
+variants now select `soft-glass`; their differences were mostly tonal in live
+desktop comparisons. `frosted-full` and `frosted-clear-edge` also work as aliases
+for the new frosted materials. The picker lists only the five distinct materials.
+An alias explicitly customized with `glass.preset(...)` remains a separate,
+visible user preset.
 
 All scalar material controls, defaults, and bounds are listed in
 [`src/MaterialParams.inc`](../src/MaterialParams.inc).
@@ -113,7 +125,7 @@ outline, coverage, material depth and rim lighting still follow the window's
 exact shape. This happens automatically and does not change saved profiles.
 
 Window glass captures its backdrop before the window's own native shadow is
-drawn. This prevents strong refraction, especially `lens`, from pulling the
+drawn. This prevents strong refraction, especially `clear-glass`, from pulling the
 shadow's clipped edge into the pane as an inset outline. Native shadows and
 borders still render normally after the glass.
 
@@ -138,7 +150,7 @@ Native controls:
 | --- | --- | --- |
 | `enabled` | `true` | Apply glass to windows |
 | `manage_window_blur` | `true` | Suppress Hyprland's separate blur on managed windows |
-| `default_preset` | `measured` | Material preset |
+| `default_preset` | `frosted` | Material preset |
 | `glass_opacity` | `1` | Mix the material with the original backdrop |
 | `effect_scale` | `1` | Scale the material's pixel distances |
 | `default_theme` | `dark` | Select `dark` or `light` overrides |
@@ -158,13 +170,13 @@ The window integration requires Hyprland's shadow pass and enables
 Global values can be changed live, for example:
 
 ```sh
-hyprctl eval 'hl.plugin.hyprliquid.config({ default_preset = "lens" })'
+hyprctl eval 'hl.plugin.hyprliquid.config({ default_preset = "clear-glass" })'
 hyprctl eval 'hl.plugin.hyprliquid.config({ enabled = false })'
 hyprctl configerrors
 ```
 
 Layer surfaces can be selected with `glass.layer("noctalia-panel", { preset =
-"platform" })` after enabling `layers`. The masking modes are `auto`,
+"soft-glass" })` after enabling `layers`. The masking modes are `auto`,
 `alpha`, and `region`; `auto` uses a client's background-effect region when
 available and otherwise uses its alpha. This remains an analytic rectangular
 material: it does not reconstruct an arbitrary layer's outline for the rim.
@@ -178,7 +190,7 @@ python3 scripts/test-nested.py
 
 `make test` needs Mesa surfaceless EGL and GLES3. It compiles both the reference
 fixtures and the native shaders. With the original outline-based optics selected
-in the test harness, it compares all seven materials at 1×, 1.5× and 2× scale and
+in the test harness, it compares all five materials at 1×, 1.5× and 2× scale and
 rounding powers from 1 to 10. The production optical path is checked for corner
 continuity at 0px and 12px radii, including fractional scaling, and for unchanged
 straight edges, coverage and rim lighting. Blur and fade-to-zero are also checked.
@@ -188,8 +200,9 @@ are written to `build/*-native.ppm`, `build/*-webgl.ppm` and `build/corners-*.pp
 The integration test needs a running Wayland desktop, Hyprland, Kitty, and grim.
 It opens a disposable nested compositor with a separate configuration and IPC
 socket, renders transparent windows, switches presets, exercises fullscreen and
-screen-edge sampling, and unloads/reloads the plugin. It also compares adjacent
-panes across focus changes, checks that neighbour repaints reach earlier-drawn
+screen-edge sampling, and unloads/reloads the plugin. It checks that renamed
+presets and the saved frosted profiles produce identical materials and pixels.
+It also compares adjacent panes across focus changes, checks that neighbour repaints reach earlier-drawn
 panes at native/fractional scale and on a rotated output, and closes a neighbour
 to check capture cleanup. Set `HYPRLIQUID_TEST_PLUGIN` to an alternative library
 path to run the same regression against a previous build. Screenshots and logs go in
@@ -211,9 +224,9 @@ with sharp text. A separate Hyprland compositor loads the plugin and draws the
 glass on a 1920×1200 virtual output; grim captures the actual compositor output.
 The foreground application does not paint or simulate the glass.
 
-The eight PNGs in `screenshots/` cover `platform`, `measured`, `lens`, the classic
-primitive scene, and a three-window comparison, plus `darker`, `ultra_darker`,
-and a dark-mode comparison of three materials. Captures are deliberately
+The eight PNGs in `screenshots/` cover `soft-glass`, `frosted`, `clear-glass`, the classic
+primitive scene, and a three-window comparison, plus `frosted-glass`, `clear-edge`,
+and a dark-mode comparison of the frosted materials. Captures are deliberately
 excluded from Git. Upload the selected PNGs separately and embed the hosted URLs
 in the README. Scene renders and diagnostic logs stay under `build/demo/`.
 ## Live control panels

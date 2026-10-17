@@ -35,9 +35,15 @@ void keys(json_object* value, std::initializer_list<std::string_view> allowed) {
     }
 }
 
+std::string publicPresetName(const std::string& name) {
+    const auto it = g_pGlobalState->customPresets.find(name);
+    // Built-in aliases point directly to a public preset. A user definition
+    // clears hidden, preserving its identity and any custom material values.
+    return it != g_pGlobalState->customPresets.end() && it->second.hidden ? it->second.inherits : name;
+}
 std::string configuredPreset() {
     const auto preset = readStringConfig(g_pGlobalState->config.defaultPreset);
-    return preset.empty() ? "default" : std::string(preset);
+    return publicPresetName(preset.empty() ? "default" : std::string(preset));
 }
 bool configuredDark() { return readStringConfig(g_pGlobalState->config.defaultTheme) != "light"; }
 bool configuredEnabled() {
@@ -46,10 +52,11 @@ bool configuredEnabled() {
 }
 bool validPreset(std::string name) {
     std::unordered_set<std::string> visited;
-    for (int depth = 0; depth < MAX_PRESET_INHERITANCE_DEPTH; ++depth) {
+    for (int depth = 0; depth < MAX_PRESET_INHERITANCE_DEPTH;) {
         const auto it = g_pGlobalState->customPresets.find(name);
         if (it == g_pGlobalState->customPresets.end() || !visited.insert(name).second) return false;
         if (it->second.inherits.empty()) return true;
+        if (!it->second.hidden) ++depth;
         name = it->second.inherits;
     }
     return false;
@@ -124,12 +131,13 @@ void describe(json_object* result) {
     put(result, "parameters", parameters);
     auto* presets = json_object_new_array();
     std::vector<std::string> names;
-    for (const auto& [name, preset] : g_pGlobalState->customPresets) names.push_back(name);
+    for (const auto& [name, preset] : g_pGlobalState->customPresets)
+        if (!preset.hidden) names.push_back(name);
     std::ranges::sort(names);
     for (const auto& name : names) {
         auto* item = object();
         put(item, "id", string(name));
-        put(item, "inherits", string(g_pGlobalState->customPresets.at(name).inherits));
+        put(item, "inherits", string(publicPresetName(g_pGlobalState->customPresets.at(name).inherits)));
         put(item, "valid", json_object_new_boolean(validPreset(name)));
         json_object_array_add(presets, item);
     }
@@ -156,7 +164,7 @@ void readProfile(SRuntimeProfile& target, json_object* input) {
     }
     if (has(input, "base_preset")) {
         auto* v = get(input, "base_preset");
-        target.basePreset = v ? std::optional<std::string>(text(v)) : std::nullopt;
+        target.basePreset = v ? std::optional<std::string>(publicPresetName(text(v))) : std::nullopt;
     }
     if (has(input, "theme")) {
         auto* v = get(input, "theme");

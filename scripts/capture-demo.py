@@ -104,16 +104,16 @@ def main():
                 return process
 
             shots = [
-                ('01-platform', 'primitives', [('platform', 510, 365, 900, 540)], 'PLATFORM / 01'),
-                ('02-measured', 'primitives', [('measured', 510, 365, 900, 540)], 'MEASURED / 02'),
-                ('03-lens', 'primitives', [('lens', 510, 365, 900, 540)], 'LENS / 03'),
-                ('04-classic', 'classic', [('platform', 510, 365, 900, 540)], 'ROUNDED PRIMITIVES / 04'),
-                ('05-materials', 'primitives', [('measured', 105, 345, 530, 600), ('platform', 695, 345, 530, 600),
-                                               ('lens', 1285, 345, 530, 600)], 'THREE MATERIALS / 05'),
-                ('06-darker', 'dark', [('darker', 510, 365, 900, 540)], 'DARKER / 06'),
-                ('07-ultra-dark', 'dark', [('ultra_darker', 510, 365, 900, 540)], 'ULTRA DARK / 07'),
-                ('08-dark-materials', 'dark', [('platform', 105, 345, 530, 600), ('darker', 695, 345, 530, 600),
-                                              ('ultra_darker', 1285, 345, 530, 600)], 'DARK MATERIALS / 08'),
+                ('01-soft-glass', 'primitives', [('soft-glass', 510, 365, 900, 540)], 'SOFT GLASS / 01'),
+                ('02-frosted', 'primitives', [('frosted', 510, 365, 900, 540)], 'FROSTED / 02'),
+                ('03-clear-glass', 'primitives', [('clear-glass', 510, 365, 900, 540)], 'CLEAR GLASS / 03'),
+                ('04-classic', 'classic', [('soft-glass', 510, 365, 900, 540)], 'ROUNDED PRIMITIVES / 04'),
+                ('05-materials', 'primitives', [('frosted', 105, 345, 530, 600), ('soft-glass', 695, 345, 530, 600),
+                                               ('clear-glass', 1285, 345, 530, 600)], 'THREE MATERIALS / 05'),
+                ('06-frosted-glass', 'dark', [('frosted-glass', 510, 365, 900, 540)], 'FROSTED GLASS / 06'),
+                ('07-clear-edge', 'dark', [('clear-edge', 510, 365, 900, 540)], 'CLEAR EDGE / 07'),
+                ('08-frosted-materials', 'dark', [('soft-glass', 105, 345, 530, 600), ('frosted-glass', 695, 345, 530, 600),
+                                              ('clear-edge', 1285, 345, 530, 600)], 'FROSTED MATERIALS / 08'),
             ]
             for filename, scene, panes, label in shots:
                 theme = ['--dark'] if scene == 'dark' else []

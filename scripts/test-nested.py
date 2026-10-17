@@ -157,7 +157,30 @@ def main():
                     window_action(address, 'resize', f'x = {width}, y = {height}, relative = false')
                     window_action(address, 'move', position)
                     print('PASS: idle live edit/reset and per-window preset isolation', flush=True)
-                    for preset in ['measured', 'platform', 'lens']:
+                    public_presets = {'frosted', 'soft-glass', 'clear-glass', 'frosted-glass', 'clear-edge'}
+                    listed = {p['id'] for p in control('describe')['presets']}
+                    assert public_presets <= listed, listed
+                    assert not listed & {'default', 'measured', 'platform', 'lens', 'lighter', 'darker', 'ultra_darker', 'no_bleed'}, listed
+                    # Renaming must preserve existing profiles, including the
+                    # saved lens-based frost settings that became built-ins.
+                    equivalents = [
+                        ('measured', 'frosted', {}),
+                        ('platform', 'soft-glass', {}),
+                        ('lens', 'clear-glass', {}),
+                        ('lens', 'frosted-glass', {'blur_alpha0': 0.96, 'blur_alpha3': 1}),
+                        ('lens', 'clear-edge', {'blur_alpha0': 0.02, 'blur_alpha3': 1, 'blur_dist3': 38.4}),
+                    ]
+                    for legacy, preset, overrides in equivalents:
+                        before = control('apply', profile={'base_preset': legacy, 'overrides': overrides})
+                        assert before['ok'], before
+                        pixels = capture('nested-legacy-' + preset)
+                        after = control('apply', profile={'base_preset': preset})
+                        assert after['ok'] and after['state']['base_preset'] == preset, after
+                        assert before['state']['material'] == after['state']['material'], preset
+                        assert capture('nested-renamed-' + preset) == pixels, preset
+                    assert control('reset')['ok']
+                    print('PASS: renamed presets and saved frosted profiles render identically', flush=True)
+                    for preset in ['frosted', 'soft-glass', 'frosted-glass', 'clear-edge', 'clear-glass']:
                         ctl('eval', 'hl.plugin.hyprliquid.config({ default_preset = ' + json.dumps(preset) + ' })')
                         window_action(address, 'alter_zorder', 'mode = "top"')
                         option = json.loads(ctl('-j', 'getoption', 'plugin:hyprliquid:default_preset'))
@@ -182,8 +205,9 @@ def main():
                     edge = next(c for c in json.loads(ctl('-j', 'clients')) if c['address'] == address)
                     assert edge['fullscreen'] == 0 and edge['at'] == [-40, -40], edge
                     subprocess.run(['grim', str(BUILD / 'nested-edge.png')], env=env, check=True, capture_output=True, timeout=10)
-                    assert (BUILD / 'nested-measured.png').read_bytes() != (BUILD / 'nested-platform.png').read_bytes(), 'Preset change did not render'
-                    assert (BUILD / 'nested-platform.png').read_bytes() != (BUILD / 'nested-disabled.png').read_bytes(), 'Disable did not render'
+                    assert (BUILD / 'nested-frosted.png').read_bytes() != (BUILD / 'nested-soft-glass.png').read_bytes(), 'Preset change did not render'
+                    assert (BUILD / 'nested-frosted-glass.png').read_bytes() != (BUILD / 'nested-clear-edge.png').read_bytes(), 'Frosted edge treatments did not differ'
+                    assert (BUILD / 'nested-clear-glass.png').read_bytes() != (BUILD / 'nested-disabled.png').read_bytes(), 'Disable did not render'
                     print('PASS: render, switch presets, disable/enable, fullscreen, offscreen padding', flush=True)
                     verify_window_scene(ctl, env, log, clients, BUILD,
                                         lambda predicate: wait_for(predicate, compositor))

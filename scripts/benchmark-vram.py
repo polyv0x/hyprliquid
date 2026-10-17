@@ -219,8 +219,16 @@ while True:
                         print(f'Measured {arm}: CPU {arm_result["timing"]["distribution"]}', flush=True)
                         continue
 
-                    cases = [(f'{preset}-{theme}', {'base_preset': preset, 'theme': theme})
-                             for preset in ('measured', 'platform', 'lighter', 'darker', 'ultra_darker', 'lens', 'no_bleed')
+                    # Legacy base ids also work with the older reference binaries.
+                    materials = {
+                        'frosted': {'base_preset': 'measured'},
+                        'soft-glass': {'base_preset': 'platform'},
+                        'clear-glass': {'base_preset': 'lens'},
+                        'frosted-glass': {'base_preset': 'lens', 'overrides': {'blur_alpha0': 0.96, 'blur_alpha3': 1}},
+                        'clear-edge': {'base_preset': 'lens', 'overrides': {'blur_alpha0': 0.02, 'blur_alpha3': 1, 'blur_dist3': 38.4}},
+                    }
+                    cases = [(f'{preset}-{theme}', profile | {'theme': theme})
+                             for preset, profile in materials.items()
                              for theme in ('dark', 'light')]
                     if not args.quick:
                         for parameter in control('describe')['parameters']:

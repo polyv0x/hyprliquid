@@ -1,7 +1,7 @@
 # Hyprliquid
 
 Native glass effects for transparent Hyprland windows, written in GLSL ES 3.00.
-Blurs and refracts the backdrop while keeping application text sharp, with seven
+Blurs and refracts the backdrop while keeping application text sharp, with five
 presets and optional layer-surface support.
 
 ## Installation
@@ -73,10 +73,10 @@ loading into the new session.
 
 Check that the plugin is loaded with `hyprctl plugin list`, then open an
 application with a transparent background to see the glass effect.
-The default `measured` preset gives a soft frosted effect. For stronger refraction:
+The default `frosted` preset gives a soft frosted effect. For stronger refraction:
 
 ```sh
-hyprctl eval 'hl.plugin.hyprliquid.config({ default_preset = "platform" })'
+hyprctl eval 'hl.plugin.hyprliquid.config({ default_preset = "soft-glass" })'
 ```
 
 See the [configuration example](examples/hyprliquid.lua) and [guide](docs/guide.md) for

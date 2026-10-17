@@ -6,7 +6,7 @@ Hyprliquid exposes a local JSON request through the plugin's Hyprland IPC hook:
 hyprctl hyprliquid:control '{"op":"describe"}'
 hyprctl hyprliquid:control '{"op":"state"}'
 hyprctl hyprliquid:control '{"op":"buffers"}'
-hyprctl hyprliquid:control '{"op":"apply","profile":{"base_preset":"platform","theme":"dark","enabled":true,"overrides":{"inner_refraction_amount":-20,"rim_opacity":0.4}}}'
+hyprctl hyprliquid:control '{"op":"apply","profile":{"base_preset":"soft-glass","theme":"dark","enabled":true,"overrides":{"inner_refraction_amount":-20,"rim_opacity":0.4}}}'
 hyprctl hyprliquid:control '{"op":"apply","patch":{"overrides":{"coverage_offset":-0.3}}}'
 hyprctl hyprliquid:control '{"op":"apply","patch":{"reset_fields":["rim_opacity"]}}'
 hyprctl hyprliquid:control '{"op":"reset"}'
@@ -23,8 +23,11 @@ text; treat that as unavailable. Requests are limited to 16 KiB and JSON depth 1
 
 `describe` adds `capabilities`, `parameters`, and `presets`. Each parameter has
 `name`, `default`, `min`, and `max`, generated directly from `MaterialParams.inc`.
-Each preset has `id`, `inherits`, and `valid`. The list reflects the current
-configured presets, including customized built-ins and the `default` alias.
+Each preset has `id`, `inherits`, and `valid`. The list contains the five public
+built-ins and configured user presets. Compatibility aliases are accepted by
+`apply` but omitted from this list; returned preset names use the public name.
+An alias explicitly customized in Lua is listed and retains its own name and
+overrides. See the [preset guide](guide.md#configure) for old-name mappings.
 Missing parents, cycles, and inheritance chains beyond the renderer's supported
 depth make a preset invalid for selection. Invalid configured presets are not
 deleted or repaired by the control API.

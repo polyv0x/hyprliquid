@@ -9,6 +9,7 @@ if hl.plugin.hyprliquid then
     local glass = hl.plugin.hyprliquid
     glass.config({ default_preset = "test", layers = { enabled = false } })
     glass.preset("test", { inherits = "platform", inner_refraction_amount = -11, coverage_offset = -0.25 })
+    glass.preset("frosted-full", { blur_sigma = 9 })
     glass.preset("cycle", { inherits = "cycle" })
 end
 

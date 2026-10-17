@@ -4,8 +4,7 @@
 
 namespace BuiltInPresets {
 
-// Built-in materials with names suitable for window tags. "measured" uses
-// the global defaults; "platform" supplies the base for the other presets.
+// Five distinct materials; old names remain available to saved profiles and tags.
 inline std::unordered_map<std::string, SCustomPreset> getAll() {
     std::unordered_map<std::string, SCustomPreset> presets;
     const auto add = [&](const std::string& name, const std::string& parent = "") -> SPresetValues& {
@@ -14,10 +13,15 @@ inline std::unordered_map<std::string, SCustomPreset> getAll() {
         preset.inherits = parent;
         return preset.shared;
     };
-    add("default");
-    add("measured");
+    const auto alias = [&](const std::string& name, const std::string& target) {
+        add(name, target);
+        presets.at(name).hidden = true;
+    };
+    add("frosted");
+    alias("default", "frosted");
+    alias("measured", "frosted");
 
-    auto& platform = add("platform");
+    auto& platform = add("soft-glass");
     platform.use_measured_face = 0.0f;
     platform.outer_refraction_amount = 52.0f;
     platform.inner_refraction_amount = -7.0f;
@@ -30,27 +34,13 @@ inline std::unordered_map<std::string, SCustomPreset> getAll() {
     platform.aberration_amount = 7.5f;
     platform.rim_opacity = 0.92f;
 
-    auto& lighter = add("lighter", "platform");
-    lighter.holding_tone_opacity = 0.19f;
-    lighter.rim_opacity = 1.15f;
-    lighter.bleed_darken = 0.06f;
+    alias("platform", "soft-glass");
+    for (const auto* name : {"lighter", "darker", "ultra_darker", "no_bleed"})
+        alias(name, "soft-glass");
 
-    auto& darker = add("darker", "platform");
-    darker.holding_tone_opacity = 0.0f;
-    darker.face_opacity = 0.55f;
-    darker.bleed_darken = 0.36f;
-    darker.rim_opacity = 0.7f;
-    darker.shadow_amount = 0.34f;
-
-    auto& ultra = add("ultra_darker", "platform");
-    ultra.holding_tone_opacity = 0.0f;
-    ultra.face_opacity = 0.2f;
-    ultra.bleed_darken = 0.55f;
-    ultra.rim_opacity = 0.5f;
-    ultra.shadow_amount = 0.46f;
-    ultra.refraction_opacity = 0.88f;
-
-    auto& lens = add("lens", "platform");
+    // Inherit through the old names so existing Lua overrides still reach
+    // their descendants. Customized aliases are exposed as user presets.
+    auto& lens = add("clear-glass", "platform");
     lens.outer_refraction_amount = 108.0f;
     lens.outer_refraction_inv_height = 0.018f;
     lens.aberration_amount = 19.0f;
@@ -59,10 +49,18 @@ inline std::unordered_map<std::string, SCustomPreset> getAll() {
     lens.face_opacity = 0.25f;
     lens.holding_tone_opacity = 0.0f;
     lens.rim_opacity = 1.2f;
+    alias("lens", "clear-glass");
 
-    auto& noBleed = add("no_bleed", "platform");
-    noBleed.edge_bleed_opacity = 0.0f;
-    noBleed.bleed_darken = 0.0f;
+    auto& frostedGlass = add("frosted-glass", "lens");
+    frostedGlass.blur_alpha0 = 0.96f;
+    frostedGlass.blur_alpha3 = 1.0f;
+
+    auto& clearEdge = add("clear-edge", "lens");
+    clearEdge.blur_alpha0 = 0.02f;
+    clearEdge.blur_alpha3 = 1.0f;
+    clearEdge.blur_dist3 = 38.4f;
+    alias("frosted-full", "frosted-glass");
+    alias("frosted-clear-edge", "clear-edge");
     return presets;
 }
 

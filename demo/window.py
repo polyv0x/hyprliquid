@@ -8,9 +8,9 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
 parser = argparse.ArgumentParser()
-parser.add_argument('role', choices=['backdrop', 'measured', 'platform', 'lens', 'darker', 'ultra_darker'])
+parser.add_argument('role', choices=['backdrop', 'frosted', 'soft-glass', 'clear-glass', 'frosted-glass', 'clear-edge'])
 parser.add_argument('--image')
-parser.add_argument('--label', default='PLATFORM')
+parser.add_argument('--label', default='SOFT GLASS')
 parser.add_argument('--compact', action='store_true')
 parser.add_argument('--dark', action='store_true')
 parser.add_argument('--width', type=int)
@@ -74,14 +74,14 @@ class DemoWindow(QWidget):
             painter.drawText(margin, 49, 'HYPRLIQUID / DARK' if args.dark else 'HYPRLIQUID')
             painter.setFont(font(38 if args.compact else 46, QFont.Weight.Bold))
             painter.setPen(QColor('#ffffff'))
-            painter.drawText(margin, 107, 'Ultra dark' if args.role == 'ultra_darker' else args.role.capitalize())
+            painter.drawText(margin, 107, args.role.replace('-', ' ').capitalize())
             painter.setFont(font(18))
             painter.setPen(QColor(247, 249, 255, 220))
-            captions = {'measured': 'Soft blur. Clear content.',
-                        'platform': 'Refraction, with a softer edge.',
-                        'lens': 'A different view through glass.',
-                        'darker': 'Deep tones. Soft light.',
-                        'ultra_darker': 'A quieter glass surface.'}
+            captions = {'frosted': 'Soft blur. Clear content.',
+                        'soft-glass': 'Gentle refraction. Soft highlights.',
+                        'clear-glass': 'A sharp view through curved glass.',
+                        'frosted-glass': 'Deep frost. A refractive rim.',
+                        'clear-edge': 'Frosted center. Clear border.'}
             painter.drawText(margin, 143, captions[args.role])
             painter.setPen(QPen(QColor(255, 255, 255, 75), 1))
             painter.drawLine(margin, self.height() - 83, self.width() - margin, self.height() - 83)
