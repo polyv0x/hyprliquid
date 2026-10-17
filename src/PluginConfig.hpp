@@ -137,6 +137,7 @@ struct SResolveContext {
     bool                                                  isDark;
     const SPluginConfig&                                  config;
     const std::unordered_map<std::string, SCustomPreset>& customPresets;
+    const SPresetValues*                                  runtimeOverrides = nullptr;
 };
 
 // Preset-aware resolution: preset chain → built-in theme → global → hardcoded

@@ -6,6 +6,12 @@ Gaussian blur, and draws the glass before Hyprland composites the application's
 pixels. Transparent window backgrounds reveal the effect; opaque text and
 application content stay sharp.
 
+The blur filters the background through progressively smaller images before
+applying its Gaussian kernel, then reconstructs the result through those same
+levels. Increasing `blur_sigma` or `effect_scale` therefore keeps the samples
+close together instead of exposing a grid of widely spaced samples. Windows
+and layer surfaces use the same blur pipeline.
+
 The compositor integration supports window selection, fades, fullscreen handling,
 per-window presets, and optional layer surfaces.
 
@@ -15,7 +21,8 @@ Targets **Hyprland 0.56.2**. Build against the headers for the running composito
 the plugin checks the full Hyprland build/ABI string when loaded.
 
 Requirements: a C++23 compiler compatible with your Hyprland build, GNU Make,
-Python 3, pkg-config, Hyprland development headers, and their dependencies.
+Python 3, pkg-config, json-c development files, Hyprland development headers,
+and their dependencies.
 `pkg-config --cflags hyprland` must locate the correct headers. On the development
 machine these are the headers already installed by `hyprpm`.
 
@@ -82,6 +89,32 @@ size, corner radius, and rounding power, including per-window rules. Set corner
 curvature through Hyprland's `rounding_power`; the material has no independent
 shape override.
 
+Refraction and edge bleed use a smoothed optical direction inside the glass.
+The sampling footprint grows with depth, blending adjacent edge directions where
+a small corner radius would otherwise produce a sharp diagonal seam. The native
+outline, coverage, material depth and rim lighting still follow the window's
+exact shape. This happens automatically and does not change saved profiles.
+
+Window glass captures its backdrop before the window's own native shadow is
+drawn. This prevents strong refraction, especially `lens`, from pulling the
+shadow's clipped edge into the pane as an inset outline. Native shadows and
+borders still render normally after the glass.
+
+Adjacent, non-overlapping tiled windows refract a completed scene of their
+neighbours from the same frame. Focusing a different tile no longer removes it
+from another pane's refraction. The capture includes each pane's base glass and
+client content; it does not recursively capture reflections of reflections.
+Sampling inside a window still uses its real backdrop, avoiding self-refraction.
+Floating windows, overlapping tiles and transformed windows retain native
+stacking behavior. Popups and native borders/shadows are not duplicated into the
+neighbour capture.
+
+This adds one offscreen tiled-window pass and two reusable monitor-sized textures
+when at least two tiles and one glass pane are visible. Those frames repaint the
+monitor to keep the captured background free of old window pixels. It does not
+schedule extra frames on an idle desktop. Single-window and disabled-glass scenes
+skip the capture.
+
 Native controls:
 
 | Setting | Default | Purpose |
@@ -127,16 +160,22 @@ python3 scripts/test-nested.py
 ```
 
 `make test` needs Mesa surfaceless EGL and GLES3. It compiles both the reference
-fixtures and the native shaders, compares all seven materials at 1×, 1.5×,
-and 2× scale, exercises rounding powers from 1 to 10, checks the blur
-independently, and checks fade-to-zero blending.
+fixtures and the native shaders. With the original outline-based optics selected
+in the test harness, it compares all seven materials at 1×, 1.5× and 2× scale and
+rounding powers from 1 to 10. The production optical path is checked for corner
+continuity at 0px and 12px radii, including fractional scaling, and for unchanged
+straight edges, coverage and rim lighting. Blur and fade-to-zero are also checked.
 The reference fixtures are retained in `tests/reference`. Rendered comparisons
-are written to `build/*-native.ppm` and `build/*-webgl.ppm`.
+are written to `build/*-native.ppm`, `build/*-webgl.ppm` and `build/corners-*.ppm`.
 
 The integration test needs a running Wayland desktop, Hyprland, Kitty, and grim.
 It opens a disposable nested compositor with a separate configuration and IPC
 socket, renders transparent windows, switches presets, exercises fullscreen and
-screen-edge sampling, and unloads/reloads the plugin. Screenshots and logs go in
+screen-edge sampling, and unloads/reloads the plugin. It also compares adjacent
+panes across focus changes, checks that neighbour repaints reach earlier-drawn
+panes at native/fractional scale and on a rotated output, and closes a neighbour
+to check capture cleanup. Set `HYPRLIQUID_TEST_PLUGIN` to an alternative library
+path to run the same regression against a previous build. Screenshots and logs go in
 `build/`. It does not install the plugin into the parent compositor.
 
 The materials are validated for **SDR** rendering. HDR color management is not
@@ -160,3 +199,8 @@ primitive scene, and a three-window comparison, plus `darker`, `ultra_darker`,
 and a dark-mode comparison of three materials. Captures are deliberately
 excluded from Git. Upload the selected PNGs separately and embed the hosted URLs
 in the README. Scene renders and diagnostic logs stay under `build/demo/`.
+## Live control panels
+
+The [runtime control API](control-api.md) supplies versioned JSON metadata,
+atomic material overrides, resolved state, and reset through `hyprctl`.
+It is intended for companions such as the Noctalia Hyprliquid panel.

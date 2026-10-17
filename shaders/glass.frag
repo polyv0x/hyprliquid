@@ -77,13 +77,31 @@ float sdf_at(vec2 p) {
     return min(max(q.x, q.y), 0.0) + corner;
 }
 
-vec2 sdf_normal(vec2 p) {
-    // Take the finite difference in physical framebuffer pixels.
-    float e = 1.0 / pixelScale;
-    return normalize(vec2(
+vec2 sdf_gradient(vec2 p, float e) {
+    return vec2(
         sdf_at(p + vec2(e, 0.0)) - sdf_at(p - vec2(e, 0.0)),
         sdf_at(p + vec2(0.0, e)) - sdf_at(p - vec2(0.0, e))
-    ) + 1e-6);
+    );
+}
+
+vec2 sdf_normal(vec2 p) {
+    // Keep the native outline's one-physical-pixel normal for rim lighting.
+    return normalize(sdf_gradient(p, 1.0 / pixelScale) + 1e-6);
+}
+
+vec2 optical_normal(vec2 p, float depth, vec2 outlineNormal) {
+    // Inward offsets of a small rounded corner eventually meet at a sharp
+    // diagonal. Average the slope over a footprint that grows into the glass
+    // so refraction and edge bleed turn through that seam continuously.
+    // Coverage, depth and rim lighting still use the exact native shape.
+    float pixel = 1.0 / pixelScale;
+    float footprint = max(pixel, 0.5 * depth);
+    if (footprint <= pixel)
+        return outlineNormal;
+    vec2 slope = sdf_gradient(p, footprint) / (2.0 * footprint);
+    // Let opposing sides cancel in small windows instead of normalizing a
+    // vanishing gradient into an arbitrary full-strength displacement.
+    return slope / max(length(slope), 0.5);
 }
 
 float blur_ramp(float depth) {
@@ -131,13 +149,14 @@ void main() {
 
     vec2 n = sdf_normal(p);
     float depth = max(-d, 0.0);
+    vec2 opticalN = optical_normal(p, depth, n);
     vec3 bg = texture(tex, backdropUV(uv)).rgb;
     float h_outer = clamp(1.0 - depth * outer_refraction_inv_height, 0.0, 1.0);
     float h_inner = clamp(1.0 - depth * inner_refraction_inv_height, 0.0, 1.0);
     float zone = smoothstep(refraction_threshold0, refraction_threshold1, depth);
     float amt = mix(outer_refraction_amount * h_outer * h_outer,
                     inner_refraction_amount * h_inner, zone);
-    vec2 disp = n * amt;
+    vec2 disp = opticalN * amt;
 
     float h_ab = clamp(1.0 - depth * inv_aberration_height, 0.0, 1.0);
     vec2 ab = vec2(0.9239, 0.3827) * aberration_amount * h_ab;
@@ -150,7 +169,7 @@ void main() {
     );
 
     float bleed = clamp(1.0 - depth * edge_bleed_inv_height, 0.0, 1.0);
-    vec3 bleed_c = texture(blur_texture, backdropUV(uv + n * edge_bleed_amount * invSize)).rgb;
+    vec3 bleed_c = texture(blur_texture, backdropUV(uv + opticalN * edge_bleed_amount * invSize)).rgb;
     bleed_c *= 1.0 - bleed_darken * bleed;
     refr = mix(refr, bleed_c, bleed * edge_bleed_opacity);
     refr = mix(refr, face_color_matrix(refr), face_opacity);

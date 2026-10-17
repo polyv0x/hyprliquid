@@ -8,7 +8,8 @@ CGlassPassElement::CGlassPassElement(const SGlassPassData& data)
 
 std::vector<UP<IPassElement>> CGlassPassElement::draw() {
     if (m_data.decoration.valid())
-        m_data.decoration->renderPass(g_pHyprRenderer->m_renderData.pMonitor.lock(), m_data.alpha);
+        m_data.decoration->renderPass(g_pHyprRenderer->m_renderData.pMonitor.lock(), m_data.alpha,
+                                     m_data.scene, m_data.sceneBase);
 
     return {};
 }

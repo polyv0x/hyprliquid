@@ -2,6 +2,7 @@
 
 #include "GlassRenderer.hpp"
 #include "PluginConfig.hpp"
+#include "WindowScene.hpp"
 
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/render/decorations/IHyprWindowDecoration.hpp>
@@ -23,7 +24,9 @@ class CGlassDecoration : public IHyprWindowDecoration {
     [[nodiscard]] std::string                getDisplayName() override;
 
     [[nodiscard]] PHLWINDOW getOwner();
-    void                    renderPass(PHLMONITOR monitor, const float& alpha);
+    void                    renderPass(PHLMONITOR monitor, const float& alpha,
+                                       const std::shared_ptr<SWindowScene>& scene = {}, bool sceneBase = false);
+    [[nodiscard]] bool      usesGlass() const { return resolveEnabled(); }
     void                    onFullscreenStateChanged();
 
     WP<CGlassDecoration> m_self;
@@ -53,6 +56,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
     [[nodiscard]] bool        resolveEnabled() const;
     [[nodiscard]] bool        resolveThemeIsDark() const;
     [[nodiscard]] std::string resolvePresetName() const;
+    [[nodiscard]] const SPresetValues* runtimeOverrides() const;
 
     friend class CGlassPassElement;
 };

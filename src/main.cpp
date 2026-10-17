@@ -5,6 +5,7 @@
 #include "GlassRenderer.hpp"
 #include "Globals.hpp"
 #include "PluginConfig.hpp"
+#include "WindowScene.hpp"
 
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/view/LayerSurface.hpp>
@@ -19,6 +20,8 @@
 #include <hyprland/src/event/EventBus.hpp>
 
 #include <cstdlib>
+#include <algorithm>
+#include <iterator>
 #include <optional>
 #include <sstream>
 
@@ -43,9 +46,21 @@ static void onNewWindow(PHLWINDOW window) {
         return;
 
     auto decoration = makeUnique<CGlassDecoration>(window);
+    const auto* glass = decoration.get();
     g_pGlobalState->decorations.emplace_back(decoration);
     decoration->m_self = decoration;
-    HyprlandAPI::addWindowDecoration(PHANDLE, window, std::move(decoration));
+    if (!HyprlandAPI::addWindowDecoration(PHANDLE, window, std::move(decoration)))
+        return;
+
+    // BOTTOM decorations draw in insertion order, not positioning priority.
+    // Sample/draw the glass before this window's native shadow; otherwise
+    // strong outward refraction pulls the shadow's cutout edge into the pane.
+    // Moving our owned pointer preserves every other decoration's order and
+    // leaves the native shadow/border passes and their clipping intact.
+    auto& decorations = window->m_windowDecorations;
+    const auto inserted = std::ranges::find_if(decorations, [glass](const auto& item) { return item.get() == glass; });
+    if (inserted != decorations.end())
+        std::rotate(decorations.begin(), inserted, std::next(inserted));
 }
 
 static void onCloseWindow(PHLWINDOW window) {
@@ -438,12 +453,15 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         commitPendingLayers(); // merge Lua layer() calls on top of string config
         validateConfig();
         ensureShadowsEnabled();
+        runtimeBaselineChanged(true);
     }));
 
 
     registerConfig(PHANDLE);
     initConfigPointers(PHANDLE, g_pGlobalState->config);
     commitPendingPresets();
+
+    registerRuntimeControl();
 
     ensureShadowsEnabled();
 
@@ -496,6 +514,13 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         });
     }
 
+    if (!WindowScene::initialize())
+        HyprlandAPI::addNotificationV2(PHANDLE, {
+            {"text", std::string("[hyprliquid] Could not initialize neighbour capture — using native window order")},
+            {"time", (uint64_t)5000},
+            {"color", CHyprColor{1.0, 0.8, 0.2, 1.0}},
+        });
+
     // The reloaded listener commits user presets once. A second commit here
     // would replace them with built-ins after the pending map has been cleared.
     HyprlandAPI::reloadConfig();
@@ -507,11 +532,14 @@ APICALL EXPORT void PLUGIN_EXIT() {
     if (!g_pGlobalState)
         return;
 
+    unregisterRuntimeControl();
+
     g_pGlobalState->listeners.clear();
 
     g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassPassElement");
     g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassLayerPassElement");
     g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassLayerCompositeElement");
+    WindowScene::destroy();
 
     for (auto& decoration : g_pGlobalState->decorations) {
         if (auto* deco = decoration.get())

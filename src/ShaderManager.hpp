@@ -26,6 +26,7 @@ struct SGlassUniforms {
 
 struct SBlurUniforms {
     GLint direction = -1;
+    GLint filterMode = -1;
 };
 
 class CShaderManager {

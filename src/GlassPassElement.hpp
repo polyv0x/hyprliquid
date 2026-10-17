@@ -4,6 +4,7 @@
 #include <hyprutils/math/Box.hpp>
 #include <hyprutils/math/Region.hpp>
 #include <hyprland/src/helpers/memory/Memory.hpp>
+#include "WindowScene.hpp"
 
 class CGlassDecoration;
 
@@ -12,6 +13,8 @@ class CGlassPassElement : public IPassElement {
     struct SGlassPassData {
         WP<CGlassDecoration> decoration;
         float                alpha = 1.0f;
+        std::shared_ptr<SWindowScene> scene;
+        bool                 sceneBase = false;
     };
 
     explicit CGlassPassElement(const SGlassPassData& data);

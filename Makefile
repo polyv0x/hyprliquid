@@ -4,8 +4,8 @@ CXXFLAGS += -fPIC -std=c++23
 ifneq ($(filter g++ c++,$(notdir $(CXX))),)
 CXXFLAGS += -fno-gnu-unique
 endif
-CPPFLAGS += $(shell pkg-config --cflags hyprland pixman-1 libdrm)
-LDLIBS += $(shell pkg-config --libs hyprland)
+CPPFLAGS += $(shell pkg-config --cflags hyprland pixman-1 libdrm json-c)
+LDLIBS += $(shell pkg-config --libs hyprland json-c)
 
 TARGET = hyprliquid.so
 SOURCES = $(wildcard src/*.cpp)

@@ -7,10 +7,15 @@ import shutil
 import subprocess
 import tempfile
 import time
+import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / 'build'
+PLUGIN = Path(os.environ.get('HYPRLIQUID_TEST_PLUGIN', ROOT / 'hyprliquid.so')).resolve()
 BUILD.mkdir(exist_ok=True)
+sys.path.insert(0, str(ROOT / 'tests'))
+from control_api import verify_control
+from window_scene import verify_window_scene
 
 
 def wait_for(predicate, process, seconds=20):
@@ -52,8 +57,16 @@ def main():
                         raise RuntimeError(f'hyprctl {args}: {result.stdout}{result.stderr}')
                     return result.stdout.strip()
 
-                wait_for(lambda: json.loads(ctl('-j', 'monitors')), compositor)
-                response = ctl('plugin', 'load', str(ROOT / 'hyprliquid.so'))
+                parent_outputs = wait_for(lambda: json.loads(ctl('-j', 'monitors')), compositor)
+                # A parent tiling WM can resize the nested Wayland window after
+                # we queried its geometry. Use a fixed virtual output for pixel
+                # tests, retaining the Wayland backend only for GPU allocation.
+                assert ctl('output', 'create', 'headless', 'HYPRLIQUID-TEST') == 'ok'
+                for output in parent_outputs:
+                    assert ctl('output', 'remove', output['name']) == 'ok'
+                wait_for(lambda: len(json.loads(ctl('-j', 'monitors'))) == 1 and
+                         json.loads(ctl('-j', 'monitors'))[0]['name'] == 'HYPRLIQUID-TEST', compositor)
+                response = ctl('plugin', 'load', str(PLUGIN))
                 if response != 'ok':
                     raise RuntimeError(response)
                 assert any(p['name'] == 'hyprliquid' for p in json.loads(ctl('-j', 'plugin', 'list')))
@@ -63,6 +76,7 @@ def main():
                 shadow = json.loads(ctl('-j', 'getoption', 'decoration:shadow:enabled'))
                 assert shadow.get('bool', shadow.get('int')) == 1, shadow
                 print('PASS: load and Lua configuration (including signed preset values)', flush=True)
+                control = verify_control(ctl)
 
                 if shutil.which('kitty') and shutil.which('grim'):
                     backdrop = "import time; print('\\x1b[2J\\x1b[H' + '\\n'.join(''.join('\\x1b[48;2;%d;%d;%dm  ' % (((x//6+y//4)%3==0)*150+20, ((x//6+y//4)%3==1)*140+20, ((x//6+y//4)%3==2)*160+30) for x in range(90)) for y in range(50)), flush=True); time.sleep(120)"
@@ -101,6 +115,31 @@ def main():
                     geometry = next(c for c in json.loads(ctl('-j', 'clients')) if c['address'] == address)
                     assert geometry['floating'] and geometry['fullscreen'] == 0 and geometry['size'] == [width, height] and geometry['at'] == [x, y], geometry
                     (BUILD / 'nested-clients.json').write_text(ctl('-j', 'clients'))
+                    # No move/resize/input between these captures: an accepted edit
+                    # must repaint an otherwise idle transparent window itself.
+                    def capture(name):
+                        time.sleep(0.3)
+                        path = BUILD / (name + '.png')
+                        subprocess.run(['grim', str(path)], env=env, check=True, capture_output=True, timeout=10)
+                        from PIL import Image
+                        return Image.open(path).crop((x + 40, y + 40, x + width - 40, y + height - 40)).tobytes()
+
+                    original = capture('nested-control-baseline')
+                    assert control('apply', patch={'overrides': {'blur_sigma': 0, 'face_opacity': 0, 'rim_opacity': 0}})['ok']
+                    changed = capture('nested-control-edit')
+                    assert changed != original, 'Runtime edit did not repaint idle window'
+                    assert control('reset')['ok']
+                    assert capture('nested-control-reset') == original, 'Runtime reset changed configured custom preset'
+                    assert control('apply', patch={'enabled': False})['ok']
+                    assert capture('nested-control-disabled') != original, 'Runtime disable did not repaint idle window'
+                    assert control('reset')['ok']
+                    ctl('eval', 'hl.window_rule({ name = "runtime-tagged", match = { class = "^hyprliquid-test$" }, tag = "+hyprliquid_preset_test" })')
+                    tagged = capture('nested-control-tagged')
+                    assert control('apply', profile={'base_preset': 'lens', 'theme': 'light', 'overrides': {'blur_sigma': 0, 'glass_opacity': 0}})['ok']
+                    assert capture('nested-control-tagged-edit') == tagged, 'Runtime edit leaked into an explicitly tagged preset'
+                    assert control('reset')['ok']
+                    ctl('reload')
+                    print('PASS: idle live edit/reset and per-window preset isolation', flush=True)
                     for preset in ['measured', 'platform', 'lens']:
                         ctl('eval', 'hl.plugin.hyprliquid.config({ default_preset = ' + json.dumps(preset) + ' })')
                         option = json.loads(ctl('-j', 'getoption', 'plugin:hyprliquid:default_preset'))
@@ -128,12 +167,18 @@ def main():
                     assert (BUILD / 'nested-measured.png').read_bytes() != (BUILD / 'nested-platform.png').read_bytes(), 'Preset change did not render'
                     assert (BUILD / 'nested-platform.png').read_bytes() != (BUILD / 'nested-disabled.png').read_bytes(), 'Disable did not render'
                     print('PASS: render, switch presets, disable/enable, fullscreen, offscreen padding', flush=True)
+                    verify_window_scene(ctl, env, log, clients, BUILD,
+                                        lambda predicate: wait_for(predicate, compositor))
                 else:
                     print('SKIP: window/screenshot exercise requires kitty and grim', flush=True)
 
+                epoch = control('state')['state']['epoch']
                 for _ in range(2):
-                    assert ctl('plugin', 'unload', str(ROOT / 'hyprliquid.so')) == 'ok'
-                    assert ctl('plugin', 'load', str(ROOT / 'hyprliquid.so')) == 'ok'
+                    assert ctl('plugin', 'unload', str(PLUGIN)) == 'ok'
+                    assert ctl('plugin', 'load', str(PLUGIN)) == 'ok'
+                    current = control('state')['state']
+                    assert current['epoch'] != epoch and not current['active']
+                    epoch = current['epoch']
                 print('PASS: two unload/reload cycles', flush=True)
                 (BUILD / 'nested-compositor.log').write_text((socket.parent / 'hyprland.log').read_text())
                 ctl('dispatch', 'hl.dsp.exit()')

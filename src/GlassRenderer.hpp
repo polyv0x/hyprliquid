@@ -40,7 +40,8 @@ struct SMaskInfo {
 };
 
 bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IFramebuffer> sourceFramebuffer,
-                       CBox box, Vector2D& outPaddingRatio, int padding = SAMPLE_PADDING_PX);
+                       CBox box, Vector2D& outPaddingRatio, int padding = SAMPLE_PADDING_PX,
+                       SP<Render::IFramebuffer> neighbours = nullptr);
 
 // callerFramebuffer is re-bound after the blur ping-pong; the viewport is
 // restored from its size so it always matches the re-bound framebuffer

@@ -66,6 +66,7 @@ bool CShaderManager::compileBlurShader() {
     const auto program = blurShader->program();
 
     blurUniforms.direction = glGetUniformLocation(program, "direction");
+    blurUniforms.filterMode = glGetUniformLocation(program, "filterMode");
 
     return true;
 }

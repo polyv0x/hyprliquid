@@ -146,6 +146,101 @@ static void save(const std::string& name, const Target& target) {
     for (int y = target.height - 1; y >= 0; --y)
         for (int x = 0; x < target.width; ++x) file.write(reinterpret_cast<char*>(pixels.data() + (y * target.width + x) * 4), 3);
 }
+
+static std::string outlineOptics(std::string source) {
+    // Keep the original optical path as a comparison, without changing the
+    // frozen reference fixtures or adding a test switch to the shipped shader.
+    const std::string call = "vec2 opticalN = optical_normal(p, depth, n);";
+    const auto at = source.find(call);
+    require(at != std::string::npos, "Missing optical normal call");
+    source.replace(at, call.size(), "vec2 opticalN = n;");
+    return source;
+}
+
+static void opticalCorners(const Program& native, const Program& legacy) {
+    int comparisons = 0;
+    for (const float scale : {1.0f, 1.25f, 2.0f})
+        for (const float radius : {0.0f, 12.0f})
+            for (const float power : {1.0f, 2.0f, 4.0f, 10.0f}) {
+                const int ww = 256 * scale, wh = 192 * scale, pad = 160 * scale;
+                const int w = ww + 2 * pad, h = wh + 2 * pad;
+                std::vector<unsigned char> gradient(w * h * 4);
+                for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+                    const int i = (y * w + x) * 4;
+                    gradient[i] = 20 + 180 * x / (w - 1);
+                    gradient[i + 1] = 20 + 180 * y / (h - 1);
+                    gradient[i + 2] = 40; gradient[i + 3] = 255;
+                }
+                Target sharp(w, h, gradient.data()), before(w, h), after(w, h);
+                auto m = presetMaterial("lens");
+                // A coordinate gradient makes refraction discontinuities
+                // measurable without depending on the desktop wallpaper.
+                m.blur_alpha0 = m.blur_alpha3 = m.face_opacity = m.aberration_amount = 0;
+                m.edge_bleed_opacity = m.shadow_amount = m.rim_opacity = 0;
+                auto render = [&](const Program& shader, const Target& backdrop, const Target& output) {
+                    copy(backdrop, output); output.bind(); glViewport(pad, pad, ww, wh);
+                    parameters(shader, m, scale, w, h, ww, wh, false, power);
+                    shader.f("radius", radius * scale);
+                    backdrop.sample(0); backdrop.sample(1); glDisable(GL_BLEND); quad();
+                };
+                render(legacy, sharp, before); render(native, sharp, after);
+                const auto oldPixels = before.pixels(), newPixels = after.pixels();
+                for (const bool right : {false, true}) for (const bool top : {false, true}) {
+                    auto creaseStep = [&](const auto& pixels) {
+                        int maximum = 0;
+                        const int localY = int(20 * scale);
+                        const int y = pad + (top ? wh - 1 - localY : localY);
+                        for (int offset = int(15 * scale); offset < int(25 * scale); ++offset) {
+                            const int x = pad + (right ? ww - 1 - offset : offset);
+                            const int nextX = x + (right ? -1 : 1);
+                            for (int c = 0; c < 2; ++c)
+                                maximum = std::max(maximum, std::abs(int(pixels[(y * w + x) * 4 + c])
+                                    - int(pixels[(y * w + nextX) * 4 + c])));
+                        }
+                        return maximum;
+                    };
+                    const int oldStep = creaseStep(oldPixels), newStep = creaseStep(newPixels);
+                    require(oldStep >= 5, "Refraction fixture did not expose the old corner seam");
+                    require(newStep <= 3 && newStep < oldStep * 0.5f, "Corner refraction still has a sharp step");
+                    ++comparisons;
+                }
+                // Straight edges keep their original refraction. This strip
+                // includes the silhouette and its antialiasing transition.
+                for (int y = pad - 2; y < pad + int(80 * scale); ++y)
+                    for (int x = pad + int(110 * scale); x < pad + int(146 * scale); ++x)
+                        for (int c = 0; c < 4; ++c)
+                            require(std::abs(int(oldPixels[(y * w + x) * 4 + c])
+                                - int(newPixels[(y * w + x) * 4 + c])) <= 1, "Straight edge changed");
+
+                // A uniform backdrop removes directional sampling differences:
+                // coverage, depth-based shading and rim lighting must be exact.
+                for (int i = 0; i < w * h; ++i) {
+                    gradient[i * 4] = 65; gradient[i * 4 + 1] = 85;
+                    gradient[i * 4 + 2] = 105;
+                }
+                Target solid(w, h, gradient.data());
+                m = presetMaterial("platform");
+                render(legacy, solid, before); render(native, solid, after);
+                require(before.pixels() == after.pixels(), "Coverage, rim or material shading changed");
+
+                if (scale == 1 && radius == 12 && power == 4) {
+                    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+                        const int i = (y * w + x) * 4;
+                        gradient[i] = 30 + (x / 21 % 2) * 110;
+                        gradient[i + 1] = 20 + (y / 27 % 2) * 100;
+                        gradient[i + 2] = 40 + (x + y) % 130;
+                    }
+                    Target grid(w, h, gradient.data());
+                    m = presetMaterial("lens");
+                    m.blur_alpha0 = m.blur_alpha3 = m.face_opacity = 0;
+                    render(legacy, grid, before); render(native, grid, after);
+                    save("build/corners-before.ppm", before); save("build/corners-after.ppm", after);
+                }
+                require(glGetError() == GL_NO_ERROR, "Optical corner OpenGL error");
+            }
+    std::cout << "PASS: " << comparisons << " corner continuity checks, unchanged straight edges, coverage and rim.\n";
+}
+
 int main() try {
     auto display = eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
     require(display != EGL_NO_DISPLAY && eglInitialize(display, nullptr, nullptr), "Cannot initialize surfaceless EGL");
@@ -158,6 +253,7 @@ int main() try {
     require(context != EGL_NO_CONTEXT && eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context), "Cannot create GLES3 context");
     std::cout << "Renderer: " << glGetString(GL_RENDERER) << '\n';
     Program native(read("shaders/glass.frag"), false), reference(read("tests/reference/glass.frag"), true);
+    Program legacy(outlineOptics(read("shaders/glass.frag")), false);
     Program nativeBlur(read("shaders/blur.frag"), false), referenceBlur(read("tests/reference/blur.frag"), true);
     GLuint vao, vbo; glGenVertexArrays(1, &vao); glBindVertexArray(vao); glGenBuffers(1, &vbo);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
@@ -190,7 +286,7 @@ int main() try {
             expected.bind(); parameters(reference, m, scale, w, h, ww, wh, true, roundingPower);
             sharp.sample(0); refBlur.sample(1); glDisable(GL_BLEND); quad();
             copy(sharp, actual); actual.bind(); glViewport(pad, pad, ww, wh);
-            parameters(native, m, scale, w, h, ww, wh, false, roundingPower); sharp.sample(0); blurred.sample(1);
+            parameters(legacy, m, scale, w, h, ww, wh, false, roundingPower); sharp.sample(0); blurred.sample(1);
             glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); quad(); glDisable(GL_BLEND);
             const auto a = actual.pixels(), b = expected.pixels();
             int maximum = 0; double sum = 0; int samples = 0;
@@ -205,6 +301,9 @@ int main() try {
                       << ": mean " << mean << "/255, max " << maximum << "/255\n";
             passed &= mean < 0.15 && maximum <= 3;
             if (scale == 1.0f && (name == "measured" || name == "platform" || name == "lens")) {
+                copy(sharp, actual); actual.bind(); glViewport(pad, pad, ww, wh);
+                parameters(native, m, scale, w, h, ww, wh, false, roundingPower); sharp.sample(0); blurred.sample(1);
+                glEnable(GL_BLEND); quad(); glDisable(GL_BLEND);
                 save("build/" + name + "-native.ppm", actual); save("build/" + name + "-webgl.ppm", expected);
             }
             // A completely faded decoration must leave the backdrop byte-for-byte intact.
@@ -216,7 +315,8 @@ int main() try {
         }
     }
     require(passed, "Shader parity exceeded tolerance");
-    std::cout << "PASS: 56 material/scale/corner comparisons, exact blur parity, transparent fade.\n";
+    std::cout << "PASS: 56 reference comparisons with outline optics, exact blur parity, transparent fade.\n";
+    opticalCorners(native, legacy);
     return 0;
 } catch (const std::exception& e) {
     std::cerr << "FAIL: " << e.what() << '\n'; return 1;

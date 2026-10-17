@@ -24,7 +24,7 @@ static void bindTexture(const SP<Render::IFramebuffer>& framebuffer, GLenum unit
 }
 
 bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IFramebuffer> sourceFramebuffer,
-                      CBox box, Vector2D& outPaddingRatio, int padding) {
+                      CBox box, Vector2D& outPaddingRatio, int padding, SP<Render::IFramebuffer> neighbours) {
     if (!sourceFramebuffer || !std::isfinite(box.x) || !std::isfinite(box.y) ||
         !std::isfinite(box.width) || !std::isfinite(box.height) || box.width <= 0 || box.height <= 0)
         return false;
@@ -50,9 +50,34 @@ bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IF
 
     outPaddingRatio = Vector2D(static_cast<double>(padding) / width, static_cast<double>(padding) / height);
     g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbId(sourceFramebuffer));
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbId(sampleFramebuffer));
-    glBlitFramebuffer(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    const bool useNeighbours = neighbours && neighbours->m_size == sourceFramebuffer->m_size &&
+                               neighbours->m_drmFormat == sourceFramebuffer->m_drmFormat;
+    const int ownX0 = std::floor(box.x), ownY0 = std::floor(box.y);
+    const int ownX1 = std::ceil(box.x + box.width), ownY1 = std::ceil(box.y + box.height);
+    auto copy = [&](int ax, int ay, int bx, int by, int cx, int cy, int dx, int dy) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbId(sourceFramebuffer));
+        glBlitFramebuffer(ax, ay, bx, by, cx, cy, dx, dy, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        if (!useNeighbours)
+            return;
+        const int left = std::clamp(ownX0, ax, bx), right = std::clamp(ownX1, ax, bx);
+        const int top = std::clamp(ownY0, ay, by), bottom = std::clamp(ownY1, ay, by);
+        // Four nonoverlapping rectangles exclude the entire owner, including
+        // rounded corners. Apply the same composition to offscreen gutters.
+        const std::array<std::array<int, 4>, 4> regions{{
+            {ax, ay, bx, top}, {ax, bottom, bx, by},
+            {ax, top, left, bottom}, {right, top, bx, bottom},
+        }};
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbId(neighbours));
+        for (const auto& r : regions) {
+            if (r[0] >= r[2] || r[1] >= r[3])
+                continue;
+            auto tx = [&](int x) { return cx + (x - ax) * (dx - cx) / (bx - ax); };
+            auto ty = [&](int y) { return cy + (y - ay) * (dy - cy) / (by - ay); };
+            glBlitFramebuffer(r[0], r[1], r[2], r[3], tx(r[0]), ty(r[1]), tx(r[2]), ty(r[3]), GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        }
+    };
+    copy(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1);
 
     // Extrude the monitor's edge pixels into offscreen padding. Clearing these
     // gutters to black darkens the blur when a window touches a screen edge.
@@ -68,8 +93,7 @@ bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IF
             const int bx = col == 0 ? sx0 + 1 : sx[col + 1];
             const int ay = row == 2 ? sy1 - 1 : sy[row];
             const int by = row == 0 ? sy0 + 1 : sy[row + 1];
-            glBlitFramebuffer(ax, ay, bx, by, dx[col], dy[row], dx[col + 1], dy[row + 1],
-                              GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            copy(ax, ay, bx, by, dx[col], dy[row], dx[col + 1], dy[row + 1]);
         }
     }
     return true;
@@ -82,16 +106,36 @@ void blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFram
         glBindFramebuffer(GL_FRAMEBUFFER, fbId(callerFramebuffer));
         return;
     }
-    const int width = std::max(1, static_cast<int>(sampleFramebuffer->m_size.x) / 2);
-    const int height = std::max(1, static_cast<int>(sampleFramebuffer->m_size.y) / 2);
-    auto& temporary = g_pGlobalState->blurTempFramebuffer;
-    for (auto* framebuffer : {&temporary, &blurredFramebuffer}) {
-        if (!*framebuffer)
-            *framebuffer = g_pHyprRenderer->createFB("hyprliquid-blur");
-        if ((*framebuffer)->m_size.x != width || (*framebuffer)->m_size.y != height ||
-            (*framebuffer)->m_drmFormat != sampleFramebuffer->m_drmFormat)
-            (*framebuffer)->alloc(width, height, sampleFramebuffer->m_drmFormat);
+    const int sourceWidth = static_cast<int>(sampleFramebuffer->m_size.x);
+    const int sourceHeight = static_cast<int>(sampleFramebuffer->m_size.y);
+    int width = std::max(1, (sourceWidth + 1) / 2);
+    int height = std::max(1, (sourceHeight + 1) / 2);
+    auto allocate = [&](SP<Render::IFramebuffer>& framebuffer, int w, int h) {
+        if (!framebuffer)
+            framebuffer = g_pHyprRenderer->createFB("hyprliquid-blur");
+        if (framebuffer->m_size.x != w || framebuffer->m_size.y != h ||
+            framebuffer->m_drmFormat != sampleFramebuffer->m_drmFormat)
+            framebuffer->alloc(w, h, sampleFramebuffer->m_drmFormat);
+    };
+    allocate(blurredFramebuffer, width, height);
+
+    // Preserve the half-resolution result, but prefilter into smaller levels
+    // until the Gaussian's taps overlap. Merely stretching the fixed kernel
+    // across the sharp image leaves a visible grid at larger effect scales.
+    std::vector<SP<Render::IFramebuffer>> levels{blurredFramebuffer};
+    auto& pyramid = g_pGlobalState->blurPyramid;
+    while ((sigma * width / sourceWidth > 2.8f || sigma * height / sourceHeight > 2.8f) &&
+           (width > 1 || height > 1)) {
+        width = std::max(1, (width + 1) / 2);
+        height = std::max(1, (height + 1) / 2);
+        const size_t index = levels.size() - 1;
+        if (pyramid.size() <= index)
+            pyramid.emplace_back();
+        allocate(pyramid[index], width, height);
+        levels.push_back(pyramid[index]);
     }
+    auto& temporary = g_pGlobalState->blurTempFramebuffer;
+    allocate(temporary, width, height);
 
     static constexpr std::array<float, 9> projection{2, 0, 0, 0, 2, 0, -1, -1, 1};
     auto& manager = g_pGlobalState->shaderManager;
@@ -100,23 +144,39 @@ void blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFram
     shader->setUniformInt(SHADER_TEX, 0);
     glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
     g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
-    g_pHyprOpenGL->setViewport(0, 0, width, height);
-
-    // Two horizontal/vertical pairs, 13 taps,
-    // half-resolution targets. The sharp texture is never overwritten.
-    const float step = sigma / 5.6f;
-    SP<Render::IFramebuffer> input = sampleFramebuffer;
-    for (int iteration = 0; iteration < 2; ++iteration) {
-        glBindFramebuffer(GL_FRAMEBUFFER, fbId(temporary));
+    auto draw = [&](const SP<Render::IFramebuffer>& target, const SP<Render::IFramebuffer>& input) {
+        glBindFramebuffer(GL_FRAMEBUFFER, fbId(target));
+        g_pHyprOpenGL->setViewport(0, 0, static_cast<int>(target->m_size.x), static_cast<int>(target->m_size.y));
         bindTexture(input, GL_TEXTURE0);
-        glUniform2f(manager.blurUniforms.direction, step / width, 0.0f);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-        glBindFramebuffer(GL_FRAMEBUFFER, fbId(blurredFramebuffer));
-        bindTexture(temporary, GL_TEXTURE0);
-        glUniform2f(manager.blurUniforms.direction, 0.0f, step / height);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-        input = blurredFramebuffer;
+    };
+
+    glUniform1i(manager.blurUniforms.filterMode, 1);
+    SP<Render::IFramebuffer> input = sampleFramebuffer;
+    for (const auto& level : levels) {
+        draw(level, input);
+        input = level;
     }
+
+    // The down/up filters already contribute some blur. Subtract their
+    // approximate variance to keep the requested radius stable across levels.
+    const float scaleX = static_cast<float>(sourceWidth) / width;
+    const float scaleY = static_cast<float>(sourceHeight) / height;
+    const float baseX = sourceWidth / blurredFramebuffer->m_size.x;
+    const float baseY = sourceHeight / blurredFramebuffer->m_size.y;
+    const float sigmaX = std::sqrt(std::max(0.0f, sigma * sigma - 0.4f * (scaleX * scaleX - baseX * baseX)));
+    const float sigmaY = std::sqrt(std::max(0.0f, sigma * sigma - 0.4f * (scaleY * scaleY - baseY * baseY)));
+    glUniform1i(manager.blurUniforms.filterMode, 0);
+    for (int iteration = 0; iteration < 2; ++iteration) {
+        glUniform2f(manager.blurUniforms.direction, sigmaX / (2.8f * sourceWidth), 0.0f);
+        draw(temporary, input);
+        glUniform2f(manager.blurUniforms.direction, 0.0f, sigmaY / (2.8f * sourceHeight));
+        draw(input, temporary);
+    }
+
+    glUniform1i(manager.blurUniforms.filterMode, 2);
+    for (size_t i = levels.size() - 1; i > 0; --i)
+        draw(levels[i - 1], levels[i]);
 
     glBindFramebuffer(GL_FRAMEBUFFER, fbId(callerFramebuffer));
     glBindVertexArray(0);

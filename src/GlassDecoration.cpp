@@ -70,8 +70,7 @@ void CGlassDecoration::onFullscreenStateChanged() {
 }
 
 bool CGlassDecoration::resolveEnabled() const {
-    const auto& config = g_pGlobalState->config;
-    const bool globalEnabled = config.enabled && **config.enabled;
+    const bool globalEnabled = runtimeEnabled();
 
     try {
         const auto window = m_window.lock();
@@ -102,6 +101,8 @@ bool CGlassDecoration::resolveThemeIsDark() const {
         }
 
         const auto& config = g_pGlobalState->config;
+        if (runtimeOverrides())
+            return runtimeThemeIsDark();
         const auto theme = readStringConfig(config.defaultTheme);
         if (!theme.empty())
             return theme != "light";
@@ -120,13 +121,20 @@ std::string CGlassDecoration::resolvePresetName() const {
             }
         }
 
-        const auto& config = g_pGlobalState->config;
-        const auto preset = readStringConfig(config.defaultPreset);
-        if (!preset.empty())
-            return std::string(preset);
+        return runtimeBasePreset();
     } catch (...) {}
 
     return "default";
+}
+
+const SPresetValues* CGlassDecoration::runtimeOverrides() const {
+    const auto window = m_window.lock();
+    if (window && window->m_ruleApplicator) {
+        for (const auto& tag : window->m_ruleApplicator->m_tagKeeper.getTags())
+            if (tag.starts_with(TAG_PRESET_PREFIX))
+                return nullptr;
+    }
+    return &g_pGlobalState->runtimeControl.profile.overrides;
 }
 
 SDecorationPositioningInfo CGlassDecoration::getPositioningInfo() {
@@ -148,8 +156,11 @@ void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
     if (!enabled)
         return;
 
-    CGlassPassElement::SGlassPassData data{m_self, alpha};
-    g_pHyprRenderer->m_renderPass.add(makeUnique<CGlassPassElement>(data));
+    CGlassPassElement::SGlassPassData data{m_self, alpha, WindowScene::queuedFor(m_window.lock()), WindowScene::buildingBase()};
+    g_pHyprRenderer->addPassElement(makeUnique<CGlassPassElement>(data));
+
+    if (data.sceneBase)
+        return;
 
     const auto window = m_window.lock();
     if (window) {
@@ -181,7 +192,8 @@ PHLWINDOW CGlassDecoration::getOwner() {
     return m_window.lock();
 }
 
-void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha) {
+void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
+                                 const std::shared_ptr<SWindowScene>& scene, bool sceneBase) {
     auto& shaderManager = g_pGlobalState->shaderManager;
     shaderManager.initializeIfNeeded();
 
@@ -211,12 +223,16 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha) {
 
     const bool isDark          = resolveThemeIsDark();
     const std::string preset   = resolvePresetName();
-    const SResolveContext ctx  = {preset, isDark, g_pGlobalState->config, g_pGlobalState->customPresets};
+    const SResolveContext ctx  = {preset, isDark, g_pGlobalState->config, g_pGlobalState->customPresets, runtimeOverrides()};
 
     const auto material = resolveMaterial(ctx);
     const float effectScale = monitor->m_scale * material.effect_scale;
-    if (!GlassRenderer::sampleBackground(m_sampleFramebuffer, source, transformBox, m_samplePaddingRatio,
-                                          materialPadding(material, effectScale)))
+    // Base glass sees only the background; the final pass sees the completed
+    // neighbouring panes outside its bounds and the true backdrop inside.
+    const auto backdrop = sceneBase && scene ? scene->background : source;
+    const auto neighbours = !sceneBase && scene && scene->ready ? scene->image : nullptr;
+    if (!GlassRenderer::sampleBackground(m_sampleFramebuffer, backdrop, transformBox, m_samplePaddingRatio,
+                                          materialPadding(material, effectScale), neighbours))
         return;
     GlassRenderer::blurBackground(m_sampleFramebuffer, m_blurredFramebuffer, material.blur_sigma * effectScale, source);
 
@@ -289,7 +305,7 @@ std::string CGlassDecoration::getDisplayName() {
 int CGlassDecoration::samplingPadding(PHLMONITOR monitor) const {
     if (!g_pGlobalState) return GlassRenderer::SAMPLE_PADDING_PX;
     const auto preset = resolvePresetName();
-    const SResolveContext ctx{preset, resolveThemeIsDark(), g_pGlobalState->config, g_pGlobalState->customPresets};
+    const SResolveContext ctx{preset, resolveThemeIsDark(), g_pGlobalState->config, g_pGlobalState->customPresets, runtimeOverrides()};
     const auto material = resolveMaterial(ctx);
     return materialPadding(material, (monitor ? monitor->m_scale : 1.0f) * material.effect_scale);
 }

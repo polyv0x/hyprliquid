@@ -370,6 +370,8 @@ static int handleLuaConfig(lua_State* L) {
     if (!forwardLuaConfig(L))
         return lua_error(L);
     lua_pop(L, 1); // hl
+    if (const auto manager = luaConfigManager(); manager && manager->isDynamicParse())
+        runtimeBaselineChanged(false);
     return 0;
 }
 
@@ -585,6 +587,8 @@ float resolvePresetFloat(
     Hyprlang::FLOAT* const* SOverridableConfig::* configField,
     float hardcodedDefault
 ) {
+    if (context.runtimeOverrides && isSet(context.runtimeOverrides->*presetField))
+        return context.runtimeOverrides->*presetField;
     return resolvePresetFloatImpl(context.presetName, context.isDark, presetField, configField,
                                  context.config, context.customPresets, hardcodedDefault, 0);
 }
