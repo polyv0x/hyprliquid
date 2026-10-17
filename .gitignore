@@ -1,0 +1,24 @@
+# Compiled plugin
+*.so
+
+# Build artifacts
+*.o
+*.d
+build/
+.cache/
+__pycache__/
+*.py[cod]
+
+# Local demo captures; upload separately for README embeds.
+/screenshots/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Debug
+*.dwo
+*.pdb

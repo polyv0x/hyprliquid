@@ -1,0 +1,9 @@
+[repository]
+name = "Hyprliquid"
+authors = ["polyv0x"]
+description = "Native glass effects for transparent Hyprland windows"
+
+[hyprliquid]
+description = "Backdrop glass for transparent windows and layer surfaces"
+output = "hyprliquid.so"
+build = ["make"]
