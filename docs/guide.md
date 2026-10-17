@@ -17,14 +17,18 @@ per-window presets, and optional layer surfaces.
 
 ## Build
 
+For installation with `hyprpm` or a fresh source checkout, start with the
+[installation instructions](../README.md#installation).
+
 Targets **Hyprland 0.56.2**. Build against the headers for the running compositor;
 the plugin checks the full Hyprland build/ABI string when loaded.
 
 Requirements: a C++23 compiler compatible with your Hyprland build, GNU Make,
-Python 3, pkg-config, json-c development files, Hyprland development headers,
-and their dependencies.
-`pkg-config --cflags hyprland` must locate the correct headers. On the development
-machine these are the headers already installed by `hyprpm`.
+Python 3, pkg-config, pixman, libdrm and json-c development files, Hyprland
+development headers, and their dependencies.
+`pkg-config --cflags hyprland pixman-1 libdrm json-c` must locate the correct
+headers. After updating Hyprland's headers, use `make -B -j4` to rebuild all
+objects.
 
 ```sh
 make -j4
@@ -46,6 +50,19 @@ hyprctl plugin list
 Multiple backdrop-effect plugins can interfere with the same rendering path.
 A manual load lasts for the current session. Use `hyprctl plugin unload` with
 the same absolute path to unload it.
+
+For a manual installation, load it at startup from `~/.config/hypr/hyprland.lua`:
+
+```lua
+hl.on("hyprland.start", function()
+    hl.exec_cmd("hyprctl plugin load /absolute/path/to/hyprliquid/hyprliquid.so")
+end)
+```
+
+Replace the example path with the absolute path to your built plugin. In a legacy
+`hyprland.conf`, use `plugin = /absolute/path/to/hyprliquid/hyprliquid.so` instead.
+For a `hyprpm` installation, use the `hyprpm reload` startup command from the
+[README](../README.md#hyprpm-recommended) instead of loading a second copy.
 
 ## Configure
 
