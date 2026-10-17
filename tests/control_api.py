@@ -3,7 +3,7 @@ import json
 import math
 
 
-def verify_control(ctl):
+def verify_control(ctl, config_path):
     def request(op, **fields):
         return json.loads(ctl('hyprliquid:control', json.dumps({'op': op, **fields})))
 
@@ -21,6 +21,25 @@ def verify_control(ctl):
     baseline = description['state']
     assert baseline['base_preset'] == 'test' and not baseline['active'], baseline
     assert math.isclose(baseline['material']['inner_refraction_amount'], -11)
+
+    # Every public preset must resolve the previewed tones without scalar
+    # overrides. A theme switch changes tone, not blur/refraction geometry.
+    for preset, rim in [('frosted', 0), ('soft-glass', 0.92), ('clear-glass', 1.2),
+                        ('frosted-glass', 1.2), ('clear-edge', 1.2)]:
+        materials = {}
+        for theme in ('dark', 'light'):
+            themed = request('apply', profile={'base_preset': preset, 'theme': theme})
+            assert themed['ok'], themed
+            state = themed['state']
+            assert state['theme'] == theme and state['panel']['overrides'] == {}
+            material = materials[theme] = state['material']
+            assert material['use_measured_face'] == 1
+            assert math.isclose(material['face_slope'], 0.72 if theme == 'dark' else 0.68, abs_tol=1e-6)
+            assert math.isclose(material['face_intercept'], 0.06 if theme == 'dark' else 0.30, abs_tol=1e-6)
+            assert math.isclose(material['rim_opacity'], rim * (0.65 if theme == 'dark' else 0.85), abs_tol=1e-6)
+        changed = {key for key in materials['dark'] if materials['dark'][key] != materials['light'][key]}
+        assert changed == {'face_slope', 'face_intercept'} | ({'rim_opacity'} if rim else set()), (preset, changed)
+    assert request('reset')['ok']
 
     # An explicitly customized old name remains selectable under its own id.
     assert 'frosted-full' in {p['id'] for p in description['presets']}
@@ -81,4 +100,25 @@ def verify_control(ctl):
     terminal = request('state')['state']
     assert not terminal['active'] and terminal['generation'] == reloaded['generation']
     print('PASS: control describe/state, atomic validation, signed values, field/full reset, revision guards, reload and terminal ownership', flush=True)
+
+    # Theme defaults must not hide an existing user's shared Lua customization.
+    original_config = config_path.read_text()
+    try:
+        config_path.write_text(original_config + '''
+if hl.plugin.hyprliquid then
+    hl.plugin.hyprliquid.preset("soft-glass", {
+        face_intercept = 0.18, dark = { face_intercept = 0.09 },
+    })
+end
+''')
+        ctl('reload')
+        for preset in ('soft-glass', 'clear-edge'):
+            for theme, intercept in [('dark', 0.09), ('light', 0.18)]:
+                customized = request('apply', profile={'base_preset': preset, 'theme': theme})
+                assert customized['ok'], customized
+                assert math.isclose(customized['state']['material']['face_intercept'], intercept, abs_tol=1e-6)
+    finally:
+        config_path.write_text(original_config)
+        ctl('reload')
+    print('PASS: all preset theme variants, inherited tones and shared/theme-specific Lua customizations', flush=True)
     return request

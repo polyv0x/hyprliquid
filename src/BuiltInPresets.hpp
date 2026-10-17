@@ -17,7 +17,18 @@ inline std::unordered_map<std::string, SCustomPreset> getAll() {
         add(name, target);
         presets.at(name).hidden = true;
     };
+    const auto tones = [&](const std::string& name, float rim) {
+        auto& preset = presets.at(name);
+        preset.dark.use_measured_face = preset.light.use_measured_face = 1.0f;
+        preset.dark.face_slope = 0.72f;
+        preset.dark.face_intercept = 0.06f;
+        preset.light.face_slope = 0.68f;
+        preset.light.face_intercept = 0.30f;
+        preset.dark.rim_opacity = rim * 0.65f;
+        preset.light.rim_opacity = rim * 0.85f;
+    };
     add("frosted");
+    tones("frosted", 0.0f);
     alias("default", "frosted");
     alias("measured", "frosted");
 
@@ -33,6 +44,7 @@ inline std::unordered_map<std::string, SCustomPreset> getAll() {
     platform.shadow_amount = 0.2f;
     platform.aberration_amount = 7.5f;
     platform.rim_opacity = 0.92f;
+    tones("soft-glass", platform.rim_opacity);
 
     alias("platform", "soft-glass");
     for (const auto* name : {"lighter", "darker", "ultra_darker", "no_bleed"})
@@ -49,6 +61,9 @@ inline std::unordered_map<std::string, SCustomPreset> getAll() {
     lens.face_opacity = 0.25f;
     lens.holding_tone_opacity = 0.0f;
     lens.rim_opacity = 1.2f;
+    // Keep the face tones inherited from soft-glass, with the lens's own rim.
+    presets.at("clear-glass").dark.rim_opacity = lens.rim_opacity * 0.65f;
+    presets.at("clear-glass").light.rim_opacity = lens.rim_opacity * 0.85f;
     alias("lens", "clear-glass");
 
     auto& frostedGlass = add("frosted-glass", "lens");

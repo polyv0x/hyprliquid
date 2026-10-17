@@ -91,7 +91,7 @@ static void blur(const Program& program, const Target& sharp, Target& temporary,
         quad(); input = &result;
     }
 }
-static SMaterial presetMaterial(const std::string& name) {
+static SMaterial presetMaterial(const std::string& name, bool dark = true) {
     const auto all = BuiltInPresets::getAll();
     SMaterial m;
     std::vector<const SCustomPreset*> chain;
@@ -102,6 +102,10 @@ static SMaterial presetMaterial(const std::string& name) {
     }
     for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
 #define GLASS_PARAM(name, value, lo, hi) if ((*it)->shared.name != SENTINEL_FLOAT) m.name = (*it)->shared.name;
+#include "MaterialParams.inc"
+#undef GLASS_PARAM
+        const auto& variant = dark ? (*it)->dark : (*it)->light;
+#define GLASS_PARAM(name, value, lo, hi) if (variant.name != SENTINEL_FLOAT) m.name = variant.name;
 #include "MaterialParams.inc"
 #undef GLASS_PARAM
     }
@@ -282,8 +286,11 @@ int main() try {
         }
         Target sharp(w, h, pixels.data()), temp(w/2, h/2), blurred(w/2, h/2), refBlur(w/2, h/2);
         Target actual(w, h), expected(w, h);
-        for (const auto& name : presets) {
-            const auto m = presetMaterial(name);
+        for (const auto& name : presets) for (const bool dark : {true, false}) {
+            const auto m = presetMaterial(name, dark);
+            const std::string theme = dark ? "dark" : "light";
+            require(m.use_measured_face == 1.0f && m.face_slope == (dark ? 0.72f : 0.68f)
+                    && m.face_intercept == (dark ? 0.06f : 0.30f), "Preset lost its theme tones: " + name);
             require(name != "soft-glass" || m.inner_refraction_amount == -7.0f, "Negative refraction was lost");
             blur(nativeBlur, sharp, temp, blurred, m.blur_sigma * scale, false);
             blur(referenceBlur, sharp, temp, refBlur, m.blur_sigma * scale, true);
@@ -302,7 +309,7 @@ int main() try {
                     sum += difference; ++samples;
                 }
             const double mean = sum / samples;
-            std::cout << name << " @ " << scale << "x, rounding " << roundingPower
+            std::cout << name << " (" << theme << ") @ " << scale << "x, rounding " << roundingPower
                       << ": mean " << mean << "/255, max " << maximum << "/255\n";
             passed &= mean < 0.15 && maximum <= 3;
             ++comparisons;
@@ -310,7 +317,7 @@ int main() try {
                 copy(sharp, actual); actual.bind(); glViewport(pad, pad, ww, wh);
                 parameters(native, m, scale, w, h, ww, wh, false, roundingPower); sharp.sample(0); blurred.sample(1);
                 glEnable(GL_BLEND); quad(); glDisable(GL_BLEND);
-                save("build/" + name + "-native.ppm", actual); save("build/" + name + "-webgl.ppm", expected);
+                save("build/" + name + "-" + theme + "-native.ppm", actual); save("build/" + name + "-" + theme + "-webgl.ppm", expected);
             }
             // A completely faded decoration must leave the backdrop byte-for-byte intact.
             copy(sharp, actual); actual.bind(); glViewport(pad, pad, ww, wh);

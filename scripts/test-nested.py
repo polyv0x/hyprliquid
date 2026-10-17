@@ -47,8 +47,10 @@ def main():
         env['LIBSEAT_BACKEND'] = 'seatd'
         env['SEATD_SOCK'] = str(runtime / 'no-seatd.sock')
         clients = []
+        config_path = runtime / 'hyprland.lua'
+        shutil.copyfile(ROOT / 'tests/nested.lua', config_path)
         with (BUILD / 'nested.log').open('w') as log:
-            compositor = subprocess.Popen(['Hyprland', '--config', str(ROOT / 'tests/nested.lua')], env=env, stdout=log, stderr=log)
+            compositor = subprocess.Popen(['Hyprland', '--config', str(config_path)], env=env, stdout=log, stderr=log)
             try:
                 socket = wait_for(lambda: next(runtime.glob('hypr/*/.socket.sock'), None), compositor)
                 env['HYPRLAND_INSTANCE_SIGNATURE'] = socket.parent.name
@@ -80,7 +82,7 @@ def main():
                 shadow = json.loads(ctl('-j', 'getoption', 'decoration:shadow:enabled'))
                 assert shadow.get('bool', shadow.get('int')) == 1, shadow
                 print('PASS: load and Lua configuration (including signed preset values)', flush=True)
-                control = verify_control(ctl)
+                control = verify_control(ctl, config_path)
                 ctl('dismissnotify')
 
                 if shutil.which('kitty') and shutil.which('grim'):
@@ -180,6 +182,15 @@ def main():
                         assert capture('nested-renamed-' + preset) == pixels, preset
                     assert control('reset')['ok']
                     print('PASS: renamed presets and saved frosted profiles render identically', flush=True)
+                    for preset in sorted(public_presets):
+                        assert control('apply', profile={'base_preset': preset, 'theme': 'dark'})['ok']
+                        dark_pixels = capture('nested-theme-' + preset + '-dark')
+                        assert control('apply', patch={'theme': 'light'})['ok']
+                        assert capture('nested-theme-' + preset + '-light') != dark_pixels, preset + ' theme switch did not repaint'
+                        assert control('apply', patch={'theme': 'dark'})['ok']
+                        assert capture('nested-theme-' + preset + '-dark-restored') == dark_pixels, preset + ' theme round trip changed pixels'
+                    assert control('reset')['ok']
+                    print('PASS: all five dark/light variants repaint idle windows and restore identical pixels', flush=True)
                     for preset in ['frosted', 'soft-glass', 'frosted-glass', 'clear-edge', 'clear-glass']:
                         ctl('eval', 'hl.plugin.hyprliquid.config({ default_preset = ' + json.dumps(preset) + ' })')
                         window_action(address, 'alter_zorder', 'mode = "top"')

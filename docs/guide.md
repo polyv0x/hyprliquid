@@ -96,6 +96,15 @@ refraction. Select `soft-glass` or `clear-glass` for stronger refraction and hig
 | `frosted-glass` | Strong lens refraction with blur across the whole pane |
 | `clear-edge` | Frosted center with a clear, strongly refractive border |
 
+Every preset has dark and light variants. Dark uses deeper face shading and
+softer rim highlights; light lifts the face and highlights. Blur, refraction,
+and edge geometry stay the same. The difference is strongest in `frosted` and
+`soft-glass`; the lens-based presets retain their 25% face blend for a subtler
+change. Select a variant with `default_theme`, a window theme tag, or the
+Noctalia panel's Theme selector. Follow Noctalia tracks the shell's dark/light
+mode. Explicit panel slider overrides take precedence over the variant; reset
+an overridden field to inherit its theme value again.
+
 `frosted-glass` preserves the saved `frosted-full` material: the clear-glass
 base with `blur_alpha0 = 0.96` and `blur_alpha3 = 1`. `clear-edge` preserves
 `frosted-clear-edge`: the same base with `blur_alpha0 = 0.02`, `blur_alpha3 = 1`,
@@ -161,6 +170,8 @@ Window tags are `hyprliquid_enabled`, `hyprliquid_disabled`,
 The disabled tag wins. Preset values resolve through the selected theme variant,
 shared preset, inherited preset, theme configuration, and global configuration.
 To change a field supplied by a preset, override it with `glass.preset(...)`.
+Shared user values also override built-in dark/light defaults; an explicit
+`dark = { ... }` or `light = { ... }` customization wins for that theme.
 Signed values, including negative inner refraction and coverage offsets, are
 preserved throughout that chain.
 

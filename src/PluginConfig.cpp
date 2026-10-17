@@ -244,6 +244,10 @@ void commitPendingPresets() {
             if (!userPreset.inherits.empty())
                 it->second.inherits = userPreset.inherits;
             mergePresetValues(it->second.shared, userPreset.shared);
+            // Explicit shared user values override both built-in theme defaults.
+            // A user's theme-specific value still takes precedence below.
+            mergePresetValues(it->second.dark, userPreset.shared);
+            mergePresetValues(it->second.light, userPreset.shared);
             mergePresetValues(it->second.dark, userPreset.dark);
             mergePresetValues(it->second.light, userPreset.light);
         } else {
