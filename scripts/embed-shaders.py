@@ -2,11 +2,18 @@
 """Embed the reviewed GLSL sources; the plugin needs no runtime asset paths."""
 from pathlib import Path
 import sys
+import re
 
 root = Path(__file__).resolve().parent.parent
 entries = []
+
+def source_with_includes(path):
+    return re.sub(r'^#include "([^"]+)"$',
+                  lambda match: source_with_includes(path.parent / match[1]),
+                  path.read_text(), flags=re.MULTILINE)
+
 for name in ("glass.frag", "blur.frag", "scene-sample.frag"):
-    source = (root / "shaders" / name).read_text()
+    source = source_with_includes(root / "shaders" / name)
     if ')GLSL"' in source:
         raise ValueError("Shader contains the C++ raw-string delimiter")
     entries.append(f'    {{"{name}", R"GLSL({source})GLSL"}}')

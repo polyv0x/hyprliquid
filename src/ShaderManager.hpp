@@ -3,6 +3,15 @@
 #include <GLES3/gl32.h>
 #include <hyprland/src/render/Shader.hpp>
 #include <string>
+#include <array>
+#include <span>
+
+struct SCleanSampleUniforms {
+    GLint texture = -1;
+    GLint origin = -1;
+    GLint ownerBounds = -1;
+    void locate(GLuint program);
+};
 
 struct SGlassUniforms {
 #define GLASS_PARAM(name, value, lo, hi) GLint name = -1;
@@ -12,9 +21,12 @@ struct SGlassUniforms {
     GLint blurTexture = -1;
     GLint pixelScale = -1;
     GLint fadeAlpha = -1;
-    GLint cleanTexture = -1;
+    SCleanSampleUniforms clean;
     GLint cleanBlurTexture = -1;
+    GLint hasCleanBlur = -1;
     GLint useNeighborFalloff = -1;
+    GLint underlayShapes = -1;
+    GLint underlayCount = -1;
 
     // Layers only: temp FBO surface mask for content-aware glass
     GLint maskTex = -1;
@@ -30,6 +42,8 @@ struct SGlassUniforms {
 struct SBlurUniforms {
     GLint direction = -1;
     GLint filterMode = -1;
+    GLint cleanInput = -1;
+    SCleanSampleUniforms clean;
 };
 
 struct SSceneSampleUniforms {
@@ -46,6 +60,8 @@ class CShaderManager {
 
     void initializeIfNeeded();
     void destroy() noexcept;
+    // Upload on the caller's active texture unit; storage is reused between draws.
+    void bindUnderlayShapes(std::span<const std::array<float, 8>> shapes);
 
     SP<CShader>    glassShader = makeShared<CShader>();
     SGlassUniforms glassUniforms;
@@ -58,6 +74,8 @@ class CShaderManager {
 
   private:
     bool m_initialized = false;
+    GLuint m_underlayShapes = 0;
+    size_t m_underlayCapacity = 0;
 
     [[nodiscard]] static std::string loadShaderSource(const char* fileName);
     [[nodiscard]] bool compileGlassShader();

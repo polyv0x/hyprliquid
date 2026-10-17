@@ -34,7 +34,7 @@ while True:
         out = '\x1b[?25l\x1b[0m\x1b[2J'
         for row in range(size.lines):
             out += '\x1b[%d;1H' % (row + 1)
-            if data.get('solid') or (row // 4) % 2 == data['phase']:
+            if not data.get('empty') and (data.get('solid') or (row // 4) % 2 == data['phase']):
                 out += '\x1b[48;2;%d;%d;%dm' % tuple(data['color']) + ' ' * (size.columns - 1) + '\x1b[0m'
         print(out, end='', flush=True)
     time.sleep(0.05)
@@ -200,6 +200,9 @@ while True:
             assert current['window_pool']['leased_bytes'] == 0, 'Falloff retained a sample lease'
             assert current['allocation_failures'] == 0
             assert any(b['role'] == 'window-clean-blurred' for b in current['buffers']), 'Falloff never sampled the clean frost'
+            assert not any(b['role'] == 'window-clean-sharp' for b in current['buffers']), 'Falloff allocated a duplicate sharp crop'
+            if rate == 0.25:
+                (build / 'scene-falloff-buffers.json').write_text(json.dumps(current, indent=2))
             if allocations is None:
                 allocations = current['allocations']
             assert current['allocations'] == allocations, 'Falloff adjustment churned framebuffer allocations'
@@ -336,6 +339,65 @@ while True:
     assert 0 < distance[0.5, 0] < distance[1, 0], f'Floating contribution slider had no effect: {distance}'
     assert 0 < distance[1, 0.5] < distance[1, 0], f'Floating falloff slider had no effect: {distance}'
     print('PASS: adjacent floating panes keep both neighbor controls and identical pixels across focus changes', flush=True)
+
+    # An opaque window beneath a transparent receiver must block the wallpaper
+    # even along refracted edges outside the receiver's bounds. Neither slider
+    # may fade this true backdrop away. Exercise rotated framebuffer coordinates
+    # as well as the fractional scale used on DP-1.
+    underlay, receiver = windows
+    underlay_side = int(underlay['class'].rsplit('-', 1)[1])
+    receiver_side = int(receiver['class'].rsplit('-', 1)[1])
+    for scale, transform in ((1.25, 0), (1, 1)):
+        ctl('eval', 'hl.monitor({ output = ' + json.dumps(monitor_name) +
+            f', mode = "1280x800@60", position = "auto", scale = {scale}, transform = {transform} ' + '})')
+        time.sleep(0.7)
+        action(underlay, 'resize', 'x = 700, y = 540, relative = false')
+        action(underlay, 'move', 'x = 50, y = 60, relative = false')
+        action(receiver, 'resize', 'x = 400, y = 300, relative = false')
+        action(receiver, 'move', 'x = 300, y = 180, relative = false')
+        controls[underlay_side].write_text(json.dumps({'color': [30, 60, 240], 'phase': 0, 'solid': True}))
+        controls[receiver_side].write_text(json.dumps({'color': [0, 0, 0], 'phase': 0, 'empty': True}))
+        focus(receiver)
+        protected = tuple(round(v * scale) for v in (304, 260, 324, 400))
+        reference = None
+        for strength, rate in ((1, 0), (1, 1), (0.5, 1), (0, 0), (0, 1)):
+            contribution(strength)
+            falloff(rate)
+            edge = capture(f'scene-underlay-{scale}-{transform}-{strength}-{rate}').crop(protected)
+            if reference is None:
+                reference = edge
+                assert all(b > max(r, g) + 50 for r, g, b in edge.getdata()), 'Opaque underlay fixture missing'
+            else:
+                delta = max(max(pixel) for pixel in ImageChops.difference(reference, edge).getdata())
+                assert delta <= 1, f'Neighbor controls exposed wallpaper through underlay: {scale}, {transform}, {strength}, {rate}, {delta}'
+        controls[underlay_side].write_text(json.dumps({'color': [20, 200, 70], 'phase': 0, 'solid': True}))
+        repainted = capture(f'scene-underlay-{scale}-{transform}-repaint').crop(protected)
+        assert all(g > max(r, b) + 50 for r, g, b in repainted.getdata()), 'Underlay refraction did not repaint'
+        if transform == 0:
+            state = json.loads(ctl('hyprliquid:control', '{"op":"state"}'))['state']
+            sigma = state['material']['blur_sigma']
+            before_frame = buffers()['frame'] if initial_buffers else None
+            assert json.loads(ctl('hyprliquid:control', json.dumps({'op': 'apply', 'patch': {
+                'overrides': {'blur_sigma': 0}}})))['ok']
+            sharp = capture('scene-underlay-zero-blur').crop(protected)
+            assert all(g > max(r, b) + 50 for r, g, b in sharp.getdata()), 'Zero-blur underlay faded away'
+            if initial_buffers:
+                current = buffers()
+                assert not any(b['role'].startswith('window-clean') and b['last_used_frame'] > before_frame
+                               for b in current['buffers']), 'Zero-blur falloff used an extra framebuffer'
+            assert json.loads(ctl('hyprliquid:control', json.dumps({'op': 'apply', 'patch': {
+                'overrides': {'blur_sigma': sigma}}})))['ok']
+        print(f'PASS: opaque underlay blocks wallpaper at every neighbor setting, scale {scale}, transform {transform}', flush=True)
+    ctl('eval', 'hl.monitor({ output = ' + json.dumps(monitor_name) +
+        ', mode = "1280x800@60", position = "auto", scale = 1.25, transform = 0 })')
+    time.sleep(0.7)
+    for index, window in enumerate(windows):
+        action(window, 'resize', 'x = 400, y = 360, relative = false')
+        action(window, 'move', f'x = {50 + index * 420}, y = {100 + index * 30}, relative = false')
+        side = int(window['class'].rsplit('-', 1)[1])
+        controls[side].write_text(json.dumps({'color': [220, 40, 20] if index == 0 else [30, 60, 240], 'phase': index}))
+    time.sleep(0.4)
+    windows = sorted(json.loads(ctl('-j', 'clients')), key=lambda w: tuple(w['at']))
 
     # Cross the contact boundary and then overlap deeply. Both controls must
     # keep affecting the exposed edge of whichever pane is on top; actual

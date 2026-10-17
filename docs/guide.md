@@ -158,12 +158,15 @@ duplicated into the neighbour capture.
 `neighbor_contribution` controls how strongly those neighbours appear in
 the sampled backdrop. Its default, `1`, preserves the complete scene; `0` uses
 the clean background outside the receiving window instead. Intermediate values
-blend between them before blur and refraction. This weakens all neighbour
+blend the two backdrops with identical blur and refraction. This weakens neighbour
 content, including text and opaque panes, without changing the receiving pane's
 main frost, face opacity or overall refraction strength. It also applies when
 floating windows overlap, controlling the neighbour image sampled outside the
-receiving pane. It does not fade windows directly underneath the pane or apply
-to layer surfaces.
+receiving pane. When both the receiving pixel and its refracted sample lie over
+the same underlying window, that window keeps its full contribution. The check
+follows each pixel and the underlying window's rounded outline, so partial
+overlap does not switch off the controls across the entire pane. The controls
+do not apply to layer surfaces.
 
 `neighbor_falloff` progressively weakens the neighbour image from the receiving
 pane's edge toward its center, following its rounded outline. `0` preserves the
@@ -172,16 +175,30 @@ exponential fade; `0.5` halves the contribution every 16 logical pixels (scaled
 with `effect_scale`). Both versions of the backdrop receive identical blur and
 refraction, so the main frosted area remains present. This is an artistic edge
 fade, not a simulation of light focusing into physical caustics. It applies to
-neighbour content in both refraction and edge bleed.
+neighbour content in both refraction and edge bleed. Like contribution, falloff
+preserves an underlying window instead of fading it toward wallpaper.
 
 This adds one offscreen window pass and two reusable monitor-sized textures
 when at least two eligible windows and one glass pane are visible. Those frames
 repaint the monitor to keep the captured background free of old window pixels. It does not
 schedule extra frames on an idle desktop. Single-window and disabled-glass scenes
 skip the capture.
-Nonzero falloff with nonzero neighbour contribution additionally samples and
-blurs a clean backdrop using a second pooled pair for the current window. The
-pair is reused across windows and frames; zero falloff skips this extra work.
+Nonzero falloff with nonzero neighbour contribution needs one additional clean
+blur texture at half width and height, reused through the window buffer pool.
+The clean sharp image is sampled from existing textures; its first blur reduction
+selects those same pixels directly, avoiding a duplicate full-resolution image
+and copy pass. With zero blur, falloff needs no additional image storage.
+An overlapping pane with contribution below `1` also uses this clean backdrop,
+even with zero falloff, to preserve the underlying window while attenuating
+adjacent imagery. Overlap protection adds no further image buffers. A small
+reusable texture holds window bounds and rounding (32 bytes per capacity slot).
+Shape checks share their work across the refraction and bleed rays, and only
+rounded corners need the more expensive curve evaluation. With no overlap and
+zero falloff, contribution continues to use a single sharp/blur pair.
+
+For a padded 1778×1451 crop in a 4-byte pixel format, the extra falloff storage
+is 2.46 MiB instead of 12.30 MiB, an approximately 80% reduction in this extra
+storage (not total compositor VRAM). Driver allocation alignment is additional.
 
 Native controls:
 

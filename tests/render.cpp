@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <iterator>
 #include <stdexcept>
@@ -18,7 +19,14 @@ static void require(bool ok, const std::string& message) {
 static std::string read(const char* path) {
     std::ifstream file(path);
     require(file.good(), std::string("Cannot read ") + path);
-    return {std::istreambuf_iterator<char>(file), {}};
+    std::string source{std::istreambuf_iterator<char>(file), {}};
+    for (auto at = source.find("#include \""); at != std::string::npos; at = source.find("#include \"")) {
+        const auto end = source.find('"', at + 10);
+        require(end != std::string::npos, "Unterminated shader include");
+        const auto header = std::filesystem::path(path).parent_path() / source.substr(at + 10, end - at - 10);
+        source.replace(at, end - at + 1, read(header.c_str()));
+    }
+    return source;
 }
 static GLuint compile(GLenum type, const std::string& source) {
     GLuint shader = glCreateShader(type);
@@ -120,6 +128,10 @@ static void parameters(const Program& p, const SMaterial& m, float scale, int wi
     if (!reference) {
         p.i("tex", 0); p.i("blur_texture", 1); p.i("maskTex", 2); p.i("useMask", 0);
         p.i("clean_texture", 3); p.i("clean_blur_texture", 4); p.i("useNeighborFalloff", 0);
+        p.i("hasCleanBlur", 1);
+        glUniform2i(p.loc("cleanOrigin"), 0, 0);
+        glUniform4i(p.loc("cleanOwnerBounds"), -1000, -1000, -500, -500);
+        p.i("underlayShapes", 5); p.i("underlayCount", 0);
         p.v2("fullSize", ww, wh);
         p.v2("uvPadding", float(width - ww) / (2 * width), float(height - wh) / (2 * height));
         p.f("radius", 56 * scale); p.f("roundingPower", roundingPower); p.f("pixelScale", scale); p.f("fadeAlpha", 1);
@@ -307,6 +319,126 @@ static void neighborFalloff(const Program& shader) {
     std::cout << "PASS: " << comparisons << " neighbour falloff curves and unchanged frost/opacity at 3 output scales.\n";
 }
 
+static void underlayProtection(const Program& shader) {
+    constexpr std::array<unsigned char, 4> sceneColor{180, 80, 60, 255}, cleanColor{20, 120, 200, 255};
+    int comparisons = 0;
+    for (float scale : {1.0f, 1.25f, 2.0f}) {
+        const int w = 256 * scale, h = 192 * scale;
+        std::vector<unsigned char> scenePixels(w * h * 4), cleanPixels(w * h * 4);
+        for (int i = 0; i < w * h; ++i) for (int c = 0; c < 4; ++c) {
+            scenePixels[i * 4 + c] = sceneColor[c];
+            cleanPixels[i * 4 + c] = cleanColor[c];
+        }
+        Target scene(w, h, scenePixels.data()), clean(w, h, cleanPixels.data()), result(w, h);
+        GLuint shapes;
+        glGenTextures(1, &shapes);
+        glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, shapes);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        // Put the relevant shape second, to exercise multiple underlying windows.
+        for (bool rounded : {false, true}) for (bool rayLeaves : {false, true}) {
+            std::array<float, 16> geometry{1000, 1000, 10, 10, 0, 2, 0, 0};
+            const std::array<float, 8> lower = rounded
+                ? std::array<float, 8>{0, 0, 80, 80, 20, 2, 0, 0}
+                : std::array<float, 8>{rayLeaves ? 0.0f : -80.0f, 0, rayLeaves ? 40.0f : 120.0f, 192, 0, 2, 0, 0};
+            for (int i = 0; i < 8; ++i)
+                geometry[i + 8] = lower[i] * (i < 5 ? scale : 1);
+            glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, shapes);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 2, 2, 0, GL_RGBA, GL_FLOAT, geometry.data());
+            for (float contribution : {0.0f, 0.5f, 1.0f}) for (float bleed : {0.0f, 1.0f}) {
+                SMaterial material;
+                material.face_opacity = material.rim_opacity = material.shadow_amount = 0;
+                material.holding_tone_opacity = material.aberration_amount = material.bleed_darken = 0;
+                material.blur_alpha0 = material.blur_alpha3 = 0;
+                material.outer_refraction_amount = material.inner_refraction_amount = rounded ? 0 : 60;
+                material.outer_refraction_inv_height = material.inner_refraction_inv_height = 0;
+                material.edge_bleed_amount = rounded ? 0 : 60;
+                material.edge_bleed_inv_height = 0;
+                material.edge_bleed_opacity = bleed;
+                material.neighbor_contribution = contribution;
+                material.neighbor_falloff = 1;
+                result.bind(); parameters(shader, material, scale, w, h, w, h, false, 2);
+                shader.f("radius", 0); shader.i("useNeighborFalloff", 1); shader.i("underlayCount", 2);
+                scene.sample(0); scene.sample(1); clean.sample(3); clean.sample(4);
+                glDisable(GL_BLEND); quad();
+                const auto pixels = result.pixels();
+                for (bool covered : {false, true}) {
+                    const int x = (rounded ? (covered ? 20 : 4) : (covered ? 10 : 50)) * scale;
+                    const int y = (rounded ? (covered ? 20 : 4) : 96) * scale;
+                    const bool protectedRay = covered && (rounded || !rayLeaves);
+                    const float depth = std::min(x + 0.5f, y + 0.5f) / scale;
+                    const float weight = protectedRay ? 1 : contribution * std::exp2(-depth / 8.0f);
+                    for (int c = 0; c < 3; ++c) {
+                        const float expected = cleanColor[c] + weight * (sceneColor[c] - cleanColor[c]);
+                        require(std::abs(pixels[(y * w + x) * 4 + c] - expected) <= 0.6f,
+                                "Underlying window faded, or an exposed neighbour bypassed its controls");
+                    }
+                    ++comparisons;
+                }
+            }
+        }
+        glDeleteTextures(1, &shapes); glActiveTexture(GL_TEXTURE0);
+        require(glGetError() == GL_NO_ERROR, "Underlay protection OpenGL error");
+    }
+    std::cout << "PASS: " << comparisons << " underlying-window, exposed-neighbour, rounded-corner and ray-exit checks.\n";
+}
+
+static void cleanSampling() {
+    Program sceneShader(read("shaders/scene-sample.frag"), false);
+    Program blurShader(read("shaders/blur.frag"), false);
+    const std::string prefix = "#version 300 es\nprecision highp float; uniform sampler2D tex;\n";
+    const std::string interface = "\nin vec2 v_texcoord; layout(location=0) out vec4 fragColor;\n";
+    Program direct(prefix + interface + "void main(){ fragColor=vec4(texture(tex,v_texcoord).rgb,1); }", false);
+    Program reconstructed(prefix + read("shaders/clean-backdrop.glsl") + interface +
+                          "void main(){ fragColor=vec4(sample_clean(v_texcoord),1); }", false);
+    constexpr int w = 19, h = 13, sw = 29, sh = 23;
+    std::array<std::vector<unsigned char>, 3> inputs;
+    for (int source = 0; source < 3; ++source) {
+        inputs[source].resize(w * h * 4);
+        for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x)
+            for (int c = 0; c < 4; ++c)
+                inputs[source][(y * w + x) * 4 + c] = (x * 17 + y * 29 + source * 71 + c * 43) % 256;
+    }
+    Target native(w, h, inputs[0].data()), scene(w, h, inputs[1].data()), background(w, h, inputs[2].data());
+    Target full(sw, sh), materialized(sw, sh);
+    int comparisons = 0;
+    for (const auto& owner : std::array<std::array<int, 4>, 3>{{{3, 2, 15, 10}, {-2, -1, 6, 8}, {13, 8, 23, 17}}}) {
+        const int ox = owner[0] - 5, oy = owner[1] - 5;
+        for (bool clean : {false, true}) {
+            (clean ? materialized : full).bind(); sceneShader.use();
+            sceneShader.i("tex", 0); sceneShader.i("sceneTex", 1); sceneShader.i("backgroundTex", 2);
+            glUniform2i(sceneShader.loc("sampleOrigin"), ox, oy);
+            glUniform4iv(sceneShader.loc("ownerBounds"), 1, owner.data());
+            sceneShader.f("neighborContribution", clean ? 0 : 1);
+            native.sample(0); scene.sample(1); background.sample(2);
+            glDisable(GL_BLEND); quad();
+        }
+        for (const auto& size : std::array<std::array<int, 2>, 3>{{{sw, sh}, {42, 30}, {(sw + 1) / 2, (sh + 1) / 2}}}) {
+            Target expected(size[0], size[1]), actual(size[0], size[1]);
+            for (bool reduction : {false, true}) {
+                for (bool optimized : {false, true}) {
+                    (optimized ? actual : expected).bind();
+                    const auto& shader = reduction ? blurShader : optimized ? reconstructed : direct;
+                    shader.use(); shader.i("tex", 0); shader.i("clean_texture", 1);
+                    shader.i("filterMode", 1); shader.i("cleanInput", optimized ? 1 : 0);
+                    glUniform2i(shader.loc("cleanOrigin"), ox, oy);
+                    glUniform4iv(shader.loc("cleanOwnerBounds"), 1, owner.data());
+                    (optimized ? full : materialized).sample(0); background.sample(1);
+                    quad();
+                }
+                const auto a = actual.pixels(), e = expected.pixels();
+                for (size_t i = 0; i < a.size(); ++i)
+                    require(std::abs(int(a[i]) - int(e[i])) <= 1,
+                            "Reconstructed clean sharp/blur differs at owner boundary or offscreen gutter");
+                ++comparisons;
+            }
+        }
+    }
+    require(glGetError() == GL_NO_ERROR, "Clean sampling OpenGL error");
+    glActiveTexture(GL_TEXTURE0);
+    std::cout << "PASS: " << comparisons << " clean sharp/fused reduction comparisons, including bilinear boundaries and offscreen gutters.\n";
+}
+
 static void sceneSampling() {
     Program shader(read("shaders/scene-sample.frag"), false);
     // Distinct native/scene/background images catch use of an earlier-drawn
@@ -372,6 +504,8 @@ int main() try {
     glDisable(GL_DITHER);
     sceneSampling();
     neighborFalloff(native);
+    underlayProtection(native);
+    cleanSampling();
     bool passed = true;
     int comparisons = 0;
     std::vector<std::string> presets;

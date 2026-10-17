@@ -105,7 +105,7 @@ residency are outside its totals.
 | `windows`, `layers` | Resolved materials, preset/theme, owner and monitor, geometry; windows also report enablement and padding, layers report namespace and cache state |
 | `monitors` | Output names/IDs, physical size, scale, transform, refresh, FP16 status and color metadata |
 
-Roles distinguish `window-sharp`, `window-blurred`, `scene-background`,
+Roles distinguish `window-sharp`, `window-blurred`, `window-clean-blurred`, `scene-background`,
 `scene-windows`, `layer-sharp`, `layer-blurred`, `layer-temp`, `blur-pyramid`, and
 `blur-temp`. Window samples belong to `pool:<id>`, rather than a particular
 window. Owners and color IDs are runtime identifiers, not persistent keys.

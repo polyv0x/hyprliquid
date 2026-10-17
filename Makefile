@@ -21,7 +21,7 @@ build/%.o: src/%.cpp | build
 
 build/ShaderManager.o: build/ShaderSources.hpp
 
-build/ShaderSources.hpp: shaders/glass.frag shaders/blur.frag shaders/scene-sample.frag scripts/embed-shaders.py | build
+build/ShaderSources.hpp: shaders/glass.frag shaders/blur.frag shaders/scene-sample.frag shaders/clean-backdrop.glsl scripts/embed-shaders.py | build
 	python3 scripts/embed-shaders.py $@
 
 $(TARGET): $(OBJECTS)

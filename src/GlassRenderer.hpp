@@ -3,6 +3,7 @@
 #include "PluginConfig.hpp"
 
 #include <array>
+#include <span>
 #include <GLES3/gl32.h>
 #include <hyprland/src/render/Framebuffer.hpp>
 #include <hyprutils/math/Box.hpp>
@@ -39,6 +40,18 @@ struct SMaskInfo {
     int                                        regionRectCount = 0;
 };
 
+// Windows beneath the receiver are part of its real backdrop, not an extra
+// neighbour contribution. Each shape is two RGBA texels: local framebuffer
+// bounds (x, y, width, height), then radius, rounding power and two reserved values.
+using SUnderlayShape = std::array<float, 8>;
+
+struct SNeighborBackdrop {
+    SP<Render::IFramebuffer> background, blurred;
+    std::array<GLint, 2> sampleOrigin;
+    std::array<GLint, 4> ownerBounds;
+    std::span<const SUnderlayShape> underlayShapes;
+};
+
 bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IFramebuffer> sourceFramebuffer,
                        CBox box, Vector2D& outPaddingRatio, int padding = SAMPLE_PADDING_PX,
                        SP<Render::IFramebuffer> neighbours = nullptr,
@@ -48,7 +61,7 @@ bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IF
 // restored from its size so it always matches the re-bound framebuffer
 // (monitor fields would be wrong on 90°/270° transformed monitors).
 void blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFramebuffer>& blurredFramebuffer, float sigma,
-                    SP<Render::IFramebuffer> callerFramebuffer);
+                    SP<Render::IFramebuffer> callerFramebuffer, const SNeighborBackdrop* clean = nullptr);
 
 // When mask is non-null (layers only), the shader composites the surface content
 // over the glass effect in a single pass. When mask is null (windows), the shader
@@ -59,6 +72,6 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
                        float alpha, float cornerRadius, float roundingPower,
                        const Vector2D& paddingRatio, const SResolveContext& resolveContext,
                        const SMaskInfo* mask = nullptr,
-                       SP<Render::IFramebuffer> cleanSample = nullptr, SP<Render::IFramebuffer> cleanBlurred = nullptr);
+                       const SNeighborBackdrop* neighbors = nullptr);
 
 } // namespace GlassRenderer

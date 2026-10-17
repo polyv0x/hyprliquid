@@ -5,10 +5,14 @@ precision highp float;
 // Hyprland supplies a cropped, padded backdrop, window geometry and fade alpha.
 uniform sampler2D tex;               // sharp backdrop
 uniform sampler2D blur_texture;
-uniform sampler2D clean_texture;
 uniform sampler2D clean_blur_texture;
+uniform int hasCleanBlur;
+#include "clean-backdrop.glsl"
 uniform int useNeighborFalloff;
 uniform float neighbor_falloff;
+uniform float neighbor_contribution;
+uniform highp sampler2D underlayShapes;
+uniform int underlayCount;
 uniform vec2 fullSize;               // window extent in framebuffer pixels
 uniform vec2 uvPadding;
 uniform float radius;
@@ -117,14 +121,64 @@ float blur_ramp(float depth) {
     return mix(t, a.w, smoothstep(d.z, d.w, depth));
 }
 
-vec3 sample_backdrop(vec2 uv, float blur_t, float neighborWeight) {
+float underlay_coverage(vec2 point, vec4 bounds, vec2 rounding) {
+    vec2 halfSize = bounds.zw * 0.5;
+    float r = clamp(rounding.x, 0.0, min(halfSize.x, halfSize.y));
+    vec2 edge = abs(point - bounds.xy - halfSize) - halfSize;
+    if (max(edge.x, edge.y) >= 0.5)
+        return 0.0;
+    vec2 q = edge + r;
+    // Straight edges and the interior need only rectangle arithmetic. Evaluate
+    // the superellipse only in a rounded corner's small footprint.
+    if (min(q.x, q.y) <= 0.0)
+        return clamp(0.5 - (max(q.x, q.y) - r), 0.0, 1.0);
+    vec2 qc = max(q, 0.0);
+    float exponent = max(rounding.y, 1.0);
+    float d = min(max(q.x, q.y), 0.0) +
+        pow(pow(qc.x, exponent) + pow(qc.y, exponent), 1.0 / exponent) - r;
+    return clamp(0.5 - d, 0.0, 1.0);
+}
+
+vec4 underlay_weights(vec2 redUV, vec2 greenUV, vec2 blueUV, vec2 bleedUV) {
+    vec4 weight = vec4(0.0);
+    if (useNeighborFalloff == 0)
+        return weight;
+    for (int i = 0; i < underlayCount; ++i) {
+        vec4 bounds = texelFetch(underlayShapes, ivec2(0, i), 0);
+        vec2 rounding = texelFetch(underlayShapes, ivec2(1, i), 0).xy;
+        // Classify each receiving pixel, not the whole pane at first contact.
+        // Both ends of the ray must lie over the same underlying window.
+        float receiving = underlay_coverage(v_texcoord * fullSize, bounds, rounding);
+        if (receiving <= 0.0)
+            continue;
+        // Share shape fetches and receiver coverage across all four rays.
+        weight = max(weight, receiving * vec4(
+            underlay_coverage(redUV * fullSize, bounds, rounding),
+            underlay_coverage(greenUV * fullSize, bounds, rounding),
+            underlay_coverage(blueUV * fullSize, bounds, rounding),
+            underlay_coverage(bleedUV * fullSize, bounds, rounding)));
+        if (all(greaterThanEqual(weight, vec4(1.0))))
+            break;
+    }
+    return weight;
+}
+
+vec3 sample_backdrop(vec2 uv, float blur_t, float neighborWeight, float underlayWeight) {
     vec2 padded = backdropUV(uv);
-    vec3 sampled = mix(texture(tex, padded).rgb, texture(blur_texture, padded).rgb, blur_t);
+    vec3 sharp = texture(tex, padded).rgb;
+    vec3 sampled = mix(sharp, texture(blur_texture, padded).rgb, blur_t);
     if (useNeighborFalloff == 1) {
         // Both backdrops receive identical blur/refraction. Only their
         // neighbour difference fades; the main frost remains fully present.
-        vec3 clean = mix(texture(clean_texture, padded).rgb, texture(clean_blur_texture, padded).rgb, blur_t);
-        return mix(clean, sampled, neighborWeight);
+        vec3 clean = sample_clean(padded, sharp, true);
+        if (hasCleanBlur == 1)
+            clean = mix(clean, texture(clean_blur_texture, padded).rgb, blur_t);
+        // The completed scene already contains underlying windows outside the
+        // receiver; inside, both samples contain its real native backdrop.
+        // Keep that image where the ray stays over an underlying window. This
+        // avoids a third backdrop/blur pair just to undo the neighbour fade.
+        float weight = mix(neighborWeight, 1.0, underlayWeight);
+        sampled = mix(clean, sampled, weight);
     }
     return sampled;
 }
@@ -163,7 +217,8 @@ void main() {
     // A smooth artistic falloff in logical pixels, measured at the receiving
     // glass surface (including rounded corners), not at displaced sample UVs.
     // Strength 0.5 halves the neighbour contribution every 16 logical pixels.
-    float neighborWeight = useNeighborFalloff == 1 ? exp2(-depth * neighbor_falloff / 8.0) : 1.0;
+    float neighborWeight = useNeighborFalloff == 1
+        ? neighbor_contribution * exp2(-depth * neighbor_falloff / 8.0) : 1.0;
     vec2 opticalN = optical_normal(p, depth, n);
     vec3 bg = texture(tex, backdropUV(uv)).rgb;
     float h_outer = clamp(1.0 - depth * outer_refraction_inv_height, 0.0, 1.0);
@@ -177,17 +232,19 @@ void main() {
     vec2 ab = vec2(0.9239, 0.3827) * aberration_amount * h_ab;
     vec2 invSize = pixelScale / fullSize;
     float blur_t = blur_ramp(depth);
+    vec2 redUV = uv + (disp + ab) * invSize;
+    vec2 greenUV = uv + disp * invSize;
+    vec2 blueUV = uv + (disp - ab) * invSize;
+    vec2 bleedUV = uv + opticalN * edge_bleed_amount * invSize;
+    vec4 underlay = underlay_weights(redUV, greenUV, blueUV, bleedUV);
     vec3 refr = vec3(
-        sample_backdrop(uv + (disp + ab) * invSize, blur_t, neighborWeight).r,
-        sample_backdrop(uv + disp * invSize, blur_t, neighborWeight).g,
-        sample_backdrop(uv + (disp - ab) * invSize, blur_t, neighborWeight).b
+        sample_backdrop(redUV, blur_t, neighborWeight, underlay.r).r,
+        sample_backdrop(greenUV, blur_t, neighborWeight, underlay.g).g,
+        sample_backdrop(blueUV, blur_t, neighborWeight, underlay.b).b
     );
 
     float bleed = clamp(1.0 - depth * edge_bleed_inv_height, 0.0, 1.0);
-    vec2 bleedUV = backdropUV(uv + opticalN * edge_bleed_amount * invSize);
-    vec3 bleed_c = texture(blur_texture, bleedUV).rgb;
-    if (useNeighborFalloff == 1)
-        bleed_c = mix(texture(clean_blur_texture, bleedUV).rgb, bleed_c, neighborWeight);
+    vec3 bleed_c = sample_backdrop(bleedUV, 1.0, neighborWeight, underlay.a);
     bleed_c *= 1.0 - bleed_darken * bleed;
     refr = mix(refr, bleed_c, bleed * edge_bleed_opacity);
     refr = mix(refr, face_color_matrix(refr), face_opacity);

@@ -232,6 +232,34 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     // neighbouring panes outside its bounds and the true backdrop inside.
     const auto backdrop = sceneBase && scene ? scene->background : source;
     const auto neighbours = !sceneBase && scene && scene->ready ? scene->image : nullptr;
+    std::vector<GlassRenderer::SUnderlayShape> underlayShapes;
+    if (neighbours && (material.neighbor_contribution < 1.0f || material.neighbor_falloff > 0.0f)) {
+        // The scene is ordered in native painting order. Only windows already
+        // painted beneath this receiver can form its actual backdrop.
+        for (const auto& ref : scene->windows) {
+            const auto underneath = ref.lock();
+            if (underneath == window)
+                break;
+            if (!underneath)
+                continue;
+            auto box = WindowGeometry::computeWindowBox(underneath, monitor);
+            if (!box)
+                continue;
+            box->transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y);
+            if (box->x >= transformBox.x + transformBox.width || box->x + box->width <= transformBox.x ||
+                box->y >= transformBox.y + transformBox.height || box->y + box->height <= transformBox.y)
+                continue;
+            const bool unrounded = Fullscreen::controller()->getFullscreenModes(underneath).internal == Fullscreen::FSMODE_FULLSCREEN;
+            underlayShapes.push_back({static_cast<float>(box->x - transformBox.x),
+                                     static_cast<float>(box->y - transformBox.y),
+                                     static_cast<float>(box->width), static_cast<float>(box->height),
+                                     unrounded ? 0.0f : underneath->rounding() * monitor->m_scale,
+                                     underneath->roundingPower(), 0.0f, 0.0f});
+        }
+    }
+    const bool separateNeighbors = neighbours &&
+        ((material.neighbor_contribution > 0.0f && material.neighbor_falloff > 0.0f) ||
+         (!underlayShapes.empty() && material.neighbor_contribution < 1.0f));
     const int padding = materialPadding(material, effectScale);
     const int width = std::max(1, static_cast<int>(std::ceil(transformBox.width))) + 2 * padding;
     const int height = std::max(1, static_cast<int>(std::ceil(transformBox.height))) + 2 * padding;
@@ -242,7 +270,8 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     auto samples = g_pGlobalState->renderBuffers.acquire(width, height, backdrop);
     Vector2D paddingRatio;
     if (!GlassRenderer::sampleBackground(samples->sharp, backdrop, transformBox, paddingRatio,
-                                          padding, neighbours, scene ? scene->background : nullptr, material.neighbor_contribution))
+                                          padding, neighbours, scene ? scene->background : nullptr,
+                                          separateNeighbors ? 1.0f : material.neighbor_contribution))
         return;
     samples->sharp->setImageDescription(backdrop->imageDescription());
     // A zero-blur consumer passes a null result to the glass shader, but must
@@ -274,33 +303,40 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     if (const auto workspace = window->m_workspace; workspace && !window->m_pinned)
         glassAlpha *= workspace->m_alpha->value();
 
-    auto draw = [&](SP<Render::IFramebuffer> cleanSharp = nullptr, SP<Render::IFramebuffer> cleanBlurred = nullptr) {
+    auto draw = [&](const GlassRenderer::SNeighborBackdrop* neighbors = nullptr) {
         GlassRenderer::applyGlassEffect(samples->sharp, blurred, source,
                                          windowBox, transformBox, glassAlpha,
-                                         cornerRadius, roundingPower, paddingRatio, ctx, nullptr,
-                                         cleanSharp, cleanBlurred);
+                                         cornerRadius, roundingPower, paddingRatio, ctx, nullptr, neighbors);
     };
-    if (neighbours && material.neighbor_contribution > 0.0f && material.neighbor_falloff > 0.0f) {
-        // Keep a second pooled sample only while drawing this window. Its
-        // clean backdrop follows identical optics, so inward falloff removes
-        // neighbour content without fading the receiving pane's main frost.
-        auto clean = g_pGlobalState->renderBuffers.acquire(width, height, backdrop);
-        Vector2D cleanPadding;
-        if (GlassRenderer::sampleBackground(clean->sharp, backdrop, transformBox, cleanPadding,
-                                            padding, neighbours, scene->background, 0.0f)) {
-            clean->sharp->setImageDescription(backdrop->imageDescription());
-            auto cleanBlurred = clean->blurred;
-            GlassRenderer::blurBackground(clean->sharp, cleanBlurred, material.blur_sigma * effectScale, source);
-            if (cleanBlurred) {
-                clean->blurred = cleanBlurred;
-                cleanBlurred->setImageDescription(backdrop->imageDescription());
-            }
-            const auto cleanOwner = std::format("pool:{}", clean->id);
-            g_pGlobalState->renderBuffers.identify(clean->sharp, "window-clean-sharp", cleanOwner);
-            g_pGlobalState->renderBuffers.identify(clean->blurred, "window-clean-blurred", cleanOwner);
-            draw(clean->sharp, cleanBlurred);
+    if (separateNeighbors) {
+        GlassRenderer::SNeighborBackdrop neighbors{
+            scene->background, nullptr,
+            {static_cast<int>(std::floor(transformBox.x)) - padding,
+             static_cast<int>(std::floor(transformBox.y)) - padding},
+            {static_cast<int>(std::floor(transformBox.x)), static_cast<int>(std::floor(transformBox.y)),
+             static_cast<int>(std::ceil(transformBox.x + transformBox.width)),
+             static_cast<int>(std::ceil(transformBox.y + transformBox.height))},
+            underlayShapes};
+        if (material.blur_sigma <= 0.0f) {
+            // Clean sharp sampling is reconstructed from existing textures.
+            // With no blur this path needs no additional framebuffer at all.
+            draw(&neighbors);
             return;
         }
+        // Build only the half-resolution clean blur. Its first reduction
+        // selects native pixels inside the owner and background outside,
+        // removing the duplicate full-resolution clean image and copy pass.
+        auto clean = g_pGlobalState->renderBuffers.acquire((width + 1) / 2, (height + 1) / 2, backdrop);
+        auto cleanBlurred = clean->sharp;
+        GlassRenderer::blurBackground(samples->sharp, cleanBlurred, material.blur_sigma * effectScale, source, &neighbors);
+        if (cleanBlurred) {
+            clean->sharp = cleanBlurred;
+            cleanBlurred->setImageDescription(backdrop->imageDescription());
+            g_pGlobalState->renderBuffers.identify(cleanBlurred, "window-clean-blurred", std::format("pool:{}", clean->id));
+            neighbors.blurred = cleanBlurred;
+        }
+        draw(&neighbors);
+        return;
     }
     draw();
 }

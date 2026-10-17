@@ -2,10 +2,18 @@
 #include "Globals.hpp"
 #include "ShaderSources.hpp"
 
+#include <bit>
+
 #include <GLES3/gl32.h>
 #include <hyprland/src/helpers/Color.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
+
+void SCleanSampleUniforms::locate(GLuint program) {
+    texture = glGetUniformLocation(program, "clean_texture");
+    origin = glGetUniformLocation(program, "cleanOrigin");
+    ownerBounds = glGetUniformLocation(program, "cleanOwnerBounds");
+}
 
 std::string CShaderManager::loadShaderSource(const char* fileName) {
     if (SHADERS.contains(fileName))
@@ -37,9 +45,12 @@ bool CShaderManager::compileGlassShader() {
     glassUniforms.blurTexture = glGetUniformLocation(program, "blur_texture");
     glassUniforms.pixelScale = glGetUniformLocation(program, "pixelScale");
     glassUniforms.fadeAlpha = glGetUniformLocation(program, "fadeAlpha");
-    glassUniforms.cleanTexture = glGetUniformLocation(program, "clean_texture");
+    glassUniforms.clean.locate(program);
     glassUniforms.cleanBlurTexture = glGetUniformLocation(program, "clean_blur_texture");
+    glassUniforms.hasCleanBlur = glGetUniformLocation(program, "hasCleanBlur");
     glassUniforms.useNeighborFalloff = glGetUniformLocation(program, "useNeighborFalloff");
+    glassUniforms.underlayShapes = glGetUniformLocation(program, "underlayShapes");
+    glassUniforms.underlayCount = glGetUniformLocation(program, "underlayCount");
     glassUniforms.maskTex             = glGetUniformLocation(program, "maskTex");
     glassUniforms.useMask             = glGetUniformLocation(program, "useMask");
     glassUniforms.maskUVOffset        = glGetUniformLocation(program, "maskUVOffset");
@@ -70,6 +81,8 @@ bool CShaderManager::compileBlurShader() {
 
     blurUniforms.direction = glGetUniformLocation(program, "direction");
     blurUniforms.filterMode = glGetUniformLocation(program, "filterMode");
+    blurUniforms.cleanInput = glGetUniformLocation(program, "cleanInput");
+    blurUniforms.clean.locate(program);
 
     return true;
 }
@@ -107,9 +120,28 @@ void CShaderManager::initializeIfNeeded() {
     m_initialized = true;
 }
 
+void CShaderManager::bindUnderlayShapes(std::span<const std::array<float, 8>> shapes) {
+    if (!m_underlayShapes)
+        glGenTextures(1, &m_underlayShapes);
+    glBindTexture(GL_TEXTURE_2D, m_underlayShapes);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (shapes.size() > m_underlayCapacity) {
+        m_underlayCapacity = std::bit_ceil(shapes.size());
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 2, m_underlayCapacity, 0, GL_RGBA, GL_FLOAT, nullptr);
+    }
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 2, shapes.size(), GL_RGBA, GL_FLOAT, shapes.data());
+}
+
 void CShaderManager::destroy() noexcept {
     glassShader->destroy();
     blurShader->destroy();
     sceneSampleShader->destroy();
+    if (m_underlayShapes)
+        glDeleteTextures(1, &m_underlayShapes);
+    m_underlayShapes = 0;
+    m_underlayCapacity = 0;
     m_initialized = false;
 }
