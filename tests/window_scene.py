@@ -337,6 +337,41 @@ while True:
     assert 0 < distance[1, 0.5] < distance[1, 0], f'Floating falloff slider had no effect: {distance}'
     print('PASS: adjacent floating panes keep both neighbor controls and identical pixels across focus changes', flush=True)
 
+    # Cross the contact boundary and then overlap deeply. Both controls must
+    # keep affecting the exposed edge of whichever pane is on top; actual
+    # occlusion is allowed to change when the windows are raised.
+    overlap_strength = {}
+    for right_x in (451, 450, 449, 350):
+        action(windows[1], 'move', f'x = {right_x}, y = 130, relative = false')
+        windows = sorted(json.loads(ctl('-j', 'clients')), key=lambda w: tuple(w['at']))
+        frames = {}
+        for strength, rate in ((0, 0), (0.5, 0), (1, 0), (1, 0.5)):
+            contribution(strength)
+            falloff(rate)
+            for index, window in enumerate(windows):
+                focus(window)
+                frame = capture(f'scene-floating-contact-{right_x}-{strength}-{rate}-{index}')
+                x, y = window['at']
+                w, h = window['size']
+                edge_x = x + w - 64 if index == 0 else x + 4
+                edge = (edge_x, y + 36, edge_x + 60, y + h - 36)
+                frames[strength, rate, index] = frame.crop(tuple(round(v * 1.25) for v in edge))
+        for index in range(2):
+            zero = frames[0, 0, index]
+            distance = {(strength, rate): sum(sum(p) for p in ImageChops.difference(zero, frame).getdata())
+                        for (strength, rate, side), frame in frames.items() if side == index}
+            assert 0 < distance[0.5, 0] < distance[1, 0], \
+                f'Neighbor contribution stopped at contact/overlap: {right_x}, {index}, {distance}'
+            assert 0 < distance[1, 0.5] < distance[1, 0], \
+                f'Neighbor falloff stopped at contact/overlap: {right_x}, {index}, {distance}'
+            overlap_strength[right_x, index] = distance[1, 0]
+    for index in range(2):
+        before, after = overlap_strength[451, index], overlap_strength[449, index]
+        assert 0.7 < after / before < 1.3, f'Neighbor contribution snapped at first overlap: {overlap_strength}'
+    (build / 'scene-floating-overlap-strength.json').write_text(json.dumps(
+        {f'{x},{index}': value for (x, index), value in overlap_strength.items()}, indent=2))
+    print('PASS: both neighbor controls remain progressive through contact and overlap in either stacking order', flush=True)
+
     # Actual overlap must retain native occlusion: the newly focused opaque
     # client must cover the other, regardless of the neighbour sliders.
     for index, window in enumerate(windows):
@@ -355,8 +390,8 @@ while True:
     action(windows[1], 'move', 'x = 470, y = 130, relative = false')
     print('PASS: overlapping floating panes preserve native focus-dependent occlusion', flush=True)
 
-    # A float overlapping one tile must not disable the stable scene between
-    # the two tiles, which was supported before floating captures were added.
+    # A float overlapping one tile must keep the tiled scene and reflect above
+    # the tile, even when lowering it moves it before tiles in WindowState.
     for window in windows:
         action(window, 'float', 'action = "disable"')
     time.sleep(0.4)
@@ -377,7 +412,8 @@ while True:
     floating = next(w for w in json.loads(ctl('-j', 'clients')) if w['pid'] == occluder.pid)
     action(floating, 'float', 'action = "enable"')
     action(floating, 'resize', 'x = 160, y = 160, relative = false')
-    action(floating, 'move', 'x = 750, y = 250, relative = false')
+    action(floating, 'move', 'x = 530, y = 250, relative = false')
+    action(floating, 'alter_zorder', 'mode = "bottom"')
     time.sleep(0.4)
     windows = sorted([w for w in json.loads(ctl('-j', 'clients')) if not w['floating']], key=lambda w: tuple(w['at']))
     contribution(1)
@@ -389,10 +425,14 @@ while True:
     assert inside(first, windows[0]).tobytes() == inside(second, windows[0]).tobytes(), 'Overlapping float disabled tiled capture'
     edge = inside(second, windows[0], True)
     assert sum(b > max(r, g) + 20 and b > 60 for r, g, b in edge.getdata()) > 100, 'Overlapping float removed tiled neighbour'
+    assert sum(g > max(r, b) + 20 and g > 60 for r, g, b in edge.getdata()) > 100, 'Overlapping float missing from tiled reflection'
+    action(floating, 'alter_zorder', 'mode = "top"')
+    raised = capture('scene-tiled-with-float-raised')
+    assert inside(second, windows[0]).tobytes() == inside(raised, windows[0]).tobytes(), 'Float reflected below a tile after lowering'
     occluder.terminate()
     occluder.wait(timeout=5)
     wait(lambda: len(json.loads(ctl('-j', 'clients'))) == 2)
-    print('PASS: an overlapping float leaves the existing tiled neighbor scene intact', flush=True)
+    print('PASS: overlapping floats reflect above tiles independent of focus and raise/lower ordering', flush=True)
 
     # Closing the neighbour must not leave its old capture behind. Repeated
     # captures of the remaining pane should settle to the same pixels.

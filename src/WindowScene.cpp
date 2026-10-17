@@ -4,6 +4,7 @@
 #include "WindowGeometry.hpp"
 
 #include <GLES3/gl32.h>
+#include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
 #include <hyprland/src/render/pass/Pass.hpp>
 #include <hyprutils/utils/ScopeGuard.hpp>
@@ -114,12 +115,9 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
     if (!workspace || renderer->m_bRenderingSnapshot || renderer->m_renderData.projectionType != Render::RPT_MONITOR)
         return nullptr;
 
-    struct SCandidate {
-        PHLWINDOW window;
-        CBox goal, current;
-    };
-    std::vector<SCandidate> candidates;
-    bool floatingGeometryKnown = true;
+    auto scene = std::make_shared<SWindowScene>();
+    std::vector<CBox> tiledBoxes;
+    bool hasGlass = false;
     for (const auto& window : Desktop::windowState()->windows()) {
         if (!window->m_isMapped || window->isHidden() || !renderer->shouldRenderWindow(window, monitor))
             continue;
@@ -127,47 +125,37 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
         if (!ignoreSpecial && workspace->m_isSpecialWorkspace != window->onSpecialWorkspace())
             continue;
 
-        const auto goal = WindowGeometry::computeWindowBox(window, monitor, Desktop::View::IGeometric::GEOMETRIC_GOAL);
-        const auto current = WindowGeometry::computeWindowBox(window, monitor);
-        if (!window->m_transformers.empty() || !goal || !current) {
-            if (window->m_isFloating) {
-                // An arbitrary transform may extend beyond its geometry box.
-                // Keep the existing tiled capture, but do not admit floats
-                // whose lack of overlap we cannot establish.
-                floatingGeometryKnown = false;
+        if (!window->m_transformers.empty()) {
+            // Transformed floats keep their native pass without disabling
+            // the ordinary windows' capture.
+            if (window->m_isFloating)
                 continue;
-            }
             return nullptr;
         }
-        candidates.push_back({window, *goal, *current});
-    }
-
-    auto scene = std::make_shared<SWindowScene>();
-    std::vector<CBox> boxes;
-    bool hasGlass = false;
-    for (const auto& candidate : candidates) {
-        const auto& window = candidate.window;
-        if (window->m_isFloating) {
-            // A separate floating pane has no stacking dependency: capture it
-            // regardless of which neighbour has focus. Overlapping floats
-            // still use native occlusion and do not disable the tiled scene.
-            if (!floatingGeometryKnown || std::ranges::any_of(candidates, [&](const auto& other) {
-                    return other.window != window &&
-                        (!candidate.goal.intersection(other.goal).empty() ||
-                         !candidate.current.intersection(other.current).empty());
-                }))
-                continue;
-        }
-        // Tiles use the destination layout so transient overlap while opening
-        // a split cannot remove their reflections. Capture uses current boxes.
-        for (const auto& other : boxes)
-            if (!candidate.goal.intersection(other).empty())
+        if (!window->m_isFloating) {
+            // Keep stacked tiling layouts native. Test destination boxes so
+            // transient overlap while opening a split keeps its reflections.
+            const auto goal = WindowGeometry::computeWindowBox(window, monitor, Desktop::View::IGeometric::GEOMETRIC_GOAL);
+            if (!goal)
                 return nullptr;
-        boxes.push_back(candidate.goal);
+            for (const auto& other : tiledBoxes)
+                if (!goal->intersection(other).empty())
+                    return nullptr;
+            tiledBoxes.push_back(*goal);
+        }
+        // Floats stay in the scene through overlap. Sampling uses this capture
+        // only outside the owner, retaining its real backdrop inside its bounds.
         scene->windows.emplace_back(window);
         if (auto* decoration = decorationFor(window); decoration && decoration->usesGlass())
             hasGlass = true;
     }
+    // Match the compositor's planes while preserving each plane's z-order.
+    // A float may precede a tile in WindowState after either is raised/lowered;
+    // copying that list verbatim would reflect the tile over the floating pane.
+    const auto focused = Desktop::focusState()->window();
+    std::ranges::stable_sort(scene->windows, {}, [&](const PHLWINDOWREF& window) {
+        return window->m_isFloating ? (window->m_pinned ? 3 : 2) : (window == focused ? 1 : 0);
+    });
     return hasGlass && scene->windows.size() > 1 ? scene : nullptr;
 }
 

@@ -138,19 +138,21 @@ drawn. This prevents strong refraction, especially `clear-glass`, from pulling t
 shadow's clipped edge into the pane as an inset outline. Native shadows and
 borders still render normally after the glass.
 
-Adjacent, non-overlapping windows refract a completed scene of their
-neighbours from the same frame. Focusing a different window no longer removes it
-from another pane's refraction. The capture includes each pane's base glass and
-client content; it does not recursively capture reflections of reflections.
+Windows refract a completed scene of their neighbours from the same frame.
+Focusing a different window no longer removes it from another pane's refraction.
+The capture includes each pane's base glass and client content; it does not
+recursively capture reflections of reflections.
 Sampling inside a window still uses its real backdrop, avoiding self-refraction.
 The overlap check uses the destination tiling layout, so temporary overlap while
 a new split opens does not interrupt reflections. Captures follow the animated
 window positions and sizes each frame.
-Floating windows join this scene when their current and destination boxes are
-separate from all other visible windows. This includes adjacent floating panes
-and floats beside tiles. Overlapping floats retain native stacking without
-disabling the existing tiled capture. Overlapping tiles and transformed windows
-retain native stacking behavior. Popups and native borders/shadows are not
+Floating windows stay in this scene as they touch and overlap other windows.
+The capture follows their stacking order, with floats above tiles. The actual
+backdrop inside each pane still follows native stacking, so opaque content
+covers lower windows and transparent areas reveal what is underneath. Moving
+across the overlap boundary does not switch neighbour refraction off.
+Overlapping tiles and transformed windows retain native stacking behavior.
+Popups and native borders/shadows are not
 duplicated into the neighbour capture.
 
 `neighbor_contribution` controls how strongly those neighbours appear in
@@ -158,8 +160,10 @@ the sampled backdrop. Its default, `1`, preserves the complete scene; `0` uses
 the clean background outside the receiving window instead. Intermediate values
 blend between them before blur and refraction. This weakens all neighbour
 content, including text and opaque panes, without changing the receiving pane's
-main frost, face opacity or overall refraction strength. Overlapping floating
-windows and layer surfaces do not use this control.
+main frost, face opacity or overall refraction strength. It also applies when
+floating windows overlap, controlling the neighbour image sampled outside the
+receiving pane. It does not fade windows directly underneath the pane or apply
+to layer surfaces.
 
 `neighbor_falloff` progressively weakens the neighbour image from the receiving
 pane's edge toward its center, following its rounded outline. `0` preserves the

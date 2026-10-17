@@ -5,7 +5,7 @@
 #include <memory>
 #include <vector>
 
-// One frame's non-overlapping window scene. The capture pass owns its private render
+// One frame's neighbouring-window scene. The capture pass owns its private render
 // pass; glass elements only retain this data, avoiding an ownership cycle.
 struct SWindowScene {
     SP<Render::IFramebuffer> background;
