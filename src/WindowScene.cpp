@@ -114,30 +114,56 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
     if (!workspace || renderer->m_bRenderingSnapshot || renderer->m_renderData.projectionType != Render::RPT_MONITOR)
         return nullptr;
 
-    auto scene = std::make_shared<SWindowScene>();
-    std::vector<CBox> boxes;
-    bool hasGlass = false;
+    struct SCandidate {
+        PHLWINDOW window;
+        CBox goal, current;
+    };
+    std::vector<SCandidate> candidates;
+    bool floatingGeometryKnown = true;
     for (const auto& window : Desktop::windowState()->windows()) {
-        if (!window->m_isMapped || window->isHidden() || window->m_isFloating || !renderer->shouldRenderWindow(window, monitor))
+        if (!window->m_isMapped || window->isHidden() || !renderer->shouldRenderWindow(window, monitor))
             continue;
         const bool ignoreSpecial = window->m_monitorMovedFrom != -1 && window->m_workspace && !window->m_workspace->isVisible();
         if (!ignoreSpecial && workspace->m_isSpecialWorkspace != window->onSpecialWorkspace())
             continue;
 
-        // Overlapping/stacked layouts and transformed windows must keep native
-        // occlusion. Test the destination layout: opening a split temporarily
-        // overlaps the new tile with its still-shrinking neighbour. Rejecting
-        // that overlap drops reflections from every pane until motion stops.
-        // Capture and glass sampling still use each frame's animated geometry.
-        if (!window->m_transformers.empty())
+        const auto goal = WindowGeometry::computeWindowBox(window, monitor, Desktop::View::IGeometric::GEOMETRIC_GOAL);
+        const auto current = WindowGeometry::computeWindowBox(window, monitor);
+        if (!window->m_transformers.empty() || !goal || !current) {
+            if (window->m_isFloating) {
+                // An arbitrary transform may extend beyond its geometry box.
+                // Keep the existing tiled capture, but do not admit floats
+                // whose lack of overlap we cannot establish.
+                floatingGeometryKnown = false;
+                continue;
+            }
             return nullptr;
-        const auto box = WindowGeometry::computeWindowBox(window, monitor, Desktop::View::IGeometric::GEOMETRIC_GOAL);
-        if (!box)
-            return nullptr;
+        }
+        candidates.push_back({window, *goal, *current});
+    }
+
+    auto scene = std::make_shared<SWindowScene>();
+    std::vector<CBox> boxes;
+    bool hasGlass = false;
+    for (const auto& candidate : candidates) {
+        const auto& window = candidate.window;
+        if (window->m_isFloating) {
+            // A separate floating pane has no stacking dependency: capture it
+            // regardless of which neighbour has focus. Overlapping floats
+            // still use native occlusion and do not disable the tiled scene.
+            if (!floatingGeometryKnown || std::ranges::any_of(candidates, [&](const auto& other) {
+                    return other.window != window &&
+                        (!candidate.goal.intersection(other.goal).empty() ||
+                         !candidate.current.intersection(other.current).empty());
+                }))
+                continue;
+        }
+        // Tiles use the destination layout so transient overlap while opening
+        // a split cannot remove their reflections. Capture uses current boxes.
         for (const auto& other : boxes)
-            if (!box->intersection(other).empty())
+            if (!candidate.goal.intersection(other).empty())
                 return nullptr;
-        boxes.push_back(*box);
+        boxes.push_back(candidate.goal);
         scene->windows.emplace_back(window);
         if (auto* decoration = decorationFor(window); decoration && decoration->usesGlass())
             hasGlass = true;

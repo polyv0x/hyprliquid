@@ -1,4 +1,4 @@
-"""Pixel regressions for neighbouring tiled-window refraction in real Hyprland."""
+"""Pixel regressions for neighbouring-window refraction in real Hyprland."""
 import json
 import subprocess
 import time
@@ -91,6 +91,11 @@ while True:
 
     def focus(window):
         ctl('dispatch', 'hl.dsp.focus({ window = ' + json.dumps('address:' + window['address']) + ' })')
+        if window['floating']:
+            # The focus dispatcher does not raise a float. Do both, as a click
+            # would, so the regression actually exercises a new draw order.
+            ctl('dispatch', 'hl.dsp.window.alter_zorder({ window = ' +
+                json.dumps('address:' + window['address']) + ', mode = "top" })')
 
     def capture(name):
         time.sleep(0.4)
@@ -291,8 +296,106 @@ while True:
             assert (changed == 0 if strength == 0 else changed > 100), f'Wrong neighbour contribution: {name}, {changed}'
         print(f'PASS: focus-stable neighbour contribution and falloff at scale {scale}, transform {transform}', flush=True)
 
+    # Floating neighbours have the same optical relationship when their boxes
+    # are separate. Focus changes their stacking order, not their contribution.
+    ctl('eval', 'hl.monitor({ output = ' + json.dumps(monitor_name) +
+        ', mode = "1280x800@60", position = "auto", scale = 1.25, transform = 0 })')
+    time.sleep(0.7)
+
+    def action(window, name, values):
+        ctl('dispatch', 'hl.dsp.window.' + name + '({ window = ' +
+            json.dumps('address:' + window['address']) + ', ' + values + ' })')
+
+    for index, window in enumerate(windows):
+        action(window, 'float', 'action = "enable"')
+        action(window, 'resize', 'x = 400, y = 360, relative = false')
+        action(window, 'move', f'x = {50 + index * 420}, y = {100 + index * 30}, relative = false')
+        side = int(window['class'].rsplit('-', 1)[1])
+        controls[side].write_text(json.dumps({'color': [220, 40, 20] if index == 0 else [30, 60, 240], 'phase': index}))
+    time.sleep(0.4)
+    windows = sorted(json.loads(ctl('-j', 'clients')), key=lambda w: tuple(w['at']))
+    assert all(w['floating'] for w in windows)
+    assert windows[0]['at'][0] + windows[0]['size'][0] < windows[1]['at'][0]
+    (build / 'scene-floating-clients.json').write_text(json.dumps(windows, indent=2))
+    floating_frames = {}
+    for strength, rate in ((0, 0), (0, 1), (0.5, 0), (1, 0), (1, 0.5)):
+        contribution(strength)
+        falloff(rate)
+        focus(windows[0])
+        first = capture(f'scene-floating-{strength}-{rate}-left')
+        focus(windows[1])
+        second = capture(f'scene-floating-{strength}-{rate}-right')
+        for window in windows:
+            assert inside(first, window).tobytes() == inside(second, window).tobytes(), \
+                f'Floating neighbour changed on focus: contribution {strength}, falloff {rate}'
+        floating_frames[strength, rate] = second
+    zero = inside(floating_frames[0, 0], windows[0], True)
+    distance = {key: sum(sum(p) for p in ImageChops.difference(zero, inside(frame, windows[0], True)).getdata())
+                for key, frame in floating_frames.items()}
+    assert distance[0, 1] == 0
+    assert 0 < distance[0.5, 0] < distance[1, 0], f'Floating contribution slider had no effect: {distance}'
+    assert 0 < distance[1, 0.5] < distance[1, 0], f'Floating falloff slider had no effect: {distance}'
+    print('PASS: adjacent floating panes keep both neighbor controls and identical pixels across focus changes', flush=True)
+
+    # Actual overlap must retain native occlusion: the newly focused opaque
+    # client must cover the other, regardless of the neighbour sliders.
+    for index, window in enumerate(windows):
+        side = int(window['class'].rsplit('-', 1)[1])
+        controls[side].write_text(json.dumps({'color': [220, 40, 20] if index == 0 else [30, 60, 240], 'phase': index, 'solid': True}))
+    action(windows[1], 'move', 'x = 350, y = 130, relative = false')
+    # Sample opaque terminal cells inside both panes, away from the transparent
+    # padding where the lower window should remain visible through the glass.
+    overlap = tuple(round(v * 1.25) for v in (385, 190, 400, 240))
+    for index, window in enumerate(windows):
+        focus(window)
+        pixels = list(capture(f'scene-floating-overlap-{index}').crop(overlap).getdata())
+        channel = 0 if index == 0 else 2
+        assert all(p[channel] > max(p[c] for c in range(3) if c != channel) + 50 for p in pixels), \
+            'Overlapping floating panes lost native stacking'
+    action(windows[1], 'move', 'x = 470, y = 130, relative = false')
+    print('PASS: overlapping floating panes preserve native focus-dependent occlusion', flush=True)
+
+    # A float overlapping one tile must not disable the stable scene between
+    # the two tiles, which was supported before floating captures were added.
+    for window in windows:
+        action(window, 'float', 'action = "disable"')
+    time.sleep(0.4)
+    windows = sorted(json.loads(ctl('-j', 'clients')), key=lambda w: tuple(w['at']))
+    for index, window in enumerate(windows):
+        side = int(window['class'].rsplit('-', 1)[1])
+        controls[side].write_text(json.dumps({'color': [220, 40, 20] if index == 0 else [30, 60, 240], 'phase': index, 'solid': True}))
+    path = build / 'scene-color-occluder.json'
+    path.write_text(json.dumps({'color': [20, 200, 70], 'phase': 0, 'solid': True}))
+    occluder = subprocess.Popen([
+        'kitty', '--start-as=normal', '--class', 'hyprliquid-scene-occluder',
+        '-o', 'remember_window_size=no', '-o', 'background_opacity=0',
+        '-o', 'cursor_blink_interval=0', '-o', 'font_size=16',
+        'python3', '-c', pattern, str(path), '2',
+    ], env=env, stdout=log, stderr=log)
+    clients.append(occluder)
+    wait(lambda: len(json.loads(ctl('-j', 'clients'))) == 3)
+    floating = next(w for w in json.loads(ctl('-j', 'clients')) if w['pid'] == occluder.pid)
+    action(floating, 'float', 'action = "enable"')
+    action(floating, 'resize', 'x = 160, y = 160, relative = false')
+    action(floating, 'move', 'x = 750, y = 250, relative = false')
+    time.sleep(0.4)
+    windows = sorted([w for w in json.loads(ctl('-j', 'clients')) if not w['floating']], key=lambda w: tuple(w['at']))
+    contribution(1)
+    falloff(0)
+    focus(windows[0])
+    first = capture('scene-tiled-with-float-left')
+    focus(windows[1])
+    second = capture('scene-tiled-with-float-right')
+    assert inside(first, windows[0]).tobytes() == inside(second, windows[0]).tobytes(), 'Overlapping float disabled tiled capture'
+    edge = inside(second, windows[0], True)
+    assert sum(b > max(r, g) + 20 and b > 60 for r, g, b in edge.getdata()) > 100, 'Overlapping float removed tiled neighbour'
+    occluder.terminate()
+    occluder.wait(timeout=5)
+    wait(lambda: len(json.loads(ctl('-j', 'clients'))) == 2)
+    print('PASS: an overlapping float leaves the existing tiled neighbor scene intact', flush=True)
+
     # Closing the neighbour must not leave its old capture behind. Repeated
-    # captures of the remaining resized pane should settle to the same pixels.
+    # captures of the remaining pane should settle to the same pixels.
     side = int(windows[0]['class'].rsplit('-', 1)[1])
     controls[side].write_text(json.dumps({'color': [220, 40, 20], 'phase': 0}))
     closing = windows[1]

@@ -138,25 +138,28 @@ drawn. This prevents strong refraction, especially `clear-glass`, from pulling t
 shadow's clipped edge into the pane as an inset outline. Native shadows and
 borders still render normally after the glass.
 
-Adjacent, non-overlapping tiled windows refract a completed scene of their
-neighbours from the same frame. Focusing a different tile no longer removes it
+Adjacent, non-overlapping windows refract a completed scene of their
+neighbours from the same frame. Focusing a different window no longer removes it
 from another pane's refraction. The capture includes each pane's base glass and
 client content; it does not recursively capture reflections of reflections.
 Sampling inside a window still uses its real backdrop, avoiding self-refraction.
 The overlap check uses the destination tiling layout, so temporary overlap while
 a new split opens does not interrupt reflections. Captures follow the animated
 window positions and sizes each frame.
-Floating windows, overlapping tiles and transformed windows retain native
-stacking behavior. Popups and native borders/shadows are not duplicated into the
-neighbour capture.
+Floating windows join this scene when their current and destination boxes are
+separate from all other visible windows. This includes adjacent floating panes
+and floats beside tiles. Overlapping floats retain native stacking without
+disabling the existing tiled capture. Overlapping tiles and transformed windows
+retain native stacking behavior. Popups and native borders/shadows are not
+duplicated into the neighbour capture.
 
-`neighbor_contribution` controls how strongly those tiled neighbours appear in
+`neighbor_contribution` controls how strongly those neighbours appear in
 the sampled backdrop. Its default, `1`, preserves the complete scene; `0` uses
 the clean background outside the receiving window instead. Intermediate values
 blend between them before blur and refraction. This weakens all neighbour
 content, including text and opaque panes, without changing the receiving pane's
-main frost, face opacity or overall refraction strength. Floating windows and
-layer surfaces do not use this control.
+main frost, face opacity or overall refraction strength. Overlapping floating
+windows and layer surfaces do not use this control.
 
 `neighbor_falloff` progressively weakens the neighbour image from the receiving
 pane's edge toward its center, following its rounded outline. `0` preserves the
@@ -167,9 +170,9 @@ refraction, so the main frosted area remains present. This is an artistic edge
 fade, not a simulation of light focusing into physical caustics. It applies to
 neighbour content in both refraction and edge bleed.
 
-This adds one offscreen tiled-window pass and two reusable monitor-sized textures
-when at least two tiles and one glass pane are visible. Those frames repaint the
-monitor to keep the captured background free of old window pixels. It does not
+This adds one offscreen window pass and two reusable monitor-sized textures
+when at least two eligible windows and one glass pane are visible. Those frames
+repaint the monitor to keep the captured background free of old window pixels. It does not
 schedule extra frames on an idle desktop. Single-window and disabled-glass scenes
 skip the capture.
 Nonzero falloff with nonzero neighbour contribution additionally samples and
@@ -185,7 +188,7 @@ Native controls:
 | `default_preset` | `frosted` | Material preset |
 | `glass_opacity` | `1` | Mix the material with the original backdrop |
 | `effect_scale` | `1` | Scale the material's pixel distances |
-| `neighbor_contribution` | `1` | Contribution of tiled neighbours, from `0` to `1` |
+| `neighbor_contribution` | `1` | Contribution of adjacent neighbours, from `0` to `1` |
 | `neighbor_falloff` | `0` | Edge-to-center neighbour fade, from `0` (off) to `1` (fast) |
 | `default_theme` | `dark` | Select `dark` or `light` overrides |
 | `layers.enabled` | `false` | Enable optional layer-surface glass |

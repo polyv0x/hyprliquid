@@ -33,7 +33,7 @@ GLASS_PARAM(coverage_width, 2.0f, 0.1f, 4.0f)
 // Native integration controls. Window geometry comes from Hyprland.
 GLASS_PARAM(glass_opacity, 1.0f, 0.0f, 1.0f)
 GLASS_PARAM(effect_scale, 1.0f, 0.1f, 3.0f)
-// Tiled-window scene composition, before blur/refraction. 1 preserves the full scene.
+// Neighbour scene composition, before blur/refraction. 1 preserves the full scene.
 GLASS_PARAM(neighbor_contribution, 1.0f, 0.0f, 1.0f)
 // Artistic edge-to-center attenuation. Zero preserves uniform contribution.
 GLASS_PARAM(neighbor_falloff, 0.0f, 0.0f, 1.0f)
