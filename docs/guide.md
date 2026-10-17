@@ -78,8 +78,9 @@ All scalar material controls, defaults, and bounds are listed in
 [`src/MaterialParams.inc`](../src/MaterialParams.inc).
 Distances and blur sigma use logical pixels and scale with the output;
 `effect_scale` adjusts their overall size. The shape follows the actual window's
-size, corner radius, and rounding power. `superness = 0` follows Hyprland;
-an explicit exponent overrides the material's corner shape.
+size, corner radius, and rounding power, including per-window rules. Set corner
+curvature through Hyprland's `rounding_power`; the material has no independent
+shape override.
 
 Native controls:
 
@@ -127,7 +128,8 @@ python3 scripts/test-nested.py
 
 `make test` needs Mesa surfaceless EGL and GLES3. It compiles both the reference
 fixtures and the native shaders, compares all seven materials at 1×, 1.5×,
-and 2× scale, checks the blur independently, and checks fade-to-zero blending.
+and 2× scale, exercises rounding powers from 1 to 10, checks the blur
+independently, and checks fade-to-zero blending.
 The reference fixtures are retained in `tests/reference`. Rendered comparisons
 are written to `build/*-native.ppm` and `build/*-webgl.ppm`.
 

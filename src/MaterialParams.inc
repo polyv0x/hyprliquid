@@ -30,7 +30,6 @@ GLASS_PARAM(face_intercept, 0.2788f, 0.0f, 0.6f)
 GLASS_PARAM(use_measured_face, 1.0f, 0.0f, 1.0f)
 GLASS_PARAM(coverage_offset, 0.10f, -1.0f, 1.0f)
 GLASS_PARAM(coverage_width, 2.0f, 0.1f, 4.0f)
-// Native integration controls; superness=0 follows Hyprland's rounding power.
-GLASS_PARAM(superness, 0.0f, 0.0f, 6.0f)
+// Native integration controls. Window geometry comes from Hyprland.
 GLASS_PARAM(glass_opacity, 1.0f, 0.0f, 1.0f)
 GLASS_PARAM(effect_scale, 1.0f, 0.1f, 3.0f)

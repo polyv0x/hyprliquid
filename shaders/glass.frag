@@ -41,7 +41,6 @@ uniform float face_intercept;
 uniform float use_measured_face;
 uniform float coverage_offset;
 uniform float coverage_width;
-uniform float superness;
 uniform float glass_opacity;
 
 // Optional layer surface composition.
@@ -71,7 +70,7 @@ vec3 face_color_matrix(vec3 c) {
 float sdf_at(vec2 p) {
     vec2 halfSize = fullSize / (2.0 * pixelScale);
     float r = clamp(radius / pixelScale, 0.0, min(halfSize.x, halfSize.y));
-    float exponent = max(superness > 0.0 ? superness : roundingPower, 2.0);
+    float exponent = max(roundingPower, 1.0);
     vec2 q = abs(p) - (halfSize - r);
     vec2 qc = max(q, 0.0);
     float corner = pow(pow(qc.x, exponent) + pow(qc.y, exponent), 1.0 / exponent) - r;

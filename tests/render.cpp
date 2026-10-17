@@ -107,7 +107,8 @@ static SMaterial presetMaterial(const std::string& name) {
     }
     sanitizeMaterial(m); return m;
 }
-static void parameters(const Program& p, const SMaterial& m, float scale, int width, int height, int ww, int wh, bool reference) {
+static void parameters(const Program& p, const SMaterial& m, float scale, int width, int height, int ww, int wh,
+                       bool reference, float roundingPower) {
     p.use();
 #define GLASS_PARAM(name, value, lo, hi) p.f(#name, m.name);
 #include "MaterialParams.inc"
@@ -116,13 +117,13 @@ static void parameters(const Program& p, const SMaterial& m, float scale, int wi
         p.i("tex", 0); p.i("blur_texture", 1); p.i("maskTex", 2); p.i("useMask", 0);
         p.v2("fullSize", ww, wh);
         p.v2("uvPadding", float(width - ww) / (2 * width), float(height - wh) / (2 * height));
-        p.f("radius", 56 * scale); p.f("roundingPower", 3.6f); p.f("pixelScale", scale); p.f("fadeAlpha", 1);
+        p.f("radius", 56 * scale); p.f("roundingPower", roundingPower); p.f("pixelScale", scale); p.f("fadeAlpha", 1);
         return;
     }
     p.i("source_texture", 0); p.i("blur_texture", 1);
     p.v2("uRes", width, height); p.v2("uInvRes", 1.0f / width, 1.0f / height);
     p.v2("uCenter", width * 0.5f, height * 0.5f); p.v2("uHalf", ww * 0.5f, wh * 0.5f);
-    p.f("uCornerRadius", 56 * scale); p.f("uSuperness", 3.6f);
+    p.f("uCornerRadius", 56 * scale); p.f("uSuperness", roundingPower);
     for (const auto& [name, value] : std::initializer_list<std::pair<const char*, float>>{
         {"outer_refraction_amount", m.outer_refraction_amount}, {"inner_refraction_amount", m.inner_refraction_amount},
         {"refraction_threshold0", m.refraction_threshold0}, {"refraction_threshold1", m.refraction_threshold1},
@@ -164,7 +165,11 @@ int main() try {
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
     glDisable(GL_DITHER);
     bool passed = true;
-    for (float scale : {1.0f, 1.5f, 2.0f}) {
+    // Cover output scaling and Hyprland's full corner-power range, including
+    // triangular and intermediate corners that must not be clamped to circles.
+    for (const auto [scale, roundingPower] : std::initializer_list<std::pair<float, float>>{
+             {1.0f, 3.6f}, {1.5f, 3.6f}, {2.0f, 3.6f},
+             {1.5f, 1.0f}, {1.5f, 1.5f}, {1.5f, 2.0f}, {1.5f, 4.4f}, {1.5f, 10.0f}}) {
         const int ww = 400 * scale, wh = 240 * scale, pad = 160 * scale;
         const int w = ww + 2 * pad, h = wh + 2 * pad;
         std::vector<unsigned char> pixels(w * h * 4);
@@ -182,10 +187,10 @@ int main() try {
             blur(nativeBlur, sharp, temp, blurred, m.blur_sigma * scale, false);
             blur(referenceBlur, sharp, temp, refBlur, m.blur_sigma * scale, true);
             require(blurred.pixels() == refBlur.pixels(), "Blur differs from WebGL");
-            expected.bind(); parameters(reference, m, scale, w, h, ww, wh, true);
+            expected.bind(); parameters(reference, m, scale, w, h, ww, wh, true, roundingPower);
             sharp.sample(0); refBlur.sample(1); glDisable(GL_BLEND); quad();
             copy(sharp, actual); actual.bind(); glViewport(pad, pad, ww, wh);
-            parameters(native, m, scale, w, h, ww, wh, false); sharp.sample(0); blurred.sample(1);
+            parameters(native, m, scale, w, h, ww, wh, false, roundingPower); sharp.sample(0); blurred.sample(1);
             glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); quad(); glDisable(GL_BLEND);
             const auto a = actual.pixels(), b = expected.pixels();
             int maximum = 0; double sum = 0; int samples = 0;
@@ -196,21 +201,22 @@ int main() try {
                     sum += difference; ++samples;
                 }
             const double mean = sum / samples;
-            std::cout << name << " @ " << scale << "x: mean " << mean << "/255, max " << maximum << "/255\n";
+            std::cout << name << " @ " << scale << "x, rounding " << roundingPower
+                      << ": mean " << mean << "/255, max " << maximum << "/255\n";
             passed &= mean < 0.15 && maximum <= 3;
             if (scale == 1.0f && (name == "measured" || name == "platform" || name == "lens")) {
                 save("build/" + name + "-native.ppm", actual); save("build/" + name + "-webgl.ppm", expected);
             }
             // A completely faded decoration must leave the backdrop byte-for-byte intact.
             copy(sharp, actual); actual.bind(); glViewport(pad, pad, ww, wh);
-            parameters(native, m, scale, w, h, ww, wh, false); native.f("fadeAlpha", 0);
+            parameters(native, m, scale, w, h, ww, wh, false, roundingPower); native.f("fadeAlpha", 0);
             sharp.sample(0); blurred.sample(1); glEnable(GL_BLEND); quad(); glDisable(GL_BLEND);
             require(actual.pixels() == pixels, "Fade zero changed the backdrop");
             require(glGetError() == GL_NO_ERROR, "OpenGL error");
         }
     }
     require(passed, "Shader parity exceeded tolerance");
-    std::cout << "PASS: 21 material/scale comparisons, exact blur parity, transparent fade.\n";
+    std::cout << "PASS: 56 material/scale/corner comparisons, exact blur parity, transparent fade.\n";
     return 0;
 } catch (const std::exception& e) {
     std::cerr << "FAIL: " << e.what() << '\n'; return 1;
