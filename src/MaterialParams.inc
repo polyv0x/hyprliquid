@@ -36,4 +36,4 @@ GLASS_PARAM(effect_scale, 1.0f, 0.1f, 3.0f)
 // Neighbour scene composition, before blur/refraction. 1 preserves the full scene.
 GLASS_PARAM(neighbor_contribution, 1.0f, 0.0f, 1.0f)
 // Edge-to-center transfer of sharp detail into frost; preserves image brightness.
-GLASS_PARAM(neighbor_falloff, 0.0f, 0.0f, 1.0f)
+GLASS_PARAM(neighbor_falloff, 1.0f, 0.0f, 1.0f)

@@ -13,7 +13,7 @@ def verify_control(ctl, config_path):
     neighbor = next(p for p in description['parameters'] if p['name'] == 'neighbor_contribution')
     assert (neighbor['min'], neighbor['max'], neighbor['default']) == (0, 1, 1)
     falloff = next(p for p in description['parameters'] if p['name'] == 'neighbor_falloff')
-    assert (falloff['min'], falloff['max'], falloff['default']) == (0, 1, 0)
+    assert (falloff['min'], falloff['max'], falloff['default']) == (0, 1, 1)
     assert 'superness' not in {p['name'] for p in description['parameters']}
     assert 'test' in {p['id'] for p in description['presets']}
     if 'buffers' in description['capabilities']:

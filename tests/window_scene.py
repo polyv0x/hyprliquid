@@ -181,6 +181,7 @@ while True:
         reply = json.loads(ctl('hyprliquid:control', json.dumps(request)))
         assert reply['ok'], reply
 
+    falloff(0)  # Compare against zero regardless of the shipped default.
     full = capture('scene-falloff-zero')
     falloff_distances = []
     allocations = buffers()['allocations'] if initial_buffers else None

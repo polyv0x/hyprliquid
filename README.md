@@ -73,10 +73,12 @@ loading into the new session.
 
 Check that the plugin is loaded with `hyprctl plugin list`, then open an
 application with a transparent background to see the glass effect.
-The default `frosted` preset gives a soft frosted effect. For stronger refraction:
+The default `clear-edge` preset uses dark tones, a frosted center, and a clear,
+refractive border. Reflection falloff defaults to `1`, softening detail into the
+frost. For an even frost without refraction or rim highlights:
 
 ```sh
-hyprctl eval 'hl.plugin.hyprliquid.config({ default_preset = "soft-glass" })'
+hyprctl eval 'hl.plugin.hyprliquid.config({ default_preset = "frosted" })'
 ```
 
 See the [configuration example](examples/hyprliquid.lua) and [guide](docs/guide.md) for

@@ -572,7 +572,10 @@ int main() try {
         Target sharp(w, h, pixels.data()), temp(w/2, h/2), blurred(w/2, h/2), refBlur(w/2, h/2);
         Target actual(w, h), expected(w, h);
         for (const auto& name : presets) for (const bool dark : {true, false}) {
-            const auto m = presetMaterial(name, dark);
+            auto m = presetMaterial(name, dark);
+            // The frozen WebGL reference predates reflection falloff, which
+            // is exercised independently above.
+            m.neighbor_falloff = 0;
             const std::string theme = dark ? "dark" : "light";
             require(m.use_measured_face == 1.0f && m.face_slope == (dark ? 0.72f : 0.68f)
                     && m.face_intercept == (dark ? 0.06f : 0.30f), "Preset lost its theme tones: " + name);

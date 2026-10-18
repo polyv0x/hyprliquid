@@ -73,7 +73,7 @@ loaded for `hl.plugin.hyprliquid` to exist. It reloads the configuration on load
 ```lua
 if hl.plugin.hyprliquid then
     local glass = hl.plugin.hyprliquid
-    glass.config({ default_preset = "soft-glass" })
+    glass.config({ default_preset = "clear-edge" })
     glass.preset("my_glass", {
         inherits = "soft-glass",
         blur_sigma = 12,
@@ -85,16 +85,17 @@ hl.window_rule({ name = "terminal-glass", match = { class = "^kitty$" },
                  tag = "+hyprliquid_preset_my_glass" })
 ```
 
-The default is `frosted`, a frosted material with no added rim, aberration, or
-refraction. Select `soft-glass` or `clear-glass` for stronger refraction and highlights.
+The default is `clear-edge` in dark mode, with a frosted center, a clear refractive
+border, and reflection falloff set to `1`. Select `frosted` for an even blur with
+no added rim, aberration, or refraction.
 
 | Preset | Appearance |
 | --- | --- |
-| `frosted` | Soft, even blur without added refraction or rim lighting; default |
+| `frosted` | Soft, even blur without added refraction or rim lighting |
 | `soft-glass` | Gentle refraction, soft blur, and rim highlights |
 | `clear-glass` | Sharp backdrop with strong refraction and color fringes |
 | `frosted-glass` | Strong lens refraction with blur across the whole pane |
-| `clear-edge` | Frosted center with a clear, strongly refractive border |
+| `clear-edge` | Frosted center with a clear, strongly refractive border; default |
 
 Every preset has dark and light variants. Dark uses deeper face shading and
 softer rim highlights; light lifts the face and highlights. Blur, refraction,
@@ -171,8 +172,8 @@ do not apply to layer surfaces.
 `neighbor_falloff` (Reflection falloff in the control panel) progressively
 softens reflected detail into the existing blurred image, following the pane's
 rounded outline. `0` preserves the material's usual blur ramp. Higher values,
-up to `1`, transfer detail into frost faster; `0.5` halves the remaining sharp
-detail every 16 logical pixels (scaled with `effect_scale`). The sharp and
+up to the default of `1`, transfer detail into frost faster; `0.5` halves the
+remaining sharp detail every 16 logical pixels (scaled with `effect_scale`). The sharp and
 blurred weights always sum to one, preserving flat colors and glass opacity.
 The Gaussian blur is normalized too, so repeated passes retain flat-color
 brightness. Fully frosted areas and the already blurred edge bleed are
@@ -214,11 +215,11 @@ Native controls:
 | --- | --- | --- |
 | `enabled` | `true` | Apply glass to windows |
 | `manage_window_blur` | `true` | Suppress Hyprland's separate blur on managed windows |
-| `default_preset` | `frosted` | Material preset |
+| `default_preset` | `clear-edge` | Material preset |
 | `glass_opacity` | `1` | Mix the material with the original backdrop |
 | `effect_scale` | `1` | Scale the material's pixel distances |
 | `neighbor_contribution` | `1` | Contribution of adjacent neighbours, from `0` to `1` |
-| `neighbor_falloff` | `0` | Transfer reflection detail into frost, from `0` (off) to `1` (fast) |
+| `neighbor_falloff` | `1` | Transfer reflection detail into frost, from `0` (off) to `1` (fast) |
 | `default_theme` | `dark` | Select `dark` or `light` overrides |
 | `layers.enabled` | `false` | Enable optional layer-surface glass |
 
@@ -302,3 +303,6 @@ in the README. Scene renders and diagnostic logs stay under `build/demo/`.
 The [runtime control API](control-api.md) supplies versioned JSON metadata,
 atomic material overrides, resolved state, and reset through `hyprctl`.
 It is intended for companions such as the Noctalia Hyprliquid panel.
+The panel reads defaults from the renderer. Saved panel settings override them;
+use **Reset to configuration** to return to the current Hyprland configuration
+and plugin defaults.
