@@ -4,6 +4,8 @@ Native glass effects for transparent Hyprland windows, written in GLSL ES 3.00.
 Blurs and refracts the backdrop while keeping application text sharp, with five
 presets and optional layer-surface support.
 
+https://github.com/user-attachments/assets/5d078786-1cad-4b21-af75-1c751e7cec3f
+
 ## Installation
 
 Targets **Hyprland 0.56.2**. The plugin must be built against the exact running
