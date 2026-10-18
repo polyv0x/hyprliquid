@@ -233,7 +233,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     const auto backdrop = sceneBase && scene ? scene->background : source;
     const auto neighbours = !sceneBase && scene && scene->ready ? scene->image : nullptr;
     std::vector<GlassRenderer::SUnderlayShape> underlayShapes;
-    if (neighbours && (material.neighbor_contribution < 1.0f || material.neighbor_falloff > 0.0f)) {
+    if (neighbours && material.neighbor_contribution < 1.0f) {
         // The scene is ordered in native painting order. Only windows already
         // painted beneath this receiver can form its actual backdrop.
         for (const auto& ref : scene->windows) {
@@ -257,9 +257,10 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
                                      underneath->roundingPower(), 0.0f, 0.0f});
         }
     }
-    const bool separateNeighbors = neighbours &&
-        ((material.neighbor_contribution > 0.0f && material.neighbor_falloff > 0.0f) ||
-         (!underlayShapes.empty() && material.neighbor_contribution < 1.0f));
+    // Falloff only changes the sharp/blur mix; it needs no reference backdrop.
+    // A separate image is needed solely to protect actual underlays when the
+    // additional neighbor contribution is reduced.
+    const bool separateNeighbors = !underlayShapes.empty();
     const int padding = materialPadding(material, effectScale);
     const int width = std::max(1, static_cast<int>(std::ceil(transformBox.width))) + 2 * padding;
     const int height = std::max(1, static_cast<int>(std::ceil(transformBox.height))) + 2 * padding;

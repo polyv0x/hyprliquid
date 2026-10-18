@@ -127,7 +127,7 @@ static void parameters(const Program& p, const SMaterial& m, float scale, int wi
 #undef GLASS_PARAM
     if (!reference) {
         p.i("tex", 0); p.i("blur_texture", 1); p.i("maskTex", 2); p.i("useMask", 0);
-        p.i("clean_texture", 3); p.i("clean_blur_texture", 4); p.i("useNeighborFalloff", 0);
+        p.i("clean_texture", 3); p.i("clean_blur_texture", 4); p.i("useNeighborContribution", 0);
         p.i("hasCleanBlur", 1);
         glUniform2i(p.loc("cleanOrigin"), 0, 0);
         glUniform4i(p.loc("cleanOwnerBounds"), -1000, -1000, -500, -500);
@@ -258,65 +258,108 @@ static void opticalCorners(const Program& native, const Program& legacy) {
     std::cout << "PASS: " << comparisons << " corner continuity checks, unchanged straight edges, coverage and rim.\n";
 }
 
+static void blurBrightness(const Program& shader) {
+    int comparisons = 0;
+    for (const auto& color : std::array<std::array<unsigned char, 4>, 3>{{
+             {0, 1, 2, 255}, {30, 60, 240, 255}, {128, 254, 255, 255}}}) {
+        std::vector<unsigned char> pixels(193 * 129 * 4);
+        for (size_t i = 0; i < pixels.size(); ++i) pixels[i] = color[i % 4];
+        Target sharp(193, 129, pixels.data()), half(97, 65), coarse(49, 33);
+        Target temporary(49, 33), blurred(49, 33);
+        for (float sigma : {0.1f, 8.0f, 48.0f}) {
+            shader.use(); shader.i("tex", 0); shader.i("cleanInput", 0); shader.i("clean_texture", 0);
+            shader.i("filterMode", 1); glDisable(GL_BLEND);
+            half.bind(); sharp.sample(0); quad();
+            coarse.bind(); half.sample(0); quad();
+            shader.i("filterMode", 0);
+            blur(shader, coarse, temporary, blurred, sigma, false);
+            shader.i("filterMode", 2);
+            half.bind(); blurred.sample(0); quad();
+            const auto result = half.pixels();
+            for (size_t i = 0; i < result.size(); ++i)
+                require(result[i] == color[i % 4], "Blur changed the brightness of a flat color");
+            ++comparisons;
+        }
+    }
+    shader.use(); shader.i("filterMode", 0);
+    require(glGetError() == GL_NO_ERROR, "Blur brightness OpenGL error");
+    std::cout << "PASS: " << comparisons << " flat-color brightness checks through reduction, four Gaussian passes and reconstruction.\n";
+}
+
 static void neighborFalloff(const Program& shader) {
-    // Uniform, contrasting backdrops isolate the fade from the refraction
-    // displacement. Check the specified half-distance and output-scale units.
-    constexpr std::array<unsigned char, 4> sceneColor{180, 80, 60, 255}, cleanColor{20, 120, 200, 255};
+    // Two equally bright/dark stripes have the same mean as their blurred
+    // image. Follow them inward across the native/neighbor sampling boundary:
+    // detail must only decrease, and their mean must never fade to wallpaper.
+    constexpr std::array<unsigned char, 4> mean{120, 140, 160, 255}, wallpaper{20, 40, 60, 255};
     SMaterial material;
     material.face_opacity = material.rim_opacity = material.shadow_amount = 0;
     material.edge_bleed_opacity = material.holding_tone_opacity = 0;
+    material.aberration_amount = 0;
+    material.outer_refraction_amount = material.inner_refraction_amount = 40;
+    material.outer_refraction_inv_height = material.inner_refraction_inv_height = 0;
+    material.blur_alpha0 = material.blur_alpha3 = 0.2f;
     int comparisons = 0;
-    for (float scale : {1.0f, 1.25f, 2.0f}) {
-        const int w = 160 * scale, h = 96 * scale;
-        std::vector<unsigned char> scenePixels(w * h * 4), cleanPixels(w * h * 4);
-        for (int i = 0; i < w * h; ++i) for (int c = 0; c < 4; ++c) {
-            scenePixels[i * 4 + c] = sceneColor[c];
-            cleanPixels[i * 4 + c] = cleanColor[c];
+    for (float scale : {1.0f, 1.25f, 2.0f}) for (float effect : {1.0f, 1.5f}) {
+        const int ww = 256 * scale, h = 320 * scale, padding = 80 * scale, w = ww + 2 * padding;
+        std::vector<unsigned char> scenePixels(w * h * 4), blurredPixels(w * h * 4), cleanPixels(w * h * 4);
+        for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) for (int c = 0; c < 4; ++c) {
+            const auto i = (y * w + x) * 4 + c;
+            scenePixels[i] = mean[c] + (c < 3 ? (y < h / 2 ? 60 : -60) : 0);
+            blurredPixels[i] = mean[c];
+            cleanPixels[i] = wallpaper[c];
         }
-        Target scene(w, h, scenePixels.data()), clean(w, h, cleanPixels.data()), result(w, h);
-        for (float rate : {0.0f, 0.25f, 0.5f, 1.0f}) {
+        Target scene(w, h, scenePixels.data()), blurred(w, h, blurredPixels.data());
+        Target clean(w, h, cleanPixels.data()), result(ww, h);
+        for (float rate : {0.0f, 0.25f, 0.5f, 1.0f}) for (bool separate : {true, false}) {
             material.neighbor_falloff = rate;
-            result.bind(); parameters(shader, material, scale, w, h, w, h, false, 2);
-            shader.f("radius", 0); shader.i("useNeighborFalloff", 1);
-            scene.sample(0); scene.sample(1); clean.sample(3); clean.sample(4);
+            result.bind(); parameters(shader, material, scale * effect, w, h, ww, h, false, 2);
+            shader.f("radius", 0); shader.i("useNeighborContribution", separate ? 1 : 0);
+            glUniform4i(shader.loc("cleanOwnerBounds"), padding, 0, padding + ww, h);
+            scene.sample(0); blurred.sample(1); clean.sample(3); clean.sample(4);
             glDisable(GL_BLEND); quad();
             const auto pixels = result.pixels();
-            for (int y = 3; y < h - 3; ++y) for (int x = 3; x < w - 3; ++x) {
-                const float depth = std::min({x + 0.5f, y + 0.5f, w - x - 0.5f, h - y - 0.5f}) / scale;
-                const float weight = std::exp2(-depth * rate / 8.0f);
+            int previousContrast = 255;
+            for (int x = 3; x < 80 * scale; ++x) {
+                const float depth = (x + 0.5f) / (scale * effect);
+                const float detail = 0.8f * std::exp2(-depth * rate / 8.0f);
+                const auto bright = (int(96 * scale) * ww + x) * 4;
+                const auto dark = (int(224 * scale) * ww + x) * 4;
                 for (int c = 0; c < 3; ++c) {
-                    const float expected = cleanColor[c] + weight * (sceneColor[c] - cleanColor[c]);
-                    require(std::abs(pixels[(y * w + x) * 4 + c] - expected) <= 0.6f,
-                            "Neighbour falloff changed its curve or logical-pixel distance");
+                    require(std::abs((pixels[bright + c] + pixels[dark + c]) * 0.5f - mean[c]) <= 0.5f,
+                            "Reflection brightness dipped at the neighbor/native handoff");
+                    require(std::abs(pixels[bright + c] - (mean[c] + 60 * detail)) <= 0.6f &&
+                            std::abs(pixels[dark + c] - (mean[c] - 60 * detail)) <= 0.6f,
+                            "Reflection detail did not soften continuously into frost");
                 }
-                require(pixels[(y * w + x) * 4 + 3] == 255, "Neighbour falloff changed glass opacity");
+                const int contrast = pixels[bright] - pixels[dark];
+                require(contrast <= previousContrast, "Reflection detail reappeared inside the pane");
+                previousContrast = contrast;
+                require(pixels[bright + 3] == 255 && pixels[dark + 3] == 255, "Falloff changed glass opacity");
             }
             ++comparisons;
         }
-        // With no neighbour difference, a frosted material must render exactly
-        // the same pixels. Use distinct sharp/blur colours so losing the blur
-        // or changing edge bleed, tone, rim or fade cannot silently pass.
-        material = presetMaterial("clear-edge");
-        material.neighbor_falloff = 1;
+        // Fully frosted pixels and glass alpha are unaffected. Zero blur also
+        // makes falloff a no-op because there is no softer image to blend in.
+        auto frost = presetMaterial("clear-edge");
+        frost.blur_alpha0 = frost.blur_alpha3 = 1;
         std::vector<unsigned char> baseline;
-        for (bool enabled : {false, true}) {
-            result.bind(); parameters(shader, material, scale, w, h, w, h, false, 3.6f);
-            shader.i("useNeighborFalloff", enabled ? 1 : 0);
-            shader.f("fadeAlpha", 0.6f);
-            scene.sample(0); clean.sample(1); scene.sample(3); clean.sample(4);
-            glDisable(GL_BLEND); quad();
-            if (enabled)
-                require(result.pixels() == baseline, "Neighbour falloff faded the main frosted material");
-            else
-                baseline = result.pixels();
+        for (bool zeroBlur : {false, true}) {
+            if (zeroBlur) frost = material;
+            for (float rate : {0.0f, 1.0f}) {
+                frost.neighbor_falloff = rate;
+                result.bind(); parameters(shader, frost, scale * effect, w, h, ww, h, false, 3.6f);
+                shader.f("fadeAlpha", 0.6f);
+                scene.sample(0); (zeroBlur ? scene : blurred).sample(1);
+                glDisable(GL_BLEND); quad();
+                if (rate > 0)
+                    require(result.pixels() == baseline, "Falloff changed full frost, zero blur or opacity");
+                else
+                    baseline = result.pixels();
+            }
         }
-        // Restore the isolated material for the next output scale.
-        material = SMaterial{};
-        material.face_opacity = material.rim_opacity = material.shadow_amount = 0;
-        material.edge_bleed_opacity = material.holding_tone_opacity = 0;
         require(glGetError() == GL_NO_ERROR, "Neighbour falloff OpenGL error");
     }
-    std::cout << "PASS: " << comparisons << " neighbour falloff curves and unchanged frost/opacity at 3 output scales.\n";
+    std::cout << "PASS: " << comparisons << " brightness-preserving reflection handoffs, monotonic detail, unchanged frost/opacity/zero blur.\n";
 }
 
 static void underlayProtection(const Program& shader) {
@@ -358,7 +401,7 @@ static void underlayProtection(const Program& shader) {
                 material.neighbor_contribution = contribution;
                 material.neighbor_falloff = 1;
                 result.bind(); parameters(shader, material, scale, w, h, w, h, false, 2);
-                shader.f("radius", 0); shader.i("useNeighborFalloff", 1); shader.i("underlayCount", 2);
+                shader.f("radius", 0); shader.i("useNeighborContribution", 1); shader.i("underlayCount", 2);
                 scene.sample(0); scene.sample(1); clean.sample(3); clean.sample(4);
                 glDisable(GL_BLEND); quad();
                 const auto pixels = result.pixels();
@@ -366,8 +409,7 @@ static void underlayProtection(const Program& shader) {
                     const int x = (rounded ? (covered ? 20 : 4) : (covered ? 10 : 50)) * scale;
                     const int y = (rounded ? (covered ? 20 : 4) : 96) * scale;
                     const bool protectedRay = covered && (rounded || !rayLeaves);
-                    const float depth = std::min(x + 0.5f, y + 0.5f) / scale;
-                    const float weight = protectedRay ? 1 : contribution * std::exp2(-depth / 8.0f);
+                    const float weight = protectedRay ? 1 : contribution;
                     for (int c = 0; c < 3; ++c) {
                         const float expected = cleanColor[c] + weight * (sceneColor[c] - cleanColor[c]);
                         require(std::abs(pixels[(y * w + x) * 4 + c] - expected) <= 0.6f,
@@ -503,6 +545,7 @@ int main() try {
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
     glDisable(GL_DITHER);
     sceneSampling();
+    blurBrightness(nativeBlur);
     neighborFalloff(native);
     underlayProtection(native);
     cleanSampling();

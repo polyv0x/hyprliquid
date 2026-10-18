@@ -48,7 +48,7 @@ bool CShaderManager::compileGlassShader() {
     glassUniforms.clean.locate(program);
     glassUniforms.cleanBlurTexture = glGetUniformLocation(program, "clean_blur_texture");
     glassUniforms.hasCleanBlur = glGetUniformLocation(program, "hasCleanBlur");
-    glassUniforms.useNeighborFalloff = glGetUniformLocation(program, "useNeighborFalloff");
+    glassUniforms.useNeighborContribution = glGetUniformLocation(program, "useNeighborContribution");
     glassUniforms.underlayShapes = glGetUniformLocation(program, "underlayShapes");
     glassUniforms.underlayCount = glGetUniformLocation(program, "underlayCount");
     glassUniforms.maskTex             = glGetUniformLocation(program, "maskTex");

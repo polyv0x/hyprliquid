@@ -36,5 +36,7 @@ void main() {
         color += texture(tex, v_texcoord + offset).rgb * w[i];
         color += texture(tex, v_texcoord - offset).rgb * w[i];
     }
-    fragColor = vec4(color, 1.0);
+    // Rounded/truncated weights total 0.9964. Normalize each pass so the
+    // four-pass blur preserves flat colors when sharp detail blends into it.
+    fragColor = vec4(color / 0.9964, 1.0);
 }

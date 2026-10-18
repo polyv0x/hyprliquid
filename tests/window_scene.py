@@ -183,7 +183,7 @@ while True:
 
     full = capture('scene-falloff-zero')
     falloff_distances = []
-    allocations = None
+    allocations = buffers()['allocations'] if initial_buffers else None
     for rate in (0.25, 0.5, 1):
         falloff(rate)
         focus(windows[0])
@@ -193,30 +193,31 @@ while True:
         for window in windows:
             assert inside(first, window).tobytes() == inside(second, window).tobytes(), f'Falloff {rate} changed on focus'
         assert second.crop(center).tobytes() == full.crop(center).tobytes(), 'Falloff faded the main frost'
-        distance = sum(sum(p) for p in ImageChops.difference(zero, inside(second, windows[0], True)).getdata())
+        distance = sum(sum(p) for p in ImageChops.difference(
+            inside(full, windows[0], True), inside(second, windows[0], True)).getdata())
         falloff_distances.append(distance)
         if initial_buffers:
             current = buffers()
             assert current['window_pool']['leased_bytes'] == 0, 'Falloff retained a sample lease'
             assert current['allocation_failures'] == 0
-            assert any(b['role'] == 'window-clean-blurred' for b in current['buffers']), 'Falloff never sampled the clean frost'
-            assert not any(b['role'] == 'window-clean-sharp' for b in current['buffers']), 'Falloff allocated a duplicate sharp crop'
+            assert not any(b['role'].startswith('window-clean') for b in current['buffers']), 'Detail falloff used an extra framebuffer'
             if rate == 0.25:
                 (build / 'scene-falloff-buffers.json').write_text(json.dumps(current, indent=2))
-            if allocations is None:
-                allocations = current['allocations']
             assert current['allocations'] == allocations, 'Falloff adjustment churned framebuffer allocations'
-    assert falloff_distances[0] > falloff_distances[1] > falloff_distances[2] > 0, falloff_distances
+    assert 0 < falloff_distances[0] < falloff_distances[1] < falloff_distances[2], falloff_distances
     contribution(0)
     no_neighbor = capture('scene-falloff-no-neighbor')
-    assert inside(no_neighbor, windows[0]).tobytes() == inside(strengths[0], windows[0]).tobytes(), 'Falloff changed zero contribution'
+    controls[side].write_text(json.dumps({'color': [20, 200, 70], 'phase': side}))
+    hidden = capture('scene-falloff-no-neighbor-repaint')
+    assert inside(hidden, windows[0]).tobytes() == inside(no_neighbor, windows[0]).tobytes(), 'Falloff leaked a disabled neighbor'
+    controls[side].write_text(json.dumps({'color': [30, 60, 240], 'phase': side}))
     contribution(1)
     falloff(0)
     reset = capture('scene-falloff-reset')
     assert inside(reset, windows[0]).tobytes() == inside(full, windows[0]).tobytes(), 'Falloff zero did not restore identical pixels'
-    # Exercise the additional sample pair while tile geometry overlaps too.
+    # Exercise detail falloff while tile geometry overlaps too.
     falloff(0.25)
-    print('PASS: progressive neighbour falloff, unchanged main frost, exact reset and pooled sample reuse', flush=True)
+    print('PASS: progressive detail falloff, unchanged main frost, exact reset and no additional storage', flush=True)
 
     # Splitting the right tile creates a temporary overlap: the old neighbour
     # is still shrinking while the new one opens below it. Neither reflection
@@ -335,9 +336,9 @@ while True:
     zero = inside(floating_frames[0, 0], windows[0], True)
     distance = {key: sum(sum(p) for p in ImageChops.difference(zero, inside(frame, windows[0], True)).getdata())
                 for key, frame in floating_frames.items()}
-    assert distance[0, 1] == 0
     assert 0 < distance[0.5, 0] < distance[1, 0], f'Floating contribution slider had no effect: {distance}'
-    assert 0 < distance[1, 0.5] < distance[1, 0], f'Floating falloff slider had no effect: {distance}'
+    assert inside(floating_frames[1, 0.5], windows[0], True).tobytes() != inside(
+        floating_frames[1, 0], windows[0], True).tobytes(), 'Floating falloff slider had no effect'
     print('PASS: adjacent floating panes keep both neighbor controls and identical pixels across focus changes', flush=True)
 
     # An opaque window beneath a transparent receiver must block the wallpaper
@@ -359,16 +360,18 @@ while True:
         controls[receiver_side].write_text(json.dumps({'color': [0, 0, 0], 'phase': 0, 'empty': True}))
         focus(receiver)
         protected = tuple(round(v * scale) for v in (304, 260, 324, 400))
-        reference = None
+        references = {}
         for strength, rate in ((1, 0), (1, 1), (0.5, 1), (0, 0), (0, 1)):
             contribution(strength)
             falloff(rate)
             edge = capture(f'scene-underlay-{scale}-{transform}-{strength}-{rate}').crop(protected)
-            if reference is None:
-                reference = edge
+            if strength == 1:
+                references[rate] = edge
                 assert all(b > max(r, g) + 50 for r, g, b in edge.getdata()), 'Opaque underlay fixture missing'
             else:
-                delta = max(max(pixel) for pixel in ImageChops.difference(reference, edge).getdata())
+                # Falloff can soften nearby rim/shadow detail; contribution
+                # must preserve this same true backdrop at either setting.
+                delta = max(max(pixel) for pixel in ImageChops.difference(references[rate], edge).getdata())
                 assert delta <= 1, f'Neighbor controls exposed wallpaper through underlay: {scale}, {transform}, {strength}, {rate}, {delta}'
         controls[underlay_side].write_text(json.dumps({'color': [20, 200, 70], 'phase': 0, 'solid': True}))
         repainted = capture(f'scene-underlay-{scale}-{transform}-repaint').crop(protected)
@@ -391,6 +394,43 @@ while True:
     ctl('eval', 'hl.monitor({ output = ' + json.dumps(monitor_name) +
         ', mode = "1280x800@60", position = "auto", scale = 1.25, transform = 0 })')
     time.sleep(0.7)
+    # Track a uniform patch of an opaque lower window while dragging
+    # the glass left. The sampled patch crosses from neighbor capture into the
+    # native backdrop, then enters the frost. Its brightness must not dip and
+    # recover. Keep the receiving pixels outside the lower window so this also
+    # catches the handoff that happens independently of underlay protection.
+    original_panel = json.loads(ctl('hyprliquid:control', '{"op":"state"}'))['state']['panel']
+    neutral = {
+        'neighbor_contribution': 1, 'neighbor_falloff': 1, 'blur_sigma': 8,
+        'outer_refraction_amount': 100, 'inner_refraction_amount': 100,
+        'outer_refraction_inv_height': 0.001, 'inner_refraction_inv_height': 0.001,
+        'aberration_amount': 0, 'edge_bleed_opacity': 0, 'face_opacity': 0,
+        'holding_tone_opacity': 0, 'rim_opacity': 0, 'shadow_amount': 0,
+        'blur_alpha0': 0.2, 'blur_alpha3': 0.2, 'refraction_opacity': 1,
+    }
+    assert json.loads(ctl('hyprliquid:control', json.dumps({'op': 'apply', 'patch': {'overrides': neutral}})))['ok']
+    action(underlay, 'resize', 'x = 700, y = 540, relative = false')
+    action(underlay, 'move', 'x = 50, y = 60, relative = false')
+    action(receiver, 'resize', 'x = 400, y = 500, relative = false')
+    controls[underlay_side].write_text(json.dumps({'color': [30, 60, 240], 'phase': 0, 'solid': True}))
+    controls[receiver_side].write_text(json.dumps({'color': [0, 0, 0], 'phase': 0, 'empty': True}))
+    focus(receiver)
+    patch = tuple(round(v * 1.25) for v in (770, 340, 774, 360))
+    drag_samples = []
+    reference = None
+    for left in (766, 758, 750, 742, 730, 718, 706, 694, 682, 674, 670, 666, 658, 650):
+        action(receiver, 'move', f'x = {left}, y = 100, relative = false')
+        frame = capture(f'scene-drag-handoff-{left}').crop(patch)
+        if reference is None:
+            reference = frame
+            assert all(b > max(r, g) + 100 for r, g, b in frame.getdata()), 'Drag fixture missed the lower window'
+        delta = max(max(pixel) for pixel in ImageChops.difference(reference, frame).getdata())
+        drag_samples.append({'left': left, 'delta': delta, 'pixel': frame.getpixel((2, 10))})
+    (build / 'scene-drag-handoff.json').write_text(json.dumps(drag_samples, indent=2))
+    assert max(sample['delta'] for sample in drag_samples) <= 1, f'Reflection faded out and back in during drag: {drag_samples}'
+    assert json.loads(ctl('hyprliquid:control', json.dumps({'op': 'apply', 'profile': original_panel})))['ok']
+    print('PASS: dragging glass through neighbor/native handoff keeps reflected brightness constant', flush=True)
+
     for index, window in enumerate(windows):
         action(window, 'resize', 'x = 400, y = 360, relative = false')
         action(window, 'move', f'x = {50 + index * 420}, y = {100 + index * 30}, relative = false')
@@ -424,8 +464,8 @@ while True:
                         for (strength, rate, side), frame in frames.items() if side == index}
             assert 0 < distance[0.5, 0] < distance[1, 0], \
                 f'Neighbor contribution stopped at contact/overlap: {right_x}, {index}, {distance}'
-            assert 0 < distance[1, 0.5] < distance[1, 0], \
-                f'Neighbor falloff stopped at contact/overlap: {right_x}, {index}, {distance}'
+            assert frames[1, 0.5, index].tobytes() != frames[1, 0, index].tobytes(), \
+                f'Neighbor falloff stopped at contact/overlap: {right_x}, {index}'
             overlap_strength[right_x, index] = distance[1, 0]
     for index in range(2):
         before, after = overlap_strength[451, index], overlap_strength[449, index]

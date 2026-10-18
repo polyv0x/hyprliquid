@@ -279,7 +279,7 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
     glActiveTexture(GL_TEXTURE0);
     glUniform1i(uniforms.cleanBlurTexture, 4);
     glUniform1i(uniforms.hasCleanBlur, neighbors && neighbors->blurred ? 1 : 0);
-    glUniform1i(uniforms.useNeighborFalloff, neighbors ? 1 : 0);
+    glUniform1i(uniforms.useNeighborContribution, neighbors ? 1 : 0);
     glUniform1i(uniforms.underlayShapes, 5);
     glUniform1i(uniforms.underlayCount, neighbors ? neighbors->underlayShapes.size() : 0);
     glUniform1f(uniforms.pixelScale, g_pHyprRenderer->m_renderData.pMonitor->m_scale * material.effect_scale);
@@ -288,6 +288,12 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
 #define GLASS_PARAM(name, value, lo, hi) glUniform1f(uniforms.name, material.name);
 #include "MaterialParams.inc"
 #undef GLASS_PARAM
+
+    // Window falloff also applies without a neighbor scene, so the transition
+    // stays consistent when windows open, close or pass underneath. Layers
+    // retain their own material's existing blur ramp.
+    if (mask)
+        glUniform1f(uniforms.neighbor_falloff, 0.0f);
 
     const bool hasMask = mask && mask->textureId != 0;
     glUniform1i(uniforms.useMask, hasMask ? 1 : 0);

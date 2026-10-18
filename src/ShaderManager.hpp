@@ -24,7 +24,7 @@ struct SGlassUniforms {
     SCleanSampleUniforms clean;
     GLint cleanBlurTexture = -1;
     GLint hasCleanBlur = -1;
-    GLint useNeighborFalloff = -1;
+    GLint useNeighborContribution = -1;
     GLint underlayShapes = -1;
     GLint underlayCount = -1;
 

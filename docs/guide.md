@@ -168,37 +168,45 @@ follows each pixel and the underlying window's rounded outline, so partial
 overlap does not switch off the controls across the entire pane. The controls
 do not apply to layer surfaces.
 
-`neighbor_falloff` progressively weakens the neighbour image from the receiving
-pane's edge toward its center, following its rounded outline. `0` preserves the
-uniform contribution above. Higher values, up to `1`, produce a faster
-exponential fade; `0.5` halves the contribution every 16 logical pixels (scaled
-with `effect_scale`). Both versions of the backdrop receive identical blur and
-refraction, so the main frosted area remains present. This is an artistic edge
-fade, not a simulation of light focusing into physical caustics. It applies to
-neighbour content in both refraction and edge bleed. Like contribution, falloff
-preserves an underlying window instead of fading it toward wallpaper.
+`neighbor_falloff` (Reflection falloff in the control panel) progressively
+softens reflected detail into the existing blurred image, following the pane's
+rounded outline. `0` preserves the material's usual blur ramp. Higher values,
+up to `1`, transfer detail into frost faster; `0.5` halves the remaining sharp
+detail every 16 logical pixels (scaled with `effect_scale`). The sharp and
+blurred weights always sum to one, preserving flat colors and glass opacity.
+The Gaussian blur is normalized too, so repeated passes retain flat-color
+brightness. Fully frosted areas and the already blurred edge bleed are
+unchanged when adjusting falloff.
+
+The same detail curve applies to the entire window backdrop, including
+wallpaper and windows underneath. It remains active with a single window.
+This keeps an image from fading toward wallpaper outside the pane and then
+reappearing at full strength when it crosses into the native backdrop during
+a drag. `blur_sigma` sets how soft the final image is; with zero blur, falloff
+has no visual effect. This is an artistic transition into frost, not a physical
+caustic simulation. Layer surfaces retain their existing blur ramp.
 
 This adds one offscreen window pass and two reusable monitor-sized textures
 when at least two eligible windows and one glass pane are visible. Those frames
 repaint the monitor to keep the captured background free of old window pixels. It does not
 schedule extra frames on an idle desktop. Single-window and disabled-glass scenes
 skip the capture.
-Nonzero falloff with nonzero neighbour contribution needs one additional clean
-blur texture at half width and height, reused through the window buffer pool.
+Falloff uses the existing sharp and blurred textures and adds no framebuffers.
+An overlapping pane with contribution below `1` needs one additional clean
+blur texture at half width and height to protect underlying windows while
+attenuating adjacent imagery. It is reused through the window buffer pool.
 The clean sharp image is sampled from existing textures; its first blur reduction
 selects those same pixels directly, avoiding a duplicate full-resolution image
-and copy pass. With zero blur, falloff needs no additional image storage.
-An overlapping pane with contribution below `1` also uses this clean backdrop,
-even with zero falloff, to preserve the underlying window while attenuating
-adjacent imagery. Overlap protection adds no further image buffers. A small
+and copy pass. With zero blur, contribution needs no additional image storage.
+Overlap protection adds no further image buffers. A small
 reusable texture holds window bounds and rounding (32 bytes per capacity slot).
 Shape checks share their work across the refraction and bleed rays, and only
-rounded corners need the more expensive curve evaluation. With no overlap and
-zero falloff, contribution continues to use a single sharp/blur pair.
+rounded corners need the more expensive curve evaluation. With no overlap,
+contribution continues to use a single sharp/blur pair, at every falloff setting.
 
-For a padded 1778×1451 crop in a 4-byte pixel format, the extra falloff storage
-is 2.46 MiB instead of 12.30 MiB, an approximately 80% reduction in this extra
-storage (not total compositor VRAM). Driver allocation alignment is additional.
+For a padded 1778×1451 crop in a 4-byte pixel format, reduced contribution over
+an underlying window needs 2.46 MiB of extra image storage. Falloff with full
+contribution needs none. Driver allocation alignment is additional.
 
 Native controls:
 
@@ -210,7 +218,7 @@ Native controls:
 | `glass_opacity` | `1` | Mix the material with the original backdrop |
 | `effect_scale` | `1` | Scale the material's pixel distances |
 | `neighbor_contribution` | `1` | Contribution of adjacent neighbours, from `0` to `1` |
-| `neighbor_falloff` | `0` | Edge-to-center neighbour fade, from `0` (off) to `1` (fast) |
+| `neighbor_falloff` | `0` | Transfer reflection detail into frost, from `0` (off) to `1` (fast) |
 | `default_theme` | `dark` | Select `dark` or `light` overrides |
 | `layers.enabled` | `false` | Enable optional layer-surface glass |
 
