@@ -104,4 +104,6 @@ fixtures at three output scales.
 
 ## License
 
-BSD 3-Clause; see [LICENSE](LICENSE).
+GNU General Public License, version 3 or (at your option) any later version
+(`GPL-3.0-or-later`); see [LICENSE](LICENSE). The original BSD 3-Clause notice
+for inherited code is preserved in [LICENSES/BSD-3-Clause.txt](LICENSES/BSD-3-Clause.txt).
