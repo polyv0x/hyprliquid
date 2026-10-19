@@ -1,4 +1,4 @@
-// name, default, minimum, maximum. Defaults define the "measured" preset.
+// name, fallback default, minimum, maximum. Presets supply their own theme tones.
 // Distances are in logical pixels.
 GLASS_PARAM(blur_sigma, 19.80f, 0.0f, 60.0f)
 GLASS_PARAM(outer_refraction_amount, 0.0f, -120.0f, 120.0f)
@@ -27,7 +27,6 @@ GLASS_PARAM(rim_soft, 1.5f, 0.01f, 6.0f)
 GLASS_PARAM(rim_opacity, 0.0f, 0.0f, 1.6f)
 GLASS_PARAM(face_slope, 0.6811f, 0.0f, 1.0f)
 GLASS_PARAM(face_intercept, 0.2788f, 0.0f, 0.6f)
-GLASS_PARAM(use_measured_face, 1.0f, 0.0f, 1.0f)
 GLASS_PARAM(coverage_offset, 0.10f, -1.0f, 1.0f)
 GLASS_PARAM(coverage_width, 2.0f, 0.1f, 4.0f)
 // Native integration controls. Window geometry comes from Hyprland.

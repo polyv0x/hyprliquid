@@ -137,6 +137,9 @@ static void parameters(const Program& p, const SMaterial& m, float scale, int wi
         p.f("radius", 56 * scale); p.f("roundingPower", roundingPower); p.f("pixelScale", scale); p.f("fadeAlpha", 1);
         return;
     }
+    // The frozen study fixture retains its comparison switch. Production
+    // always uses the affine face tone, so pin the reference to that endpoint.
+    p.f("use_measured_face", 1.0f);
     p.i("source_texture", 0); p.i("blur_texture", 1);
     p.v2("uRes", width, height); p.v2("uInvRes", 1.0f / width, 1.0f / height);
     p.v2("uCenter", width * 0.5f, height * 0.5f); p.v2("uHalf", ww * 0.5f, wh * 0.5f);
@@ -577,7 +580,7 @@ int main() try {
             // is exercised independently above.
             m.neighbor_falloff = 0;
             const std::string theme = dark ? "dark" : "light";
-            require(m.use_measured_face == 1.0f && m.face_slope == (dark ? 0.72f : 0.68f)
+            require(m.face_slope == (dark ? 0.72f : 0.68f)
                     && m.face_intercept == (dark ? 0.06f : 0.30f), "Preset lost its theme tones: " + name);
             require(name != "soft-glass" || m.inner_refraction_amount == -7.0f, "Negative refraction was lost");
             blur(nativeBlur, sharp, temp, blurred, m.blur_sigma * scale, false);

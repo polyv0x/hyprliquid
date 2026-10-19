@@ -19,7 +19,6 @@ inline std::unordered_map<std::string, SCustomPreset> getAll() {
     };
     const auto tones = [&](const std::string& name, float rim) {
         auto& preset = presets.at(name);
-        preset.dark.use_measured_face = preset.light.use_measured_face = 1.0f;
         preset.dark.face_slope = 0.72f;
         preset.dark.face_intercept = 0.06f;
         preset.light.face_slope = 0.68f;
@@ -33,7 +32,6 @@ inline std::unordered_map<std::string, SCustomPreset> getAll() {
     alias("measured", "frosted");
 
     auto& platform = add("soft-glass");
-    platform.use_measured_face = 0.0f;
     platform.outer_refraction_amount = 52.0f;
     platform.inner_refraction_amount = -7.0f;
     platform.blur_alpha3 = 0.82f;

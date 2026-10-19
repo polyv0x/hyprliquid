@@ -9,12 +9,12 @@ def verify_control(ctl, config_path):
 
     description = request('describe')
     assert description['ok'] and description['api'] == 1, description
-    assert len(description['parameters']) == 34
+    assert len(description['parameters']) == 33
     neighbor = next(p for p in description['parameters'] if p['name'] == 'neighbor_contribution')
     assert (neighbor['min'], neighbor['max'], neighbor['default']) == (0, 1, 1)
     falloff = next(p for p in description['parameters'] if p['name'] == 'neighbor_falloff')
     assert (falloff['min'], falloff['max'], falloff['default']) == (0, 1, 1)
-    assert 'superness' not in {p['name'] for p in description['parameters']}
+    assert not {'superness', 'use_measured_face'} & {p['name'] for p in description['parameters']}
     assert 'test' in {p['id'] for p in description['presets']}
     if 'buffers' in description['capabilities']:
         diagnostic = request('buffers')
@@ -24,6 +24,8 @@ def verify_control(ctl, config_path):
         assert diagnostic['buffers']['monitors']
     baseline = description['state']
     assert baseline['base_preset'] == 'test' and not baseline['active'], baseline
+    for material in (baseline['material'], baseline['inherited'], baseline['baseline']['material']):
+        assert 'use_measured_face' not in material
     assert math.isclose(baseline['material']['inner_refraction_amount'], -11)
 
     # Every public preset must resolve the previewed tones without scalar
@@ -37,7 +39,7 @@ def verify_control(ctl, config_path):
             state = themed['state']
             assert state['theme'] == theme and state['panel']['overrides'] == {}
             material = materials[theme] = state['material']
-            assert material['use_measured_face'] == 1
+            assert 'use_measured_face' not in material
             assert math.isclose(material['face_slope'], 0.72 if theme == 'dark' else 0.68, abs_tol=1e-6)
             assert math.isclose(material['face_intercept'], 0.06 if theme == 'dark' else 0.30, abs_tol=1e-6)
             assert math.isclose(material['rim_opacity'], rim * (0.65 if theme == 'dark' else 0.85), abs_tol=1e-6)
@@ -66,6 +68,14 @@ def verify_control(ctl, config_path):
     assert state['material']['rim_opacity'] != state['inherited']['rim_opacity']
     assert state['baseline'] == baseline['baseline']
 
+    # Retired controls must reject the whole request, including otherwise valid
+    # edits. A saved profile needs migration before it can be applied again.
+    for field in ('patch', 'profile'):
+        for value in (0, 0.5, 1, None):
+            failed = request('apply', **{field: {'overrides': {'blur_sigma': 4, 'use_measured_face': value}}})
+            assert not failed['ok'] and failed['state'] == state, failed
+            assert failed['error'] == 'unknown material parameter: use_measured_face', failed
+
     for patch in [
         {'overrides': {'blur_sigma': 4, 'unknown': 1}},
         {'overrides': {'blur_sigma': 4, 'rim_opacity': 50}},
@@ -80,6 +90,7 @@ def verify_control(ctl, config_path):
         {'base_preset': 'absent'}, {'base_preset': 'cycle'},
         {'theme': 'auto'}, {'enabled': 1}, {'surprise': 1},
         {'reset_fields': ['rim_opacity', 'unknown']},
+        {'reset_fields': ['rim_opacity', 'use_measured_face']},
     ]:
         failed = request('apply', patch=patch)
         assert not failed['ok'] and failed['state'] == state, failed

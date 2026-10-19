@@ -46,7 +46,6 @@ uniform float rim_soft;
 uniform float rim_opacity;
 uniform float face_slope;
 uniform float face_intercept;
-uniform float use_measured_face;
 uniform float coverage_offset;
 uniform float coverage_width;
 uniform float glass_opacity;
@@ -71,8 +70,7 @@ vec2 backdropUV(vec2 localUV) {
 }
 
 vec3 face_color_matrix(vec3 c) {
-    vec3 recipe = c - 0.371 * dot(c, vec3(0.2126, 0.7152, 0.0722)) + 0.235;
-    return mix(recipe, c * face_slope + face_intercept, use_measured_face);
+    return c * face_slope + face_intercept;
 }
 
 float sdf_at(vec2 p) {
