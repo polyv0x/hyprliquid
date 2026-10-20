@@ -11,6 +11,9 @@
 #include <deque>
 #include <fstream>
 #include <filesystem>
+#include "../src/PixelTransfer.hpp"
+#include "../src/RenderSafety.hpp"
+#include <hyprutils/utils/ScopeGuard.hpp>
 
 namespace {
 HANDLE handle;
@@ -26,13 +29,15 @@ class CCapture : public IPassElement {
     explicit CCapture(std::string path) : path(std::move(path)) {}
     std::vector<UP<IPassElement>> draw() override {
         const auto fb = g_pHyprRenderer->m_renderData.currentFB;
-        if (!fb) return {};
+        if (!fb || !RenderSafety::dimension(fb->m_size.x) || !RenderSafety::dimension(fb->m_size.y)) return {};
+        auto* glFramebuffer = dynamic_cast<Render::GL::CGLFramebuffer*>(fb.get());
+        if (!glFramebuffer) return {};
         const int width = fb->m_size.x, height = fb->m_size.y;
-        GLint read = 0, pack = 0;
+        GLint read = 0;
         glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
-        glGetIntegerv(GL_PACK_ALIGNMENT, &pack);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, dynamic_cast<Render::GL::CGLFramebuffer*>(fb.get())->getFBID());
-        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        Hyprutils::Utils::CScopeGuard restoreRead([&] { glBindFramebuffer(GL_READ_FRAMEBUFFER, read); });
+        CPixelTransferGuard<false> pack;
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, glFramebuffer->getFBID());
         // Record the implementation's native read format/type alongside the
         // bytes so no channel precision is discarded, including for FP16.
         GLint type = 0, format = 0;
@@ -40,12 +45,12 @@ class CCapture : public IPassElement {
         glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_FORMAT, &format);
         const int pixelBytes = type == GL_FLOAT || type == GL_UNSIGNED_INT || type == GL_INT ? 16 :
                                type == GL_HALF_FLOAT || type == GL_UNSIGNED_SHORT || type == GL_SHORT ? 8 : 4;
+        if (size_t(width) > std::vector<unsigned char>().max_size() / height / pixelBytes)
+            return {};
         std::vector<unsigned char> pixels(size_t(width) * height * pixelBytes);
         while (glGetError() != GL_NO_ERROR) {}
         glReadPixels(0, 0, width, height, format, type, pixels.data());
         const auto error = glGetError();
-        glPixelStorei(GL_PACK_ALIGNMENT, pack);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, read);
         auto* metadata = json_object_new_object();
         auto add = [&](const char* key, int64_t n) { json_object_object_add(metadata, key, json_object_new_int64(n)); };
         add("width", width); add("height", height); add("drm_format", fb->m_drmFormat);
@@ -79,7 +84,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
             const auto at = request.find(' ');
             if (at == std::string::npos) return std::string("missing absolute artifact path");
             const std::filesystem::path path = request.substr(at + 1);
-            if (!path.is_absolute() || !std::filesystem::is_directory(path.parent_path())) return std::string("invalid artifact path");
+            std::error_code error;
+            if (!path.is_absolute() || !std::filesystem::is_directory(path.parent_path(), error)) return std::string("invalid artifact path");
             pending = path;
             for (const auto& monitor : State::monitorState()->monitors()) {
                 g_pHyprRenderer->damageMonitor(monitor);

@@ -57,10 +57,9 @@ bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IF
                        SP<Render::IFramebuffer> neighbours = nullptr,
                        SP<Render::IFramebuffer> sceneBackground = nullptr, float neighborContribution = 1.0f);
 
-// callerFramebuffer is re-bound after the blur ping-pong; the viewport is
-// restored from its size so it always matches the re-bound framebuffer
-// (monitor fields would be wrong on 90°/270° transformed monitors).
-void blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFramebuffer>& blurredFramebuffer, float sigma,
+// On every exit, re-bind callerFramebuffer and restore the entry viewport.
+// A false result must not be drawn or marked as a valid cached blur.
+[[nodiscard]] bool blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFramebuffer>& blurredFramebuffer, float sigma,
                     SP<Render::IFramebuffer> callerFramebuffer, const SNeighborBackdrop* clean = nullptr);
 
 // When mask is non-null (layers only), the shader composites the surface content

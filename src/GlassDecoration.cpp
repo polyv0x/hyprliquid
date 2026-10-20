@@ -262,8 +262,10 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     // additional neighbor contribution is reduced.
     const bool separateNeighbors = !underlayShapes.empty();
     const int padding = materialPadding(material, effectScale);
-    const int width = std::max(1, static_cast<int>(std::ceil(transformBox.width))) + 2 * padding;
-    const int height = std::max(1, static_cast<int>(std::ceil(transformBox.height))) + 2 * padding;
+    const auto geometry = RenderSafety::sampleGeometry(transformBox.x, transformBox.y, transformBox.w, transformBox.h, padding);
+    if (!geometry)
+        return;
+    const auto width = geometry->width, height = geometry->height;
     // The lease begins at execution, never while passes are queued. Both the
     // auxiliary scene and snapshots consume their samples completely here.
     // All blits/draws use the same GL context and are ordered before the next
@@ -278,7 +280,8 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     // A zero-blur consumer passes a null result to the glass shader, but must
     // not discard storage that another matching window can use next.
     auto blurred = samples->blurred;
-    GlassRenderer::blurBackground(samples->sharp, blurred, material.blur_sigma * effectScale, source);
+    if (!GlassRenderer::blurBackground(samples->sharp, blurred, material.blur_sigma * effectScale, source))
+        return;
     if (blurred) {
         samples->blurred = blurred;
         blurred->setImageDescription(backdrop->imageDescription());
@@ -312,11 +315,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     if (separateNeighbors) {
         GlassRenderer::SNeighborBackdrop neighbors{
             scene->background, nullptr,
-            {static_cast<int>(std::floor(transformBox.x)) - padding,
-             static_cast<int>(std::floor(transformBox.y)) - padding},
-            {static_cast<int>(std::floor(transformBox.x)), static_cast<int>(std::floor(transformBox.y)),
-             static_cast<int>(std::ceil(transformBox.x + transformBox.width)),
-             static_cast<int>(std::ceil(transformBox.y + transformBox.height))},
+            {geometry->x0, geometry->y0}, geometry->owner,
             underlayShapes};
         if (material.blur_sigma <= 0.0f) {
             // Clean sharp sampling is reconstructed from existing textures.
@@ -329,7 +328,8 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
         // removing the duplicate full-resolution clean image and copy pass.
         auto clean = g_pGlobalState->renderBuffers.acquire((width + 1) / 2, (height + 1) / 2, backdrop);
         auto cleanBlurred = clean->sharp;
-        GlassRenderer::blurBackground(samples->sharp, cleanBlurred, material.blur_sigma * effectScale, source, &neighbors);
+        if (!GlassRenderer::blurBackground(samples->sharp, cleanBlurred, material.blur_sigma * effectScale, source, &neighbors))
+            return;
         if (cleanBlurred) {
             clean->sharp = cleanBlurred;
             cleanBlurred->setImageDescription(backdrop->imageDescription());
@@ -397,9 +397,12 @@ void CGlassDecoration::damageEntire() {
     // surfaceBox is in logical coords; convert pixel padding to logical.
     const auto monitor = window->m_monitor.lock();
     const float scale = monitor ? monitor->m_scale : 1.0f;
+    if (!std::isfinite(scale) || scale <= 0.0f)
+        return;
     surfaceBox.expand(samplingPadding(monitor) / scale);
 
-    g_pHyprRenderer->damageBox(surfaceBox);
+    if (RenderSafety::sampleGeometry(surfaceBox.x, surfaceBox.y, surfaceBox.w, surfaceBox.h, 0))
+        g_pHyprRenderer->damageBox(surfaceBox);
 }
 
 eDecorationLayer CGlassDecoration::getDecorationLayer() {

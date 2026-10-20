@@ -31,7 +31,7 @@ CGlassLayerSurface::~CGlassLayerSurface() {
         std::isfinite(m_lastSize.x) && std::isfinite(m_lastSize.y)) {
         auto box = CBox{m_lastPosition, m_lastSize};
         box.expand(samplingPadding(nullptr)).noNegativeSize();
-        if (box.w > 0.0 && box.h > 0.0)
+        if (RenderSafety::sampleGeometry(box.x, box.y, box.w, box.h, 0))
             g_pHyprRenderer->damageBox(box);
     }
 }
@@ -161,11 +161,12 @@ void CGlassLayerSurface::damageSampleRegion() {
 
     const auto monitor = layerSurface->m_monitor.lock();
     const float scale = monitor ? monitor->m_scale : 1.0f;
+    if (!std::isfinite(scale) || scale <= 0.0f)
+        return;
     auto box = CBox{layerSurface->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT),
                     layerSurface->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT)};
     box.expand(samplingPadding(monitor) / scale).noNegativeSize();
-    if (box.w > 0.0 && box.h > 0.0 &&
-        std::isfinite(box.x) && std::isfinite(box.y) && std::isfinite(box.w) && std::isfinite(box.h))
+    if (RenderSafety::sampleGeometry(box.x, box.y, box.w, box.h, 0))
         g_pHyprRenderer->damageBox(box);
 }
 
@@ -236,10 +237,12 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
         if (!m_hasCachedSample)
             return;
     } else if (backgroundChanged) {
+        m_hasCachedSample = false;
         if (!GlassRenderer::sampleBackground(m_sampleFramebuffer, source, transformBox, m_samplePaddingRatio,
                                               padding))
             return;
-        GlassRenderer::blurBackground(m_sampleFramebuffer, m_blurredFramebuffer, blurSigma, source);
+        if (!GlassRenderer::blurBackground(m_sampleFramebuffer, m_blurredFramebuffer, blurSigma, source))
+            return;
 
         m_hasCachedSample      = true;
         m_lastSceneGeneration  = currentGeneration;
@@ -254,6 +257,8 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
     // the surface into this FBO. compositeAndRestore uses its alpha as a mask.
     // Size from the source FB, not the monitor: m_transformedSize is swapped
     // relative to the framebuffer's native orientation on 90°/270° monitors (#41).
+    if (!RenderSafety::dimension(source->m_size.x) || !RenderSafety::dimension(source->m_size.y))
+        return;
     int monitorWidth  = static_cast<int>(source->m_size.x);
     int monitorHeight = static_cast<int>(source->m_size.y);
 
@@ -288,6 +293,10 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
 }
 
 void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EMaskSource maskSource) {
+    // A failed pre-pass leaves native rendering on the original target. Never
+    // composite an older temp image (or dereference a never-allocated one).
+    if (!m_savedCurrentFB)
+        return;
     // Restore the original currentFB before compositing
     if (m_savedCurrentFB) {
         g_pHyprRenderer->m_renderData.currentFB = m_savedCurrentFB;
@@ -296,7 +305,8 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
     }
 
     auto& shaderManager = g_pGlobalState->shaderManager;
-    if (!shaderManager.isInitialized() || !m_hasCachedSample)
+    if (!shaderManager.isInitialized() || !m_hasCachedSample || !m_surfaceTempFramebuffer ||
+        !m_surfaceTempFramebuffer->isAllocated())
         return;
 
     const auto layerSurface = m_layerSurface.lock();

@@ -22,6 +22,8 @@ class CGlassLayerCompositeElement : public IPassElement {
     [[nodiscard]] bool                needsLiveBlur() override;
     [[nodiscard]] bool                needsPrecomputeBlur() override;
     [[nodiscard]] std::optional<CBox> boundingBox() override;
+    // The post-pass restores framebuffer state even if the surface disappears.
+    [[nodiscard]] bool disableSimplification() override { return m_data.layerState != nullptr; }
 
     [[nodiscard]] const char* passName() override { return "CGlassLayerCompositeElement"; }
     [[nodiscard]] ePassElementType type() override { return EK_CUSTOM; }

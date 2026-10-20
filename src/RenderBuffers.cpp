@@ -1,6 +1,8 @@
 #include "RenderBuffers.hpp"
 #include "Globals.hpp"
 #include "WindowScene.hpp"
+#include "RenderSafety.hpp"
+#include "PixelTransfer.hpp"
 
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprgraphics/egl/Egl.hpp>
@@ -21,6 +23,9 @@ struct SBindings {
     ~SBindings() {
         glBindFramebuffer(GL_READ_FRAMEBUFFER, read);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw);
+        // Allocators may use raw GL calls, leaving Hyprland's viewport cache
+        // unchanged. Restore the actual state even when the cache already agrees.
+        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
         g_pHyprOpenGL->setViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
     }
 };
@@ -37,7 +42,10 @@ uint64_t CRenderBuffers::bytes(int width, int height, DRMFormat format) {
     if (!info || width <= 0 || height <= 0)
         return 0;
     const int blockHeight = std::max(1, static_cast<int>(info->blockSize.y));
-    return uint64_t(Hyprgraphics::Egl::minStride(info, width)) * ((height + blockHeight - 1) / blockHeight);
+    const auto blockWidth = std::max(1, Hyprgraphics::Egl::pixelsPerBlock(info));
+    const uint64_t stride = ((uint64_t(width) + blockWidth - 1) / blockWidth) * info->bytesPerBlock;
+    const uint64_t rows = (uint64_t(height) + blockHeight - 1) / blockHeight;
+    return stride <= std::numeric_limits<uint64_t>::max() / rows ? stride * rows : 0;
 }
 
 CRenderBuffers::CLease::CLease(CRenderBuffers& pool, std::shared_ptr<SSamples> samples)
@@ -73,13 +81,35 @@ CRenderBuffers::CLease CRenderBuffers::acquire(int width, int height, const SP<R
 
 bool CRenderBuffers::prepare(SP<Render::IFramebuffer>& fb, int width, int height, DRMFormat format,
                              const std::string& role, const std::string& owner) {
+    if (!RenderSafety::dimension(width) || !RenderSafety::dimension(height) ||
+        !Hyprgraphics::Egl::getPixelFormatFromDRM(format)) {
+        ++m_failures;
+        return false;
+    }
+    // Hyprland's GL allocator asserts on incomplete framebuffers. Reject sizes
+    // a client can request but the GPU cannot support before calling into it.
+    if (!fb || !fb->isAllocated() || fb->m_size != Vector2D(width, height) || fb->m_drmFormat != format) {
+        GLint maxTexture = 0, maxViewport[2]{};
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexture);
+        glGetIntegerv(GL_MAX_VIEWPORT_DIMS, maxViewport);
+        if (width > maxTexture || height > maxTexture || width > maxViewport[0] || height > maxViewport[1]) {
+            ++m_failures;
+            return false;
+        }
+    }
     if (!fb)
         fb = g_pHyprRenderer->createFB("hyprliquid-" + role);
+    if (!fb) {
+        ++m_failures;
+        return false;
+    }
     auto& record = m_records[fb.get()];
     if (!record.fb) {
         record = {.fb = fb, .id = ++m_nextId, .role = role, .owner = owner};
     }
     if (!fb->isAllocated() || fb->m_size != Vector2D(width, height) || fb->m_drmFormat != format) {
+        SBindings restore;
+        CPixelTransferGuard<true> unpack;
         const bool reallocation = record.allocations > 0;
         if (!fb->alloc(width, height, format)) {
             ++m_failures;

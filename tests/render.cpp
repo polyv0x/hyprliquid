@@ -1,4 +1,5 @@
 #include "BuiltInPresets.hpp"
+#include "PixelTransfer.hpp"
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
@@ -484,6 +485,49 @@ static void cleanSampling() {
     std::cout << "PASS: " << comparisons << " clean sharp/fused reduction comparisons, including bilinear boundaries and offscreen gutters.\n";
 }
 
+static void pixelTransfers() {
+    constexpr int w = 3, h = 2;
+    std::array<unsigned char, w * h * 4> pixels{}, result{};
+    for (size_t i = 0; i < pixels.size(); ++i) pixels[i] = i * 7;
+    Target target(w, h);
+    GLuint buffer = 0;
+    glGenBuffers(1, &buffer);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, buffer);
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, 256, nullptr, GL_STATIC_DRAW);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 8);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 9);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 3);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 2);
+    {
+        CPixelTransferGuard<true> unpack;
+        glBindTexture(GL_TEXTURE_2D, target.texture);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    }
+    GLint value = 0;
+    glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &value); require(value == GLint(buffer), "Unpack buffer was not restored");
+    glGetIntegerv(GL_UNPACK_ROW_LENGTH, &value); require(value == 9, "Unpack row length was not restored");
+    glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &value); require(value == 3, "Unpack offset was not restored");
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4); glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0); glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, buffer);
+    glPixelStorei(GL_PACK_ALIGNMENT, 8); glPixelStorei(GL_PACK_ROW_LENGTH, 9);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 3); glPixelStorei(GL_PACK_SKIP_ROWS, 2);
+    target.bind();
+    {
+        CPixelTransferGuard<false> pack;
+        glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, result.data());
+    }
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &value); require(value == GLint(buffer), "Pack buffer was not restored");
+    glGetIntegerv(GL_PACK_ROW_LENGTH, &value); require(value == 9, "Pack row length was not restored");
+    glGetIntegerv(GL_PACK_SKIP_ROWS, &value); require(value == 2, "Pack offset was not restored");
+    require(result == pixels && glGetError() == GL_NO_ERROR, "Pixel transfer used inherited memory offsets");
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0); glDeleteBuffers(1, &buffer);
+    glPixelStorei(GL_PACK_ALIGNMENT, 4); glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 0); glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+    std::cout << "PASS: bounded pixel transfers with inherited row offsets and pixel buffers\n";
+}
+
 static void sceneSampling() {
     Program shader(read("shaders/scene-sample.frag"), false);
     // Distinct native/scene/background images catch use of an earlier-drawn
@@ -547,6 +591,7 @@ int main() try {
     const float vertices[]{0,0, 1,0, 0,1, 1,1}; glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
     glDisable(GL_DITHER);
+    pixelTransfers();
     sceneSampling();
     blurBrightness(nativeBlur);
     neighborFalloff(native);

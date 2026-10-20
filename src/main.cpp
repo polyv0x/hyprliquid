@@ -5,6 +5,7 @@
 #include "GlassRenderer.hpp"
 #include "Globals.hpp"
 #include "PluginConfig.hpp"
+#include "RendererSymbols.hpp"
 #include "WindowScene.hpp"
 
 #include <hyprland/src/Compositor.hpp>
@@ -12,6 +13,7 @@
 #include <hyprland/src/desktop/view/WLSurface.hpp>
 #include <hyprland/src/helpers/time/Time.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
+#include <hyprland/src/managers/SessionLockManager.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/helpers/Color.hpp>
@@ -303,11 +305,20 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
                            const Time::steady_tp& now, bool popups, bool lockscreen) {
     const auto& config = g_pGlobalState->config;
 
+    // Never reuse a desktop backdrop above the session lock. Also honour native
+    // visibility checks before queuing either half of the redirected pass.
+    if (lockscreen || g_pSessionLockManager->isSessionLocked()) {
+        if (layerSurface)
+            g_pGlobalState->layerSurfaces.erase(layerSurface.get());
+        ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+        return;
+    }
+
     // Hyprland renders closing layers from snapshots. Do not inject the glass
     // pipeline while that snapshot is being captured: the snapshot framebuffer
     // starts transparent/black, so sampling it as a background can bake a black
     // rectangle into the fade-out snapshot.
-    if (g_pHyprRenderer->m_bRenderingSnapshot) {
+    if (!layerSurface || !layerSurface->visible() || g_pHyprRenderer->m_bRenderingSnapshot) {
         ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
         return;
     }
@@ -411,6 +422,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.window.close.listen([&](PHLWINDOW w) { onCloseWindow(w); }));
 
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.layer.closed.listen([&](PHLLS layerSurface) { clearLayerGlassOnClose(layerSurface); }));
+    g_pGlobalState->listeners.push_back(g_pSessionLockManager->m_events.lock.listen([] {
+        // A layer can survive locking and later be allowed above the lock.
+        // Its next desktop pass must acquire a fresh backdrop after unlocking.
+        g_pGlobalState->layerSurfaces.clear();
+    }));
 
     // Z-order / visibility changes invalidate layer glass caches on the affected monitor only.
     // Per-monitor to avoid triggering re-samples on idle monitors (feedback loop).
@@ -480,16 +496,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     }
 
     // Hook renderLayer for layer surface glass support
-    auto renderLayerMatches = HyprlandAPI::findFunctionsByName(PHANDLE, "renderLayer");
-    for (const auto& match : renderLayerMatches) {
-        // Match the overload: Render::IHyprRenderer::renderLayer(PHLLS, PHLMONITOR, steady_tp, bool, bool)
-        if (match.demangled.contains("renderLayer") && match.demangled.contains("LayerSurface")) {
-            g_pGlobalState->renderLayerHook = HyprlandAPI::createFunctionHook(PHANDLE, match.address, (void*)hkRenderLayer);
-            if (g_pGlobalState->renderLayerHook && !g_pGlobalState->renderLayerHook->hook()) {
-                HyprlandAPI::removeFunctionHook(PHANDLE, g_pGlobalState->renderLayerHook);
-                g_pGlobalState->renderLayerHook = nullptr;
-            }
-            break;
+    if (const auto address = rendererSymbol(PHANDLE, "renderLayer", "IHyprRenderer::renderLayer(")) {
+        g_pGlobalState->renderLayerHook = HyprlandAPI::createFunctionHook(PHANDLE, address, (void*)hkRenderLayer);
+        if (g_pGlobalState->renderLayerHook && !g_pGlobalState->renderLayerHook->hook()) {
+            HyprlandAPI::removeFunctionHook(PHANDLE, g_pGlobalState->renderLayerHook);
+            g_pGlobalState->renderLayerHook = nullptr;
         }
     }
 
@@ -502,15 +513,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     }
 
     // Hook damageSurface for live layer re-render on background content change
-    auto damageSurfaceMatches = HyprlandAPI::findFunctionsByName(PHANDLE, "damageSurface");
-    for (const auto& match : damageSurfaceMatches) {
-        if (match.demangled.contains("IHyprRenderer") && match.demangled.contains("damageSurface")) {
-            g_pGlobalState->damageSurfaceHook = HyprlandAPI::createFunctionHook(PHANDLE, match.address, (void*)hkDamageSurface);
-            if (g_pGlobalState->damageSurfaceHook && !g_pGlobalState->damageSurfaceHook->hook()) {
-                HyprlandAPI::removeFunctionHook(PHANDLE, g_pGlobalState->damageSurfaceHook);
-                g_pGlobalState->damageSurfaceHook = nullptr;
-            }
-            break;
+    if (const auto address = rendererSymbol(PHANDLE, "damageSurface", "IHyprRenderer::damageSurface(")) {
+        g_pGlobalState->damageSurfaceHook = HyprlandAPI::createFunctionHook(PHANDLE, address, (void*)hkDamageSurface);
+        if (g_pGlobalState->damageSurfaceHook && !g_pGlobalState->damageSurfaceHook->hook()) {
+            HyprlandAPI::removeFunctionHook(PHANDLE, g_pGlobalState->damageSurfaceHook);
+            g_pGlobalState->damageSurfaceHook = nullptr;
         }
     }
 

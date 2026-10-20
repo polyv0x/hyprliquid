@@ -81,6 +81,8 @@ def verify_control(ctl, config_path):
         {'overrides': {'blur_sigma': 4, 'rim_opacity': 50}},
         {'overrides': {'rim_opacity': float('nan')}},
         {'overrides': {'rim_opacity': float('inf')}},
+        {'overrides': {'rim_opacity': 1e300}},
+        {'overrides': {'rim_opacity': -1e300}},
         {'overrides': {'rim_opacity': True}},
         {'overrides': {'rim_opacity': '0.2'}},
         {'overrides': {'neighbor_contribution': -0.01}},
@@ -94,7 +96,9 @@ def verify_control(ctl, config_path):
     ]:
         failed = request('apply', patch=patch)
         assert not failed['ok'] and failed['state'] == state, failed
-    for payload in ['{}', 'null', '[]', '{broken', '{"op":"reset"} trailing']:
+    for payload in ['{}', 'null', '[]', '123', 'true', '"reset"', '{broken', '{"op":"reset"} trailing',
+                    '{"op":"state","padding":"' + 'x' * 16384 + '"}',
+                    '{"op":"state","nested":' + '[' * 32 + '0' + ']' * 32 + '}']:
         failed = json.loads(ctl('hyprliquid:control', payload))
         assert not failed['ok'] and failed['state'] == state, failed
     conflict = request('reset', if_epoch=state['epoch'], if_revision=state['revision'] - 1)
@@ -143,4 +147,25 @@ end
         config_path.write_text(original_config)
         ctl('reload')
     print('PASS: all preset theme variants, inherited tones and shared/theme-specific Lua customizations', flush=True)
+    ctl('eval', '''
+local glass = hl.plugin.hyprliquid
+for i = 1, 20 do
+    local values = {[1] = 0.2, [17] = 0.5, blur_sigma = 8,
+        dark = {[1] = 0.1, rim_opacity = 0.2}, light = {[2] = 0.3, rim_opacity = 0.4}}
+    assert(pcall(glass.preset, "numeric-keys", values))
+    assert(values[1] == 0.2 and values.dark[1] == 0.1)
+    local ok, message = pcall(glass.preset, "name:test, unknown:1")
+    assert(not ok and message:find("invalid setting"))
+    ok, message = pcall(glass.layer, "test-errors", setmetatable({}, {
+        __index = function() error("layer metamethod error") end,
+    }))
+    assert(not ok and message:find("layer metamethod error"))
+end
+for _, value in ipairs({1e300, -1e300, 0/0, math.huge}) do
+    assert(not pcall(glass.layer, "invalid-threshold", {mask_threshold = value}))
+end
+''')
+    ctl('reload')
+    assert request('state')['state']['material'] == baseline['material']
+    print('PASS: numeric Lua keys, malformed presets, throwing metamethods and extreme layer values', flush=True)
     return request

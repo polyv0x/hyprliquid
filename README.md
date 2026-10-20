@@ -99,8 +99,9 @@ From a source checkout:
 make test
 ```
 
-Tests require Mesa EGL/GLES3 and compare the native shaders against reference
-fixtures at three output scales.
+Tests require Mesa EGL/GLES3 and Lua development files. They check native safety
+boundaries and compare the shaders against reference fixtures at three output
+scales. See the [validation guide](docs/guide.md#validation) for compositor tests.
 
 ## License
 

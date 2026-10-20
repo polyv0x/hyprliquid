@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <unordered_map>
 
@@ -27,8 +28,11 @@ inline int materialPadding(const SMaterial& material, float scale) {
     const float bleed = material.edge_bleed_opacity > 0.0f ? material.edge_bleed_amount : 0.0f;
     // Two 13-tap passes per axis reach 4.29 sigma. Include the greatest
     // displaced sample as well, so the blur never reads an artificial edge.
-    return static_cast<int>(std::ceil((std::max(refraction, bleed) +
-                                      4.5f * material.blur_sigma + 2.0f) * scale));
+    const double padding = std::ceil((std::max(refraction, bleed) +
+                                      4.5 * material.blur_sigma + 2.0) * scale);
+    if (!std::isfinite(padding) || padding < 0 || padding > std::numeric_limits<int>::max() / 4)
+        return 0;
+    return static_cast<int>(padding);
 }
 
 // Negative material values are valid; use an out-of-range inheritance sentinel.

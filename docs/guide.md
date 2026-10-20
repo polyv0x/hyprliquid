@@ -249,6 +249,8 @@ Layer surfaces can be selected with `glass.layer("noctalia-panel", { preset =
 `alpha`, and `region`; `auto` uses a client's background-effect region when
 available and otherwise uses its alpha. This remains an analytic rectangular
 material: it does not reconstruct an arbitrary layer's outline for the rim.
+Layer glass is suspended while the session is locked, including layers allowed
+above the lock screen. Cached desktop backdrops are discarded on locking.
 
 ## Validation
 
@@ -257,7 +259,9 @@ make test
 python3 scripts/test-nested.py
 ```
 
-`make test` needs Mesa surfaceless EGL and GLES3. It compiles both the reference
+`make test` needs Mesa surfaceless EGL, GLES3, and Lua development files. It checks
+coordinate and size overflow, Lua error cleanup (including allocation failure),
+and pixel transfers with inherited GL offsets and buffer bindings. It compiles both the reference
 fixtures and the native shaders. With the original outline-based optics selected
 in the test harness, it compares all five materials at 1×, 1.5× and 2× scale and
 rounding powers from 1 to 10. The production optical path is checked for corner
@@ -276,6 +280,19 @@ panes at native/fractional scale and on a rotated output, and closes a neighbour
 to check capture cleanup. Set `HYPRLIQUID_TEST_PLUGIN` to an alternative library
 path to run the same regression against a previous build. Screenshots and logs go in
 `build/`. It does not install the plugin into the parent compositor.
+
+For focused security integration checks against the current checkout:
+
+```sh
+make -j4 all build/security-test.so build/layer-test
+python3 scripts/test-nested.py --security-only
+```
+
+The layer fixture additionally requires GTK4 and gtk4-layer-shell development
+files. These checks inject framebuffer allocation failures, verify that invalid
+sizes never reach the native allocator, and exercise layer cache invalidation
+across lock/unlock. Both fixtures run only in the disposable compositor. When
+built, they also run as part of the full nested suite for the current checkout.
 
 The materials are validated for **SDR** rendering. HDR color management is not
 calibrated.

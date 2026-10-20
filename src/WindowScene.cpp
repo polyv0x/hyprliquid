@@ -1,6 +1,7 @@
 #include "WindowScene.hpp"
 #include "GlassDecoration.hpp"
 #include "Globals.hpp"
+#include "RendererSymbols.hpp"
 #include "WindowGeometry.hpp"
 
 #include <GLES3/gl32.h>
@@ -54,7 +55,7 @@ class CWindowScenePassElement : public IPassElement {
         const auto savedData = renderer.m_renderData;
         const auto monitor = savedData.pMonitor.lock();
         const auto source = savedData.currentFB;
-        if (!monitor || !source)
+        if (!monitor || !source || !RenderSafety::dimension(source->m_size.x) || !RenderSafety::dimension(source->m_size.y))
             return {};
 
         const bool feedback = renderer.m_bBlockSurfaceFeedback;
@@ -102,7 +103,10 @@ class CWindowScenePassElement : public IPassElement {
     bool needsPrecomputeBlur() override { return false; }
     bool disableSimplification() override { return true; }
     std::optional<CBox> boundingBox() override {
-        return CBox{{}, g_pHyprRenderer->m_renderData.pMonitor->m_transformedSize / g_pHyprRenderer->m_renderData.pMonitor->m_scale};
+        const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+        if (!monitor || !std::isfinite(monitor->m_scale) || monitor->m_scale <= 0)
+            return std::nullopt;
+        return CBox{{}, monitor->m_transformedSize / monitor->m_scale};
     }
     const char* passName() override { return "CWindowScenePassElement"; }
     ePassElementType type() override { return EK_CUSTOM; }
@@ -112,7 +116,7 @@ class CWindowScenePassElement : public IPassElement {
 };
 
 std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWORKSPACE workspace) {
-    if (!workspace || renderer->m_bRenderingSnapshot || renderer->m_renderData.projectionType != Render::RPT_MONITOR)
+    if (!monitor || !workspace || renderer->m_bRenderingSnapshot || renderer->m_renderData.projectionType != Render::RPT_MONITOR)
         return nullptr;
 
     auto scene = std::make_shared<SWindowScene>();
@@ -225,20 +229,14 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
 } // namespace
 
 bool initialize() {
-    for (const auto& match : HyprlandAPI::findFunctionsByName(PHANDLE, "renderWindow"))
-        if (match.demangled.contains("IHyprRenderer::renderWindow(")) {
-            renderWindow = reinterpret_cast<RenderWindow>(match.address);
-            break;
-        }
+    renderWindow = reinterpret_cast<RenderWindow>(rendererSymbol(PHANDLE, "renderWindow", "IHyprRenderer::renderWindow("));
     if (!renderWindow)
         return false;
-    for (const auto& match : HyprlandAPI::findFunctionsByName(PHANDLE, "renderWorkspaceWindows"))
-        if (match.demangled.contains("IHyprRenderer::renderWorkspaceWindows(")) {
-            workspaceHook = HyprlandAPI::createFunctionHook(PHANDLE, match.address, reinterpret_cast<void*>(renderWorkspace));
-            if (workspaceHook && workspaceHook->hook())
-                return true;
-            break;
-        }
+    if (const auto address = rendererSymbol(PHANDLE, "renderWorkspaceWindows", "IHyprRenderer::renderWorkspaceWindows(")) {
+        workspaceHook = HyprlandAPI::createFunctionHook(PHANDLE, address, reinterpret_cast<void*>(renderWorkspace));
+        if (workspaceHook && workspaceHook->hook())
+            return true;
+    }
     destroy();
     return false;
 }

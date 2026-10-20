@@ -32,6 +32,8 @@ std::optional<CBox> CGlassPassElement::boundingBox() {
     // but inside our padding isn't re-rendered, leaving stale content.
     const float scale = monitor->m_scale;
     box->scale(1.0 / scale).expand(m_data.decoration->samplingPadding(monitor) / scale);
+    if (!RenderSafety::sampleGeometry(box->x, box->y, box->w, box->h, 0))
+        return std::nullopt;
     return box;
 }
 

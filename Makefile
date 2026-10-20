@@ -28,15 +28,22 @@ $(TARGET): $(OBJECTS)
 	$(CXX) -shared $(LDFLAGS) $^ $(LDLIBS) -o build/$@.tmp
 	mv build/$@.tmp $@
 
-build/render-test: tests/render.cpp src/Material.hpp src/MaterialParams.inc src/BuiltInPresets.hpp | build
+build/render-test: tests/render.cpp src/Material.hpp src/MaterialParams.inc src/BuiltInPresets.hpp src/PixelTransfer.hpp | build
 	$(CXX) $(CXXFLAGS) -Isrc $< -o $@ $$(pkg-config --cflags --libs egl glesv2)
 
-test: build/render-test
+build/security-test: tests/security.cpp src/RenderSafety.hpp src/Material.hpp src/MaterialParams.inc src/LuaSafety.hpp | build
+	$(CXX) $(CXXFLAGS) -UNDEBUG -Isrc $< -o $@ $$(pkg-config --cflags --libs lua)
+
+test: build/security-test build/render-test
+	./build/security-test
 	LIBGL_ALWAYS_SOFTWARE=1 ./build/render-test
 
 # Optional disposable-compositor instrumentation; never part of hyprliquid.so.
-build/capture-test.so: tests/capture.cpp | build
+build/capture-test.so: tests/capture.cpp src/PixelTransfer.hpp src/RenderSafety.hpp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared $< $(LDLIBS) -o $@
+
+build/security-test.so: tests/security-render.cpp $(TARGET) | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared $< -L. -l:$(TARGET) -Wl,-rpath,'$$ORIGIN/..' $(LDLIBS) -o $@
 
 build/layer-test: tests/layer.cpp | build
 	$(CXX) $(CXXFLAGS) $< -o $@ $$(pkg-config --cflags --libs gtk4 gtk4-layer-shell-0)

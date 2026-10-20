@@ -1,6 +1,7 @@
 #include "ShaderManager.hpp"
 #include "Globals.hpp"
 #include "ShaderSources.hpp"
+#include "PixelTransfer.hpp"
 
 #include <bit>
 
@@ -120,7 +121,12 @@ void CShaderManager::initializeIfNeeded() {
     m_initialized = true;
 }
 
-void CShaderManager::bindUnderlayShapes(std::span<const std::array<float, 8>> shapes) {
+int CShaderManager::bindUnderlayShapes(std::span<const std::array<float, 8>> shapes) {
+    GLint maxSize = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxSize);
+    if (shapes.empty() || maxSize < 2 || shapes.size() > static_cast<size_t>(maxSize))
+        return 0;
+    CPixelTransferGuard<true> unpack;
     if (!m_underlayShapes)
         glGenTextures(1, &m_underlayShapes);
     glBindTexture(GL_TEXTURE_2D, m_underlayShapes);
@@ -129,10 +135,15 @@ void CShaderManager::bindUnderlayShapes(std::span<const std::array<float, 8>> sh
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     if (shapes.size() > m_underlayCapacity) {
-        m_underlayCapacity = std::bit_ceil(shapes.size());
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 2, m_underlayCapacity, 0, GL_RGBA, GL_FLOAT, nullptr);
+        const auto capacity = std::min(std::bit_ceil(shapes.size()), static_cast<size_t>(maxSize));
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 2, static_cast<GLsizei>(capacity), 0, GL_RGBA, GL_FLOAT, nullptr);
+        if (glGetError() != GL_NO_ERROR)
+            return 0;
+        m_underlayCapacity = capacity;
     }
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 2, shapes.size(), GL_RGBA, GL_FLOAT, shapes.data());
+    const auto count = static_cast<GLsizei>(shapes.size());
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 2, count, GL_RGBA, GL_FLOAT, shapes.data());
+    return count;
 }
 
 void CShaderManager::destroy() noexcept {

@@ -61,7 +61,7 @@ class CShaderManager {
     void initializeIfNeeded();
     void destroy() noexcept;
     // Upload on the caller's active texture unit; storage is reused between draws.
-    void bindUnderlayShapes(std::span<const std::array<float, 8>> shapes);
+    [[nodiscard]] int bindUnderlayShapes(std::span<const std::array<float, 8>> shapes);
 
     SP<CShader>    glassShader = makeShared<CShader>();
     SGlassUniforms glassUniforms;

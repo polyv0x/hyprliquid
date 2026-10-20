@@ -148,7 +148,8 @@ void setField(SPresetValues& target, const std::string& key, json_object* item) 
     if (!item) { target.name = SENTINEL_FLOAT; return; } \
     require(json_object_is_type(item, json_type_double) || json_object_is_type(item, json_type_int), key + ": expected a number"); \
     const double number = json_object_get_double(item); \
-    require(std::isfinite(number) && static_cast<float>(number) >= lo && static_cast<float>(number) <= hi, key + ": outside valid range"); \
+    require(std::isfinite(number) && std::abs(number) <= std::numeric_limits<float>::max(), key + ": outside valid range"); \
+    require(static_cast<float>(number) >= lo && static_cast<float>(number) <= hi, key + ": outside valid range"); \
     target.name = static_cast<float>(number); return; \
 }
 #include "MaterialParams.inc"
@@ -206,12 +207,16 @@ std::string dispatch(eHyprCtlOutputFormat, std::string request) {
     put(response.get(), "ok", json_object_new_boolean(false));
     try {
         require(request.starts_with(std::string(COMMAND) + " "), "expected a JSON request after hyprliquid:control");
-        const auto payload = request.substr(std::char_traits<char>::length(COMMAND) + 1);
+        const auto payload = std::string_view(request).substr(std::char_traits<char>::length(COMMAND) + 1);
         require(payload.size() <= 16384, "request too large");
+        require(payload.find('\0') == std::string_view::npos, "invalid JSON");
         auto tokener = std::unique_ptr<json_tokener, decltype(&json_tokener_free)>(json_tokener_new_ex(16), json_tokener_free);
+        if (!tokener) throw std::bad_alloc();
         json_tokener_set_flags(tokener.get(), JSON_TOKENER_STRICT | JSON_TOKENER_VALIDATE_UTF8);
-        auto input = own(json_tokener_parse_ex(tokener.get(), payload.c_str(), payload.size() + 1));
-        require(json_tokener_get_error(tokener.get()) == json_tokener_success && input, "invalid JSON");
+        auto input = own(json_tokener_parse_ex(tokener.get(), payload.data(), static_cast<int>(payload.size()) + 1));
+        require(json_tokener_get_error(tokener.get()) == json_tokener_success && input &&
+                json_tokener_get_parse_end(tokener.get()) >= payload.size(), "invalid JSON");
+        require(json_object_is_type(input.get(), json_type_object), "expected an object");
         const auto op = text(get(input.get(), "op"));
         if (op == "describe" || op == "state" || op == "buffers") {
             keys(input.get(), {"op"});

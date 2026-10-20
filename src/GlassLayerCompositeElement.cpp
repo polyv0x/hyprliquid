@@ -10,7 +10,8 @@ CGlassLayerCompositeElement::CGlassLayerCompositeElement(const SGlassLayerCompos
     : m_data(data) {}
 
 std::vector<UP<IPassElement>> CGlassLayerCompositeElement::draw() {
-    if (m_data.layerState && m_data.layerState->getLayerSurface())
+    // Restoration is required even if the client disappeared after redirection.
+    if (m_data.layerState)
         m_data.layerState->compositeAndRestore(g_pHyprRenderer->m_renderData.pMonitor.lock(), m_data.alpha, m_data.maskSource);
 
     return {};
@@ -31,7 +32,7 @@ std::optional<CBox> CGlassLayerCompositeElement::boundingBox() {
 
     const float scale = monitor->m_scale > 0.0f ? monitor->m_scale : 1.0f;
     box->scale(1.0 / scale).expand(m_data.layerState->samplingPadding(monitor) / scale).noNegativeSize().round();
-    if (!std::isfinite(box->x) || !std::isfinite(box->y) || !std::isfinite(box->w) || !std::isfinite(box->h) || box->w <= 0.0 || box->h <= 0.0)
+    if (!RenderSafety::sampleGeometry(box->x, box->y, box->w, box->h, 0))
         return std::nullopt;
 
     return box;

@@ -31,7 +31,7 @@ std::optional<CBox> CGlassLayerPassElement::boundingBox() {
 
     const float scale = monitor->m_scale > 0.0f ? monitor->m_scale : 1.0f;
     box->scale(1.0 / scale).expand(m_data.layerState->samplingPadding(monitor) / scale).noNegativeSize().round();
-    if (!std::isfinite(box->x) || !std::isfinite(box->y) || !std::isfinite(box->w) || !std::isfinite(box->h) || box->w <= 0.0 || box->h <= 0.0)
+    if (!RenderSafety::sampleGeometry(box->x, box->y, box->w, box->h, 0))
         return std::nullopt;
 
     return box;

@@ -83,6 +83,55 @@ def main():
                 assert shadow.get('bool', shadow.get('int')) == 1, shadow
                 print('PASS: load and Lua configuration (including signed preset values)', flush=True)
                 control = verify_control(ctl, config_path)
+                security_plugin = BUILD / 'security-test.so'
+                # The fault-injection fixture links the current checkout's library.
+                if security_plugin.exists() and PLUGIN == (ROOT / 'hyprliquid.so').resolve():
+                    ctl('plugin', 'load', str(security_plugin))
+                    ctl('hyprliquid-test:security', 'run')
+                    result = wait_for(lambda: (status if (status := ctl('hyprliquid-test:security', 'status')) != 'pending' else None), compositor)
+                    assert result == 'pass', result
+                    layer_binary = BUILD / 'layer-test'
+                    if layer_binary.exists():
+                        saved_config = config_path.read_text()
+                        config_path.write_text(saved_config + '\nhl.plugin.hyprliquid.config({ layers = { enabled = true, mask_mode = "alpha" } })\n')
+                        ctl('reload')
+                        layer = subprocess.Popen([str(layer_binary)], env=env | {'GSK_RENDERER': 'cairo', 'GTK_A11Y': 'none'}, stdout=log, stderr=log)
+                        clients.append(layer)
+                        try:
+                            wait_for(lambda: 'hyprliquid-vram-test' in ctl('-j', 'layers'), compositor)
+                            try:
+                                wait_for(lambda: any(item['cached'] for item in control('buffers')['buffers']['layers']), compositor)
+                            except TimeoutError:
+                                (BUILD / 'security-layer-failure.json').write_text(json.dumps({
+                                    'buffers': control('buffers'), 'layers': json.loads(ctl('-j', 'layers')),
+                                    'enabled': json.loads(ctl('-j', 'getoption', 'plugin:hyprliquid:layers:enabled')),
+                                    'config_errors': ctl('configerrors'),
+                                }, indent=2))
+                                raise
+                            ctl('hyprliquid-test:security', 'lock')
+                            assert ctl('hyprliquid-test:security', 'locked') == 'yes'
+                            time.sleep(0.2)
+                            assert not control('buffers')['buffers']['layers'], 'Lock retained a desktop layer backdrop'
+                            ctl('hyprliquid-test:security', 'unlock')
+                            wait_for(lambda: any(item['cached'] for item in control('buffers')['buffers']['layers']), compositor)
+                        finally:
+                            ctl('hyprliquid-test:security', 'unlock')
+                            layer.terminate()
+                            layer.wait(timeout=5)
+                            config_path.write_text(saved_config)
+                            ctl('reload')
+                        wait_for(lambda: not control('buffers')['buffers']['layers'], compositor)
+                        print('PASS: layer caches are discarded while locked and rebuilt after unlock', flush=True)
+                    ctl('plugin', 'unload', str(security_plugin))
+                    print('PASS: invalid GPU sizes, failed allocation/blur, GL state restoration and byte overflow', flush=True)
+                    # Fault injection deliberately increments failure diagnostics.
+                    # Start the rendering suite with a fresh plugin instance.
+                    ctl('plugin', 'unload', str(PLUGIN))
+                    ctl('plugin', 'load', str(PLUGIN))
+                elif '--security-only' in sys.argv:
+                    raise RuntimeError('Build build/security-test.so before running --security-only')
+                if '--security-only' in sys.argv:
+                    return
                 ctl('dismissnotify')
 
                 if shutil.which('kitty') and shutil.which('grim'):

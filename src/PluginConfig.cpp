@@ -1,10 +1,10 @@
 #include "PluginConfig.hpp"
 #include "BuiltInPresets.hpp"
 #include "Globals.hpp"
+#include "LuaSafety.hpp"
 
 #include <algorithm>
 #include <charconv>
-#include <cstring>
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/config/lua/ConfigManager.hpp>
 #include <hyprland/src/config/values/ConfigValues.hpp>
@@ -71,9 +71,9 @@ void registerConfig(HANDLE handle) {
 
     // Legacy config keyword plus Lua-config callbacks for custom presets and layers.
     HyprlandAPI::addConfigKeyword(handle, ConfigKeys::PRESET_KEYWORD, handlePresetKeyword, Hyprlang::SHandlerOptions{});
-    HyprlandAPI::addLuaFunction(handle, "hyprliquid", "preset", handleLuaPreset);
-    HyprlandAPI::addLuaFunction(handle, "hyprliquid", "layer", handleLuaLayer);
-    HyprlandAPI::addLuaFunction(handle, "hyprliquid", "config", handleLuaConfig);
+    HyprlandAPI::addLuaFunction(handle, "hyprliquid", "preset", LuaSafety::boundary<handleLuaPreset>);
+    HyprlandAPI::addLuaFunction(handle, "hyprliquid", "layer", LuaSafety::boundary<handleLuaLayer>);
+    HyprlandAPI::addLuaFunction(handle, "hyprliquid", "config", LuaSafety::boundary<handleLuaConfig>);
 }
 
 // ── Config pointer initialization ────────────────────────────────────────────
@@ -127,11 +127,10 @@ static std::string_view trim(std::string_view str) {
     return str;
 }
 
-static bool setPresetField(SPresetValues& values, std::string_view key, std::string_view valueStr) {
-    float parsed = 0.0f;
-    auto [ptr, ec] = std::from_chars(valueStr.data(), valueStr.data() + valueStr.size(), parsed);
-    if (ec != std::errc{} || ptr != valueStr.data() + valueStr.size() || !std::isfinite(parsed))
+static bool setPresetNumber(SPresetValues& values, std::string_view key, double number) {
+    if (!std::isfinite(number) || std::abs(number) > std::numeric_limits<float>::max())
         return false;
+    const float parsed = static_cast<float>(number);
 #define GLASS_PARAM(name, value, lo, hi) \
     if (key == #name) { \
         if (parsed < lo || parsed > hi) return false; \
@@ -140,6 +139,12 @@ static bool setPresetField(SPresetValues& values, std::string_view key, std::str
 #include "MaterialParams.inc"
 #undef GLASS_PARAM
     return false;
+}
+
+static bool setPresetField(SPresetValues& values, std::string_view key, std::string_view valueStr) {
+    float parsed = 0.0f;
+    auto [ptr, ec] = std::from_chars(valueStr.data(), valueStr.data() + valueStr.size(), parsed);
+    return ec == std::errc{} && ptr == valueStr.data() + valueStr.size() && setPresetNumber(values, key, parsed);
 }
 
 static bool isSet(float value) {
@@ -290,7 +295,7 @@ static void copyValidatedTable(SLuaConfigContext& ctx, int srcIdx, int dstIdx, c
     }
 
     lua_pushnil(L);
-    while (lua_next(L, srcIdx) != 0) {
+    while (LuaSafety::next(L, srcIdx) != 0) {
         if (lua_type(L, -2) != LUA_TSTRING) {
             ctx.report(dottedPrefix.empty() ? std::string{"ignoring non-string key"} : std::format("ignoring non-string key in '{}'", dottedPrefix));
             lua_pop(L, 1);
@@ -298,7 +303,12 @@ static void copyValidatedTable(SLuaConfigContext& ctx, int srcIdx, int dstIdx, c
         }
 
         // same normalisation as Hyprland's luaConfigValueName
-        std::string key = lua_tostring(L, -2);
+        std::string key{LuaSafety::stringView(L, -2)};
+        if (key.find('\0') != std::string::npos) {
+            ctx.report("ignoring key containing NUL");
+            lua_pop(L, 1);
+            continue;
+        }
         std::replace(key.begin(), key.end(), ':', '.');
         std::replace(key.begin(), key.end(), '-', '_');
         const std::string dotted = dottedPrefix.empty() ? key : dottedPrefix + "." + key;
@@ -310,10 +320,10 @@ static void copyValidatedTable(SLuaConfigContext& ctx, int srcIdx, int dstIdx, c
 
         if (!known) {
             if (table) {
-                lua_newtable(L);
+                LuaSafety::newTable(L);
                 const int subDst = lua_gettop(L);
                 copyValidatedTable(ctx, subDst - 1, subDst, dotted, depth + 1);
-                lua_setfield(L, dstIdx, key.c_str());
+                LuaSafety::setField(L, dstIdx, key.c_str());
             } else {
                 ctx.report(std::format("unknown option '{}'", dotted));
             }
@@ -321,7 +331,7 @@ static void copyValidatedTable(SLuaConfigContext& ctx, int srcIdx, int dstIdx, c
             ctx.report(std::format("option '{}' expects a value, not a table", dotted));
         } else {
             lua_pushvalue(L, -1);
-            lua_setfield(L, dstIdx, key.c_str());
+            LuaSafety::setField(L, dstIdx, key.c_str());
             ctx.applied.emplace_back(std::move(optionPath), dotted);
         }
         lua_pop(L, 1);
@@ -340,12 +350,12 @@ static bool forwardLuaConfig(lua_State* L) {
         ctx.where = std::format("{}:{}", src ? src : "?", ar.currentline);
     }
 
-    lua_newtable(L); // root
-    lua_newtable(L); // plugin
-    lua_newtable(L); // hyprliquid
+    LuaSafety::newTable(L); // root
+    LuaSafety::newTable(L); // plugin
+    LuaSafety::newTable(L); // hyprliquid
     copyValidatedTable(ctx, 1, lua_gettop(L), "");
-    lua_setfield(L, -2, "hyprliquid");
-    lua_setfield(L, -2, "plugin");
+    LuaSafety::setField(L, -2, "hyprliquid");
+    LuaSafety::setField(L, -2, "plugin");
 
     const std::string errorsBefore = ctx.luaMgr ? ctx.luaMgr->getErrors() : std::string{};
     if (lua_pcall(L, 1, 0, 0) != LUA_OK)
@@ -363,17 +373,17 @@ static bool forwardLuaConfig(lua_State* L) {
 
 static int handleLuaConfig(lua_State* L) {
     if (lua_gettop(L) < 1 || !lua_istable(L, 1))
-        return luaL_error(L, "hyprliquid.config: expected a table");
+        throw std::invalid_argument("hyprliquid.config: expected a table");
 
-    lua_getglobal(L, "hl");
+    LuaSafety::getGlobal(L, "hl");
     if (!lua_istable(L, -1))
-        return luaL_error(L, "hyprliquid.config: hl.config is not available");
-    lua_getfield(L, -1, "config");
+        throw std::invalid_argument("hyprliquid.config: hl.config is not available");
+    LuaSafety::getField(L, -1, "config");
     if (!lua_isfunction(L, -1))
-        return luaL_error(L, "hyprliquid.config: hl.config is not available");
+        throw std::invalid_argument("hyprliquid.config: hl.config is not available");
 
     if (!forwardLuaConfig(L))
-        return lua_error(L);
+        throw LuaSafety::Error{};
     lua_pop(L, 1); // hl
     if (const auto manager = luaConfigManager(); manager && manager->isDynamicParse())
         runtimeBaselineChanged(false);
@@ -384,11 +394,10 @@ static int handleLuaConfig(lua_State* L) {
 
 static void readPresetValuesFromTable(lua_State* L, int tableIdx, SPresetValues& values) {
     lua_pushnil(L);
-    while (lua_next(L, tableIdx) != 0) {
-        if (lua_isstring(L, -2) && lua_isnumber(L, -1)) {
-            const char* key = lua_tostring(L, -2);
-            std::string valStr = std::to_string(lua_tonumber(L, -1));
-            setPresetField(values, key, valStr);
+    while (LuaSafety::next(L, tableIdx) != 0) {
+        if (lua_type(L, -2) == LUA_TSTRING && lua_isnumber(L, -1)) {
+            const auto key = LuaSafety::stringView(L, -2);
+            setPresetNumber(values, key, lua_tonumber(L, -1));
         }
         lua_pop(L, 1);
     }
@@ -398,40 +407,41 @@ static int handleLuaPreset(lua_State* L) {
     int nargs = lua_gettop(L);
 
     // Legacy: preset("name:clear, glass_opacity:0.8, ...")
-    if (nargs == 1 && lua_isstring(L, 1)) {
+    if (nargs == 1 && lua_type(L, 1) == LUA_TSTRING) {
+        if (LuaSafety::stringView(L, 1).find('\0') != std::string_view::npos)
+            throw std::invalid_argument("hyprliquid.preset: unexpected NUL in preset definition");
         const auto result = handlePresetKeyword(ConfigKeys::PRESET_KEYWORD, lua_tostring(L, 1));
         if (result.error)
-            return luaL_error(L, "%s", result.getError());
+            throw std::invalid_argument(result.getError());
         return 0;
     }
 
     // Table: preset("clear", { glass_opacity = 0.8, dark = { brightness = 0.7 }, ... })
-    if (nargs == 2 && lua_isstring(L, 1) && lua_istable(L, 2)) {
-        std::string baseName = stripDynamicTagMarker(lua_tostring(L, 1));
+    if (nargs == 2 && lua_type(L, 1) == LUA_TSTRING && lua_istable(L, 2)) {
+        std::string baseName = stripDynamicTagMarker(LuaSafety::stringView(L, 1));
         auto& preset = s_pendingPresets[baseName];
         preset.name = baseName;
 
         lua_pushnil(L);
-        while (lua_next(L, 2) != 0) {
-            if (!lua_isstring(L, -2)) { lua_pop(L, 1); continue; }
-            const char* key = lua_tostring(L, -2);
+        while (LuaSafety::next(L, 2) != 0) {
+            if (lua_type(L, -2) != LUA_TSTRING) { lua_pop(L, 1); continue; }
+            const auto key = LuaSafety::stringView(L, -2);
 
-            if (strcmp(key, "inherits") == 0 && lua_isstring(L, -1)) {
-                preset.inherits = stripDynamicTagMarker(lua_tostring(L, -1));
-            } else if (strcmp(key, "dark") == 0 && lua_istable(L, -1)) {
+            if (key == "inherits" && lua_type(L, -1) == LUA_TSTRING) {
+                preset.inherits = stripDynamicTagMarker(LuaSafety::stringView(L, -1));
+            } else if (key == "dark" && lua_istable(L, -1)) {
                 readPresetValuesFromTable(L, lua_gettop(L), preset.dark);
-            } else if (strcmp(key, "light") == 0 && lua_istable(L, -1)) {
+            } else if (key == "light" && lua_istable(L, -1)) {
                 readPresetValuesFromTable(L, lua_gettop(L), preset.light);
             } else if (lua_isnumber(L, -1)) {
-                std::string valStr = std::to_string(lua_tonumber(L, -1));
-                setPresetField(preset.shared, key, valStr);
+                setPresetNumber(preset.shared, key, lua_tonumber(L, -1));
             }
             lua_pop(L, 1);
         }
         return 0;
     }
 
-    return luaL_error(L, "hyprliquid.preset: expected (string) or (name, table)");
+    throw std::invalid_argument("hyprliquid.preset: expected (string) or (name, table)");
 }
 
 // ── Lua layer handler ───────────────────────────────────────────────────────
@@ -448,36 +458,40 @@ struct SPendingLayer {
 static std::vector<SPendingLayer> s_pendingLayers;
 
 static int handleLuaLayer(lua_State* L) {
-    if (lua_gettop(L) < 1 || !lua_isstring(L, 1))
-        return luaL_error(L, "hyprliquid.layer: first argument must be a namespace string");
+    if (lua_gettop(L) < 1 || lua_type(L, 1) != LUA_TSTRING)
+        throw std::invalid_argument("hyprliquid.layer: first argument must be a namespace string");
 
     SPendingLayer entry;
-    entry.ns = lua_tostring(L, 1);
+    entry.ns = LuaSafety::stringView(L, 1);
 
     if (lua_gettop(L) >= 2 && lua_istable(L, 2)) {
-        lua_getfield(L, 2, "exclude");
+        LuaSafety::getField(L, 2, "exclude");
         if (lua_isboolean(L, -1) && lua_toboolean(L, -1))
             entry.exclude = true;
         lua_pop(L, 1);
 
-        lua_getfield(L, 2, "preset");
-        if (lua_isstring(L, -1))
-            entry.preset = lua_tostring(L, -1);
+        LuaSafety::getField(L, 2, "preset");
+        if (lua_type(L, -1) == LUA_TSTRING)
+            entry.preset = LuaSafety::stringView(L, -1);
         lua_pop(L, 1);
 
-        lua_getfield(L, 2, "mask_threshold");
-        if (lua_isnumber(L, -1))
-            entry.maskThreshold = static_cast<float>(lua_tonumber(L, -1));
+        LuaSafety::getField(L, 2, "mask_threshold");
+        if (lua_isnumber(L, -1)) {
+            const auto value = lua_tonumber(L, -1);
+            if (!std::isfinite(value) || value < 0.0 || value > 1.0)
+                throw std::invalid_argument("hyprliquid.layer: mask_threshold must be between 0 and 1");
+            entry.maskThreshold = static_cast<float>(value);
+        }
         lua_pop(L, 1);
 
-        lua_getfield(L, 2, "live_resample");
+        LuaSafety::getField(L, 2, "live_resample");
         if (lua_isboolean(L, -1))
             entry.liveResample = lua_toboolean(L, -1) ? 1 : 0;
         lua_pop(L, 1);
 
-        lua_getfield(L, 2, "mask_mode");
-        if (lua_isstring(L, -1))
-            entry.maskMode = parseLayerMaskMode(lua_tostring(L, -1));
+        LuaSafety::getField(L, 2, "mask_mode");
+        if (lua_type(L, -1) == LUA_TSTRING)
+            entry.maskMode = parseLayerMaskMode(LuaSafety::stringView(L, -1));
         lua_pop(L, 1);
     }
 

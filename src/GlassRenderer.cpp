@@ -1,5 +1,6 @@
 #include "GlassRenderer.hpp"
 #include "Globals.hpp"
+#include "RenderSafety.hpp"
 
 #include <algorithm>
 #include <array>
@@ -7,6 +8,7 @@
 #include <GLES3/gl32.h>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
+#include <hyprutils/utils/ScopeGuard.hpp>
 
 namespace GlassRenderer {
 
@@ -34,23 +36,22 @@ static void bindCleanBackdrop(const SCleanSampleUniforms& uniforms, const SNeigh
 bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IFramebuffer> sourceFramebuffer,
                       CBox box, Vector2D& outPaddingRatio, int padding, SP<Render::IFramebuffer> neighbours,
                       SP<Render::IFramebuffer> sceneBackground, float neighborContribution) {
-    if (!sourceFramebuffer || !std::isfinite(box.x) || !std::isfinite(box.y) ||
-        !std::isfinite(box.width) || !std::isfinite(box.height) || box.width <= 0 || box.height <= 0)
+    const auto geometry = RenderSafety::sampleGeometry(box.x, box.y, box.width, box.height, padding);
+    if (!sourceFramebuffer || !sourceFramebuffer->isAllocated() || !geometry ||
+        !RenderSafety::dimension(sourceFramebuffer->m_size.x) || !RenderSafety::dimension(sourceFramebuffer->m_size.y))
         return false;
 
-    const int width = std::max(1, static_cast<int>(std::ceil(box.width))) + 2 * padding;
-    const int height = std::max(1, static_cast<int>(std::ceil(box.height))) + 2 * padding;
-    const int x0 = static_cast<int>(std::floor(box.x)) - padding;
-    const int y0 = static_cast<int>(std::floor(box.y)) - padding;
+    const auto [width, height, x0, y0, x1, y1, owner] = *geometry;
     const int fw = static_cast<int>(sourceFramebuffer->m_size.x);
     const int fh = static_cast<int>(sourceFramebuffer->m_size.y);
     const int sx0 = std::clamp(x0, 0, fw), sy0 = std::clamp(y0, 0, fh);
-    const int sx1 = std::clamp(x0 + width, 0, fw), sy1 = std::clamp(y0 + height, 0, fh);
+    const int sx1 = std::clamp(x1, 0, fw), sy1 = std::clamp(y1, 0, fh);
     if (sx1 <= sx0 || sy1 <= sy0)
         return false;
     const int dx0 = sx0 - x0, dy0 = sy0 - y0;
     const int dx1 = sx1 - x0, dy1 = sy1 - y0;
 
+    Hyprutils::Utils::CScopeGuard restore([&] { glBindFramebuffer(GL_FRAMEBUFFER, fbId(sourceFramebuffer)); });
     if (!g_pGlobalState->renderBuffers.prepare(sampleFramebuffer, width, height, sourceFramebuffer->m_drmFormat, "sharp"))
         return false;
     g_pGlobalState->renderBuffers.touch(sourceFramebuffer);
@@ -59,12 +60,11 @@ bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IF
     outPaddingRatio = Vector2D(static_cast<double>(padding) / width, static_cast<double>(padding) / height);
     g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbId(sampleFramebuffer));
-    const bool useNeighbours = neighbours && neighbours->m_size == sourceFramebuffer->m_size &&
+    const bool useNeighbours = neighbours && neighbours->isAllocated() && neighbours->m_size == sourceFramebuffer->m_size &&
                                neighbours->m_drmFormat == sourceFramebuffer->m_drmFormat;
-    const int ownX0 = std::floor(box.x), ownY0 = std::floor(box.y);
-    const int ownX1 = std::ceil(box.x + box.width), ownY1 = std::ceil(box.y + box.height);
+    const auto [ownX0, ownY0, ownX1, ownY1] = owner;
     if (useNeighbours && neighborContribution < 1.0f && sceneBackground &&
-        sceneBackground->m_size == sourceFramebuffer->m_size && sceneBackground->m_drmFormat == sourceFramebuffer->m_drmFormat) {
+        sceneBackground->isAllocated() && sceneBackground->m_size == sourceFramebuffer->m_size && sceneBackground->m_drmFormat == sourceFramebuffer->m_drmFormat) {
         // The native source may already contain earlier-drawn neighbours.
         // Fade towards the immutable scene background outside the owner, so
         // strength zero and partial strengths cannot depend on focus/order.
@@ -114,8 +114,8 @@ bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IF
         for (const auto& r : regions) {
             if (r[0] >= r[2] || r[1] >= r[3])
                 continue;
-            auto tx = [&](int x) { return cx + (x - ax) * (dx - cx) / (bx - ax); };
-            auto ty = [&](int y) { return cy + (y - ay) * (dy - cy) / (by - ay); };
+            auto tx = [&](int x) { return RenderSafety::mapBlitCoordinate(x, ax, bx, cx, dx); };
+            auto ty = [&](int y) { return RenderSafety::mapBlitCoordinate(y, ay, by, cy, dy); };
             glBlitFramebuffer(r[0], r[1], r[2], r[3], tx(r[0]), ty(r[1]), tx(r[2]), ty(r[3]), GL_COLOR_BUFFER_BIT, GL_NEAREST);
         }
     };
@@ -141,12 +141,22 @@ bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IF
     return true;
 }
 
-void blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFramebuffer>& blurredFramebuffer,
+bool blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFramebuffer>& blurredFramebuffer,
                     float sigma, SP<Render::IFramebuffer> callerFramebuffer, const SNeighborBackdrop* clean) {
+    if (!callerFramebuffer)
+        return false;
+    GLint viewport[4];
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    Hyprutils::Utils::CScopeGuard restore([&] {
+        glBindFramebuffer(GL_FRAMEBUFFER, fbId(callerFramebuffer));
+        g_pHyprOpenGL->setViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    });
+    if (!sampleFramebuffer || !sampleFramebuffer->isAllocated() || !std::isfinite(sigma) ||
+        !RenderSafety::dimension(sampleFramebuffer->m_size.x) || !RenderSafety::dimension(sampleFramebuffer->m_size.y))
+        return false;
     if (sigma <= 0.0f) {
         blurredFramebuffer.reset();
-        glBindFramebuffer(GL_FRAMEBUFFER, fbId(callerFramebuffer));
-        return;
+        return true;
     }
     const int sourceWidth = static_cast<int>(sampleFramebuffer->m_size.x);
     const int sourceHeight = static_cast<int>(sampleFramebuffer->m_size.y);
@@ -156,7 +166,7 @@ void blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFram
         return g_pGlobalState->renderBuffers.prepare(framebuffer, w, h, sampleFramebuffer->m_drmFormat, role);
     };
     if (!allocate(blurredFramebuffer, width, height, "blurred"))
-        return;
+        return false;
 
     // Preserve the half-resolution result, but prefilter into smaller levels
     // until the Gaussian's taps overlap. Merely stretching the fixed kernel
@@ -171,12 +181,12 @@ void blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFram
         if (pyramid.size() <= index)
             pyramid.emplace_back();
         if (!allocate(pyramid[index], width, height, "blur-pyramid"))
-            return;
+            return false;
         levels.push_back(pyramid[index]);
     }
     auto& temporary = g_pGlobalState->blurTempFramebuffer;
     if (!allocate(temporary, width, height, "blur-temp"))
-        return;
+        return false;
 
     static constexpr std::array<float, 9> projection{2, 0, 0, 0, 2, 0, -1, -1, 1};
     auto& manager = g_pGlobalState->shaderManager;
@@ -227,10 +237,8 @@ void blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFram
     for (size_t i = levels.size() - 1; i > 0; --i)
         draw(levels[i - 1], levels[i]);
 
-    glBindFramebuffer(GL_FRAMEBUFFER, fbId(callerFramebuffer));
     glBindVertexArray(0);
-    g_pHyprOpenGL->setViewport(0, 0, static_cast<int>(callerFramebuffer->m_size.x),
-                              static_cast<int>(callerFramebuffer->m_size.y));
+    return true;
 }
 
 void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFramebuffer> blurredFramebuffer,
@@ -261,9 +269,10 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
         g_pGlobalState->renderBuffers.touch(neighbors->blurred);
         bindTexture(neighbors->blurred ? neighbors->blurred : sampleFramebuffer, GL_TEXTURE4);
     }
+    int underlayCount = 0;
     if (neighbors && !neighbors->underlayShapes.empty()) {
         glActiveTexture(GL_TEXTURE5);
-        manager.bindUnderlayShapes(neighbors->underlayShapes);
+        underlayCount = manager.bindUnderlayShapes(neighbors->underlayShapes);
     }
     glActiveTexture(GL_TEXTURE0);
 
@@ -281,7 +290,7 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
     glUniform1i(uniforms.hasCleanBlur, neighbors && neighbors->blurred ? 1 : 0);
     glUniform1i(uniforms.useNeighborContribution, neighbors ? 1 : 0);
     glUniform1i(uniforms.underlayShapes, 5);
-    glUniform1i(uniforms.underlayCount, neighbors ? neighbors->underlayShapes.size() : 0);
+    glUniform1i(uniforms.underlayCount, underlayCount);
     glUniform1f(uniforms.pixelScale, g_pHyprRenderer->m_renderData.pMonitor->m_scale * material.effect_scale);
     glUniform1f(uniforms.fadeAlpha, std::clamp(alpha, 0.0f, 1.0f));
     glUniform2f(uniforms.uvPadding, paddingRatio.x, paddingRatio.y);
