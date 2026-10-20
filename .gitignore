@@ -9,8 +9,11 @@ build/
 __pycache__/
 *.py[cod]
 
-# Local demo captures; upload separately for README embeds.
+# Local demo captures;
 /screenshots/
+
+# Local profiling output
+profiling/
 
 # IDE
 .vscode/

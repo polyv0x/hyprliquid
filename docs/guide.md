@@ -1,19 +1,9 @@
 # Hyprliquid guide
 
-A Hyprland plugin with native glass materials written in GLSL ES 3.00.
-It captures the desktop behind each window, retains a sharp copy, produces a
-Gaussian blur, and draws the glass before Hyprland composites the application's
-pixels. Transparent window backgrounds reveal the effect; opaque text and
-application content stay sharp.
-
-The blur filters the background through progressively smaller images before
-applying its Gaussian kernel, then reconstructs the result through those same
-levels. Increasing `blur_sigma` or `effect_scale` therefore keeps the samples
-close together instead of exposing a grid of widely spaced samples. Windows
-and layer surfaces use the same blur pipeline.
-
-The compositor integration supports window selection, fades, fullscreen handling,
-per-window presets, and optional layer surfaces.
+Hyprliquid adds glass effects to transparent Hyprland windows. It blurs and
+refracts the desktop behind each window while keeping text and application
+content sharp. You can choose presets per window and optionally enable glass
+for panels and other layer surfaces.
 
 ## Build
 
@@ -99,117 +89,43 @@ no added rim, aberration, or refraction.
 
 Every preset has dark and light variants. Dark uses deeper face shading and
 softer rim highlights; light lifts the face and highlights. Blur, refraction,
-and edge geometry stay the same. The difference is strongest in `frosted` and
-`soft-glass`; the lens-based presets retain their 25% face blend for a subtler
-change. Select a variant with `default_theme`, a window theme tag, or the
-Noctalia panel's Theme selector. Follow Noctalia tracks the shell's dark/light
-mode. Explicit panel slider overrides take precedence over the variant; reset
+and edge geometry stay the same. Select a variant with `default_theme`, a window
+theme tag, or the Noctalia panel's Theme selector. **Follow Noctalia** tracks the
+shell's dark/light mode. Explicit panel slider overrides take precedence over the variant; reset
 an overridden field to inherit its theme value again.
-
-`frosted-glass` preserves the saved `frosted-full` material: the clear-glass
-base with `blur_alpha0 = 0.96` and `blur_alpha3 = 1`. `clear-edge` preserves
-`frosted-clear-edge`: the same base with `blur_alpha0 = 0.02`, `blur_alpha3 = 1`,
-and `blur_dist3 = 38.4`.
 
 Older names remain accepted in configurations, window tags, and saved profiles:
 `default`/`measured` map to `frosted`, `platform` to `soft-glass`, and `lens` to
 `clear-glass`. The retired `lighter`, `darker`, `ultra_darker`, and `no_bleed`
-variants now select `soft-glass`; their differences were mostly tonal in live
-desktop comparisons. `frosted-full` and `frosted-clear-edge` also work as aliases
-for the new frosted materials. The picker lists only the five distinct materials.
+variants now select `soft-glass`. `frosted-full` maps to `frosted-glass`, and
+`frosted-clear-edge` maps to `clear-edge`.
 An alias explicitly customized with `glass.preset(...)` remains a separate,
 visible user preset.
 
-All scalar material controls, defaults, and bounds are listed in
-[`src/MaterialParams.inc`](../src/MaterialParams.inc).
 Distances and blur sigma use logical pixels and scale with the output;
 `effect_scale` adjusts their overall size. The shape follows the actual window's
 size, corner radius, and rounding power, including per-window rules. Set corner
 curvature through Hyprland's `rounding_power`; the material has no independent
 shape override.
 
-Refraction and edge bleed use a smoothed optical direction inside the glass.
-The sampling footprint grows with depth, blending adjacent edge directions where
-a small corner radius would otherwise produce a sharp diagonal seam. The native
-outline, coverage, material depth and rim lighting still follow the window's
-exact shape. This happens automatically and does not change saved profiles.
+Glass can reflect neighbouring windows, including overlapping floating windows.
+Reflections follow window movement and stacking order. Native shadows and borders
+remain visible.
 
-Window glass captures its backdrop before the window's own native shadow is
-drawn. This prevents strong refraction, especially `clear-glass`, from pulling the
-shadow's clipped edge into the pane as an inset outline. Native shadows and
-borders still render normally after the glass.
+`neighbor_contribution` controls how strongly neighbouring windows appear in
+reflections. Its default, `1`, gives them full strength; `0` removes their
+contribution outside the receiving window. Intermediate values soften their
+presence without changing the pane's frost or opacity. Windows directly beneath
+the glass remain visible according to their normal stacking order.
 
-Windows refract a completed scene of their neighbours from the same frame.
-Focusing a different window no longer removes it from another pane's refraction.
-The capture includes each pane's base glass and client content; it does not
-recursively capture reflections of reflections.
-Sampling inside a window still uses its real backdrop, avoiding self-refraction.
-The overlap check uses the destination tiling layout, so temporary overlap while
-a new split opens does not interrupt reflections. Captures follow the animated
-window positions and sizes each frame.
-Floating windows stay in this scene as they touch and overlap other windows.
-The capture follows their stacking order, with floats above tiles. The actual
-backdrop inside each pane still follows native stacking, so opaque content
-covers lower windows and transparent areas reveal what is underneath. Moving
-across the overlap boundary does not switch neighbour refraction off.
-Overlapping tiles and transformed windows retain native stacking behavior.
-Popups and native borders/shadows are not
-duplicated into the neighbour capture.
+`neighbor_falloff` (Reflection falloff in the control panel) softens detail into
+frost toward the center of the pane. `0` uses the preset's usual blur transition;
+higher values, up to the default of `1`, soften detail faster. It also affects
+wallpaper and windows underneath, so it works with a single window.
+`blur_sigma` sets the final softness; with zero blur, falloff has no visual effect.
+Neither neighbour control applies to layer surfaces.
 
-`neighbor_contribution` controls how strongly those neighbours appear in
-the sampled backdrop. Its default, `1`, preserves the complete scene; `0` uses
-the clean background outside the receiving window instead. Intermediate values
-blend the two backdrops with identical blur and refraction. This weakens neighbour
-content, including text and opaque panes, without changing the receiving pane's
-main frost, face opacity or overall refraction strength. It also applies when
-floating windows overlap, controlling the neighbour image sampled outside the
-receiving pane. When both the receiving pixel and its refracted sample lie over
-the same underlying window, that window keeps its full contribution. The check
-follows each pixel and the underlying window's rounded outline, so partial
-overlap does not switch off the controls across the entire pane. The controls
-do not apply to layer surfaces.
-
-`neighbor_falloff` (Reflection falloff in the control panel) progressively
-softens reflected detail into the existing blurred image, following the pane's
-rounded outline. `0` preserves the material's usual blur ramp. Higher values,
-up to the default of `1`, transfer detail into frost faster; `0.5` halves the
-remaining sharp detail every 16 logical pixels (scaled with `effect_scale`). The sharp and
-blurred weights always sum to one, preserving flat colors and glass opacity.
-The Gaussian blur is normalized too, so repeated passes retain flat-color
-brightness. Fully frosted areas and the already blurred edge bleed are
-unchanged when adjusting falloff.
-
-The same detail curve applies to the entire window backdrop, including
-wallpaper and windows underneath. It remains active with a single window.
-This keeps an image from fading toward wallpaper outside the pane and then
-reappearing at full strength when it crosses into the native backdrop during
-a drag. `blur_sigma` sets how soft the final image is; with zero blur, falloff
-has no visual effect. This is an artistic transition into frost, not a physical
-caustic simulation. Layer surfaces retain their existing blur ramp.
-
-This adds one offscreen window pass and two reusable monitor-sized textures
-when at least two eligible windows and one glass pane are visible. Those frames
-repaint the monitor to keep the captured background free of old window pixels. It does not
-schedule extra frames on an idle desktop. Single-window and disabled-glass scenes
-skip the capture.
-Falloff uses the existing sharp and blurred textures and adds no framebuffers.
-An overlapping pane with contribution below `1` needs one additional clean
-blur texture at half width and height to protect underlying windows while
-attenuating adjacent imagery. It is reused through the window buffer pool.
-The clean sharp image is sampled from existing textures; its first blur reduction
-selects those same pixels directly, avoiding a duplicate full-resolution image
-and copy pass. With zero blur, contribution needs no additional image storage.
-Overlap protection adds no further image buffers. A small
-reusable texture holds window bounds and rounding (32 bytes per capacity slot).
-Shape checks share their work across the refraction and bleed rays, and only
-rounded corners need the more expensive curve evaluation. With no overlap,
-contribution continues to use a single sharp/blur pair, at every falloff setting.
-
-For a padded 1778×1451 crop in a 4-byte pixel format, reduced contribution over
-an underlying window needs 2.46 MiB of extra image storage. Falloff with full
-contribution needs none. Driver allocation alignment is additional.
-
-Native controls:
+Common settings:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
@@ -230,11 +146,9 @@ shared preset, inherited preset, theme configuration, and global configuration.
 To change a field supplied by a preset, override it with `glass.preset(...)`.
 Shared user values also override built-in dark/light defaults; an explicit
 `dark = { ... }` or `light = { ... }` customization wins for that theme.
-Signed values, including negative inner refraction and coverage offsets, are
-preserved throughout that chain.
 
-The window integration requires Hyprland's shadow pass and enables
-`decoration.shadow.enabled` when loaded or when the configuration is reloaded.
+Hyprliquid enables `decoration.shadow.enabled` when loaded or when the
+configuration is reloaded.
 
 Global values can be changed live, for example:
 
@@ -247,79 +161,19 @@ hyprctl configerrors
 Layer surfaces can be selected with `glass.layer("noctalia-panel", { preset =
 "soft-glass" })` after enabling `layers`. The masking modes are `auto`,
 `alpha`, and `region`; `auto` uses a client's background-effect region when
-available and otherwise uses its alpha. This remains an analytic rectangular
-material: it does not reconstruct an arbitrary layer's outline for the rim.
+available and otherwise uses its alpha. Layer glass uses rectangular outlines,
+so rims may not follow custom-shaped panels.
 Layer glass is suspended while the session is locked, including layers allowed
-above the lock screen. Cached desktop backdrops are discarded on locking.
+above the lock screen. It refreshes after unlocking.
 
-## Validation
-
-```sh
-make test
-python3 scripts/test-nested.py
-```
-
-`make test` needs Mesa surfaceless EGL, GLES3, and Lua development files. It checks
-coordinate and size overflow, Lua error cleanup (including allocation failure),
-and pixel transfers with inherited GL offsets and buffer bindings. It compiles both the reference
-fixtures and the native shaders. With the original outline-based optics selected
-in the test harness, it compares all five materials at 1×, 1.5× and 2× scale and
-rounding powers from 1 to 10. The production optical path is checked for corner
-continuity at 0px and 12px radii, including fractional scaling, and for unchanged
-straight edges, coverage and rim lighting. Blur and fade-to-zero are also checked.
-The reference fixtures are retained in `tests/reference`. Rendered comparisons
-are written to `build/*-native.ppm`, `build/*-webgl.ppm` and `build/corners-*.ppm`.
-
-The integration test needs a running Wayland desktop, Hyprland, Kitty, and grim.
-It opens a disposable nested compositor with a separate configuration and IPC
-socket, renders transparent windows, switches presets, exercises fullscreen and
-screen-edge sampling, and unloads/reloads the plugin. It checks that renamed
-presets and the saved frosted profiles produce identical materials and pixels.
-It also compares adjacent panes across focus changes, checks that neighbour repaints reach earlier-drawn
-panes at native/fractional scale and on a rotated output, and closes a neighbour
-to check capture cleanup. Set `HYPRLIQUID_TEST_PLUGIN` to an alternative library
-path to run the same regression against a previous build. Screenshots and logs go in
-`build/`. It does not install the plugin into the parent compositor.
-
-For focused security integration checks against the current checkout:
-
-```sh
-make -j4 all build/security-test.so build/layer-test
-python3 scripts/test-nested.py --security-only
-```
-
-The layer fixture additionally requires GTK4 and gtk4-layer-shell development
-files. These checks inject framebuffer allocation failures, verify that invalid
-sizes never reach the native allocator, and exercise layer cache invalidation
-across lock/unlock. Both fixtures run only in the disposable compositor. When
-built, they also run as part of the full nested suite for the current checkout.
-
-The materials are validated for **SDR** rendering. HDR color management is not
-calibrated.
-
-## Demo captures
-
-Run `make demo` from a Wayland session. In addition to the build dependencies,
-this needs Mesa EGL/GLES3, PySide6, Hyprland, and grim.
-
-`demo/backdrop.frag` renders the colored grid and rounded primitives through
-native EGL. The second scene replaces the cylinder and octahedron with a sphere
-and cone, with a third variation using darker studio lighting for dark-mode
-examples. `demo/window.py` supplies an opaque backdrop and transparent windows
-with sharp text. A separate Hyprland compositor loads the plugin and draws the
-glass on a 1920×1200 virtual output; grim captures the actual compositor output.
-The foreground application does not paint or simulate the glass.
-
-The eight PNGs in `screenshots/` cover `soft-glass`, `frosted`, `clear-glass`, the classic
-primitive scene, and a three-window comparison, plus `frosted-glass`, `clear-edge`,
-and a dark-mode comparison of the frosted materials. Captures are deliberately
-excluded from Git. Upload the selected PNGs separately and embed the hosted URLs
-in the README. Scene renders and diagnostic logs stay under `build/demo/`.
 ## Live control panels
 
-The [runtime control API](control-api.md) supplies versioned JSON metadata,
-atomic material overrides, resolved state, and reset through `hyprctl`.
-It is intended for companions such as the Noctalia Hyprliquid panel.
-The panel reads defaults from the renderer. Saved panel settings override them;
-use **Reset to configuration** to return to the current Hyprland configuration
-and plugin defaults.
+The [Noctalia control panel](https://github.com/polyv0x/hyprliquid-cpanel) lets you
+choose presets, switch themes, adjust materials, and save profiles without
+editing your configuration. Saved panel settings override the plugin defaults;
+use **Reset to configuration** to return to your Hyprland configuration and
+plugin defaults.
+
+## Display compatibility
+
+The materials support **SDR** rendering. HDR color management is not calibrated.

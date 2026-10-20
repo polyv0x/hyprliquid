@@ -117,7 +117,7 @@ exception to avoid allocating on every draw of a large HDR window. Active leases
 are excluded from those idle limits. Unused pairs expire after five seconds;
 unused scenes retire after two. A one-second cleanup timer can add up to one
 second to these delays and never requests redraws. Layer caches remain owned by
-their layer surfaces. See [the allocation and validation report](vram-optimization.md).
+their layer surfaces.
 
 Verification:
 

@@ -88,7 +88,7 @@ hyprctl eval 'hl.plugin.hyprliquid.config({ default_preset = "frosted" })'
 ```
 
 See the [configuration example](examples/hyprliquid.lua) and [guide](docs/guide.md) for
-presets, window rules, layer surfaces, and integration tests. SDR is validated;
+presets, window rules, and layer surfaces. SDR is supported;
 HDR color management is not calibrated.
 
 ## Tests
@@ -101,7 +101,7 @@ make test
 
 Tests require Mesa EGL/GLES3 and Lua development files. They check native safety
 boundaries and compare the shaders against reference fixtures at three output
-scales. See the [validation guide](docs/guide.md#validation) for compositor tests.
+scales. Run `python3 scripts/test-nested.py` for compositor integration tests.
 
 ## License
 
