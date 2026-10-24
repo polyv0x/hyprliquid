@@ -14,6 +14,7 @@ def verify_control(ctl, config_path):
     angle = next(p for p in description['parameters'] if p['name'] == 'display_angle_degrees')
     assert (angle['min'], angle['max'], angle['default'], angle['models']) == (-180, 180, 0, ['liquid'])
     assert 'display_angle_animation' in description['capabilities']
+    assert 'hover_angle_animation' in description['capabilities']
     neighbor = next(p for p in description['parameters'] if p['name'] == 'neighbor_contribution')
     assert (neighbor['min'], neighbor['max'], neighbor['default']) == (0, 1, 1)
     falloff = next(p for p in description['parameters'] if p['name'] == 'neighbor_falloff')
@@ -32,6 +33,7 @@ def verify_control(ctl, config_path):
         assert diagnostic['buffers']['monitors']
     baseline = description['state']
     assert baseline['animate_display_angle'] is False
+    assert baseline['animate_hover_angle'] is False
     assert baseline['base_preset'] == 'test' and not baseline['active'], baseline
     for material in (baseline['material'], baseline['inherited'], baseline['baseline']['material']):
         assert 'use_measured_face' not in material
@@ -147,6 +149,19 @@ def verify_control(ctl, config_path):
     reset_angle = request('apply', patch={'animate_display_angle': None, 'reset_fields': ['display_angle_degrees']})['state']
     assert reset_angle['animate_display_angle'] is False and reset_angle['material']['display_angle_degrees'] == 0
     assert 'animate_display_angle' not in reset_angle['panel']
+    hover = request('apply', profile={'animate_hover_angle': True})['state']
+    assert hover['animate_hover_angle'] is True and hover['active']
+    assert hover['panel']['animate_hover_angle'] is True and hover['animate_display_angle'] is False
+    for invalid in ({'animate_hover_angle': 1}, {'animate_hover_angle': 'true'},
+                    {'overrides': {'animate_hover_angle': True}}, {'reset_fields': ['animate_hover_angle']}):
+        rejected = request('apply', patch=invalid)
+        assert not rejected['ok'] and rejected['state'] == hover
+    hover = request('apply', patch={'animate_hover_angle': False})['state']
+    assert hover['animate_hover_angle'] is False and hover['panel']['animate_hover_angle'] is False and hover['active']
+    hover = request('apply', patch={'animate_hover_angle': None})['state']
+    assert hover['animate_hover_angle'] is False and 'animate_hover_angle' not in hover['panel'] and not hover['active']
+    request('apply', patch={'animate_hover_angle': True})
+    assert request('apply', profile={})['state']['animate_hover_angle'] is False
     reset_state = request('reset')['state']
     assert reset_state == baseline | {'revision': reset_state['revision']}
     print('PASS: Liquid base/effective variants, 21 applicable controls, angle animation toggle, exact reset and atomic rejection', flush=True)
@@ -241,7 +256,7 @@ def verify_control(ctl, config_path):
         assert default_state['baseline']['base_preset'] == 'frosted-glass'
         config_path.write_text(original_config + '''
 if hl.plugin.hyprliquid then
-    hl.plugin.hyprliquid.config({ animate_display_angle = true })
+    hl.plugin.hyprliquid.config({ animate_display_angle = true, animate_hover_angle = true })
     hl.plugin.hyprliquid.preset("liquid-custom", { inherits = "frosted-liquid-medium", glass_opacity = 0.8, blur_sigma = 9, inner_refraction_amount = -25, display_angle_degrees = -30 })
     hl.plugin.hyprliquid.preset("liquid-child", { inherits = "liquid-custom", effect_scale = 1.25 })
     hl.plugin.hyprliquid.preset("soft-glass", {
@@ -260,6 +275,9 @@ end
         assert inherited['state']['animate_display_angle'] is True
         assert request('apply', patch={'animate_display_angle': False})['state']['animate_display_angle'] is False
         assert request('apply', patch={'animate_display_angle': None})['state']['animate_display_angle'] is True
+        assert inherited['state']['animate_hover_angle'] is True
+        assert request('apply', patch={'animate_hover_angle': False})['state']['animate_hover_angle'] is False
+        assert request('apply', patch={'animate_hover_angle': None})['state']['animate_hover_angle'] is True
         assert inherited['state']['model_data']['effective_parameters']['refraction']['innerAmount'] == -25
         for preset in ('soft-glass', 'frosted-glass-clear-edge'):
             for theme, intercept in [('dark', 0.09), ('light', 0.18)]:

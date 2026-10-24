@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / 'tests'))
 from control_api import verify_control
 from window_scene import verify_window_scene
 from liquid_scene import verify_liquid
+from hover_angle import verify_hover_angle
 
 
 def wait_for(predicate, process, seconds=20):
@@ -153,6 +154,10 @@ def main():
 
                 if '--liquid-only' in sys.argv:
                     verify_liquid(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor))
+                    return
+
+                if '--hover-only' in sys.argv:
+                    verify_hover_angle(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), PLUGIN)
                     return
 
                 if shutil.which('kitty') and shutil.which('grim'):
@@ -297,6 +302,8 @@ def main():
                                         lambda predicate: wait_for(predicate, compositor))
                     verify_liquid(ctl, env, log, clients, BUILD,
                                   lambda predicate: wait_for(predicate, compositor))
+                    verify_hover_angle(ctl, env, log, clients, BUILD,
+                                       lambda predicate: wait_for(predicate, compositor), PLUGIN)
                 else:
                     print('SKIP: window/screenshot exercise requires kitty and grim', flush=True)
 

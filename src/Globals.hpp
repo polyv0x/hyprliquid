@@ -5,6 +5,7 @@
 #include "RuntimeControl.hpp"
 #include "RenderBuffers.hpp"
 #include "ShaderManager.hpp"
+#include "HoverAngle.hpp"
 
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/render/Framebuffer.hpp>
@@ -30,6 +31,7 @@ struct SGlobalState {
     SPluginConfig                     config;
     SRuntimeControl                   runtimeControl;
     CRenderBuffers                     renderBuffers;
+    CHoverAngles                       hoverAngles;
 
     // User-defined presets (populated from config keyword, swapped in on configReloaded)
     std::unordered_map<std::string, SCustomPreset> customPresets;

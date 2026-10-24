@@ -65,7 +65,7 @@ build/LiquidMaterialData.hpp: materials/liquid.json scripts/embed-material.py | 
 build/render-test: tests/render.cpp tests/liquid-render.hpp src/LiquidUniforms.hpp src/Material.hpp src/LiquidMaterial.hpp build/LiquidMaterialData.hpp src/MaterialParams.inc src/BuiltInPresets.hpp src/PixelTransfer.hpp src/RustCore.hpp build/RustCore.o $(RUST_LIB) | build
 	$(CXX) $(CXXFLAGS) -Isrc -Ibuild $< $(RUST_LINK) -o $@ $$(pkg-config --cflags --libs egl glesv2)
 
-build/security-test: tests/security.cpp src/ResizeAngle.hpp src/RenderSafety.hpp src/Material.hpp src/LiquidMaterial.hpp src/BuiltInPresets.hpp build/LiquidMaterialData.hpp src/MaterialParams.inc src/LuaSafety.hpp src/RustCore.hpp build/RustCore.o $(RUST_LIB) | build
+build/security-test: tests/security.cpp src/ResizeAngle.hpp src/PointerAngle.hpp src/RenderSafety.hpp src/Material.hpp src/LiquidMaterial.hpp src/BuiltInPresets.hpp build/LiquidMaterialData.hpp src/MaterialParams.inc src/LuaSafety.hpp src/RustCore.hpp build/RustCore.o $(RUST_LIB) | build
 	$(CXX) $(CXXFLAGS) -UNDEBUG -Isrc -Ibuild $< $(RUST_LINK) -o $@ $$(pkg-config --cflags --libs lua)
 
 build/rust-differential-test: tests/rust-differential.cpp tests/reference/material.hpp tests/reference/render-safety.hpp src/RustCore.hpp src/Material.hpp src/MaterialParams.inc build/LiquidMaterialData.hpp build/RustCore.o $(RUST_LIB) | build

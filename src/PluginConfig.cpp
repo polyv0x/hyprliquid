@@ -43,6 +43,7 @@ std::optional<ELayerMaskMode> parseLayerMaskMode(std::string_view value) {
 void registerConfig(HANDLE handle) {
     addConfigValue<Config::Values::Int>(handle, ConfigKeys::ENABLED, Config::INTEGER{1});
     addConfigValue<Config::Values::Int>(handle, ConfigKeys::ANIMATE_DISPLAY_ANGLE, Config::INTEGER{0});
+    addConfigValue<Config::Values::Int>(handle, ConfigKeys::ANIMATE_HOVER_ANGLE, Config::INTEGER{0});
     addConfigValue<Config::Values::Int>(handle, ConfigKeys::MANAGE_WINDOW_BLUR, Config::INTEGER{1});
     addConfigValue<Config::Values::String>(handle, ConfigKeys::DEFAULT_THEME, Config::STRING{"dark"});
     addConfigValue<Config::Values::String>(handle, ConfigKeys::DEFAULT_PRESET, Config::STRING{"frosted-glass"});
@@ -92,6 +93,7 @@ static StringConfigPtr getStringPtr(HANDLE /*handle*/, const char* key) {
 void initConfigPointers(HANDLE handle, SPluginConfig& config) {
     config.enabled          = getStaticPtr<Hyprlang::INT>(handle, ConfigKeys::ENABLED);
     config.animateDisplayAngle = getStaticPtr<Hyprlang::INT>(handle, ConfigKeys::ANIMATE_DISPLAY_ANGLE);
+    config.animateHoverAngle = getStaticPtr<Hyprlang::INT>(handle, ConfigKeys::ANIMATE_HOVER_ANGLE);
     config.manageWindowBlur = getStaticPtr<Hyprlang::INT>(handle, ConfigKeys::MANAGE_WINDOW_BLUR);
     config.defaultTheme  = getStringPtr(handle, ConfigKeys::DEFAULT_THEME);
     config.defaultPreset = getStringPtr(handle, ConfigKeys::DEFAULT_PRESET);

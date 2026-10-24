@@ -55,6 +55,10 @@ bool configuredAnimateDisplayAngle() {
     const auto ptr = g_pGlobalState->config.animateDisplayAngle;
     return ptr && *ptr && **ptr;
 }
+bool configuredAnimateHoverAngle() {
+    const auto ptr = g_pGlobalState->config.animateHoverAngle;
+    return ptr && *ptr && **ptr;
+}
 bool validPreset(std::string name) {
     std::unordered_set<std::string> visited;
     for (int depth = 0; depth < MAX_PRESET_INHERITANCE_DEPTH;) {
@@ -77,6 +81,7 @@ json_object* profileJson(const SRuntimeProfile& profile) {
     auto* result = object();
     if (profile.enabled) put(result, "enabled", json_object_new_boolean(*profile.enabled));
     if (profile.animateDisplayAngle) put(result, "animate_display_angle", json_object_new_boolean(*profile.animateDisplayAngle));
+    if (profile.animateHoverAngle) put(result, "animate_hover_angle", json_object_new_boolean(*profile.animateHoverAngle));
     if (profile.basePreset) put(result, "base_preset", string(*profile.basePreset));
     if (profile.theme) put(result, "theme", string(*profile.theme));
     auto* overrides = object();
@@ -87,7 +92,7 @@ json_object* profileJson(const SRuntimeProfile& profile) {
     return result;
 }
 bool active(const SRuntimeProfile& profile) {
-    if (profile.enabled || profile.animateDisplayAngle || profile.basePreset || profile.theme) return true;
+    if (profile.enabled || profile.animateDisplayAngle || profile.animateHoverAngle || profile.basePreset || profile.theme) return true;
 #define GLASS_PARAM(name, value, lo, hi) if (profile.overrides.name != SENTINEL_FLOAT) return true;
 #include "MaterialParams.inc"
 #undef GLASS_PARAM
@@ -105,6 +110,7 @@ json_object* state() {
     put(result, "generation", json_object_new_int64(runtime.generation));
     put(result, "enabled", json_object_new_boolean(runtimeEnabled()));
     put(result, "animate_display_angle", json_object_new_boolean(runtimeAnimateDisplayAngle()));
+    put(result, "animate_hover_angle", json_object_new_boolean(runtimeAnimateHoverAngle()));
     put(result, "base_preset", string(base));
     put(result, "theme", string(runtimeThemeIsDark() ? "dark" : "light"));
     put(result, "active", json_object_new_boolean(active(runtime.profile)));
@@ -115,6 +121,7 @@ json_object* state() {
     auto* baseline = object();
     put(baseline, "enabled", json_object_new_boolean(configuredEnabled()));
     put(baseline, "animate_display_angle", json_object_new_boolean(configuredAnimateDisplayAngle()));
+    put(baseline, "animate_hover_angle", json_object_new_boolean(configuredAnimateHoverAngle()));
     put(baseline, "base_preset", string(configured));
     put(baseline, "theme", string(configuredDark() ? "dark" : "light"));
     put(baseline, "material", values(resolveMaterial({configured, configuredDark(), config, presets})));
@@ -124,7 +131,7 @@ json_object* state() {
 }
 void describe(json_object* result) {
     auto* capabilities = json_object_new_array();
-    for (const auto* name : {"default_material", "atomic_apply", "revision_guard", "field_reset", "buffers", "material_models", "display_angle_animation"})
+    for (const auto* name : {"default_material", "atomic_apply", "revision_guard", "field_reset", "buffers", "material_models", "display_angle_animation", "hover_angle_animation"})
         json_object_array_add(capabilities, string(name));
     put(result, "capabilities", capabilities);
     auto* parameters = json_object_new_array();
@@ -180,7 +187,7 @@ void setField(SPresetValues& target, const std::string& key, json_object* item) 
     throw std::invalid_argument("unknown material parameter: " + key);
 }
 void readProfile(SRuntimeProfile& target, json_object* input) {
-    keys(input, {"enabled", "animate_display_angle", "base_preset", "theme", "overrides", "reset_fields"});
+    keys(input, {"enabled", "animate_display_angle", "animate_hover_angle", "base_preset", "theme", "overrides", "reset_fields"});
     if (has(input, "enabled")) {
         auto* v = get(input, "enabled");
         require(!v || json_object_is_type(v, json_type_boolean), "enabled: expected boolean or null");
@@ -190,6 +197,11 @@ void readProfile(SRuntimeProfile& target, json_object* input) {
         auto* v = get(input, "animate_display_angle");
         require(!v || json_object_is_type(v, json_type_boolean), "animate_display_angle: expected boolean or null");
         target.animateDisplayAngle = v ? std::optional<bool>(json_object_get_boolean(v)) : std::nullopt;
+    }
+    if (has(input, "animate_hover_angle")) {
+        auto* v = get(input, "animate_hover_angle");
+        require(!v || json_object_is_type(v, json_type_boolean), "animate_hover_angle: expected boolean or null");
+        target.animateHoverAngle = v ? std::optional<bool>(json_object_get_boolean(v)) : std::nullopt;
     }
     if (has(input, "base_preset")) {
         auto* v = get(input, "base_preset");
@@ -214,6 +226,7 @@ void readProfile(SRuntimeProfile& target, json_object* input) {
     require(validPreset(target.basePreset.value_or(configuredPreset())), "base_preset: missing, cyclic, or excessively deep inheritance");
 }
 void repaint() {
+    g_pGlobalState->hoverAngles.refresh();
     for (const auto& monitor : State::monitorState()->monitors()) {
         g_pGlobalState->bumpSceneGeneration(monitor);
         g_pHyprRenderer->damageMonitor(monitor);
@@ -270,6 +283,9 @@ std::string dispatch(eHyprCtlOutputFormat, std::string request) {
                     put(item, "refresh_hz", json_object_new_double(monitor->m_refreshRate));
                     put(item, "transform", json_object_new_int(monitor->m_transform));
                     put(item, "fp16", json_object_new_boolean(monitor->useFP16()));
+                    put(item, "hover_angle_degrees", json_object_new_double(g_pGlobalState->hoverAngles.value(monitor)));
+                    put(item, "hover_angle_target_degrees", json_object_new_double(g_pGlobalState->hoverAngles.target(monitor)));
+                    put(item, "hover_angle_animating", json_object_new_boolean(g_pGlobalState->hoverAngles.animating(monitor)));
                     if (monitor->m_imageDescription)
                         put(item, "color_description", string(std::format("{}", monitor->m_imageDescription->value())));
                     json_object_array_add(monitors, item);
@@ -308,6 +324,7 @@ std::string dispatch(eHyprCtlOutputFormat, std::string request) {
 
 bool runtimeEnabled() { return g_pGlobalState->runtimeControl.profile.enabled.value_or(configuredEnabled()); }
 bool runtimeAnimateDisplayAngle() { return g_pGlobalState->runtimeControl.profile.animateDisplayAngle.value_or(configuredAnimateDisplayAngle()); }
+bool runtimeAnimateHoverAngle() { return g_pGlobalState->runtimeControl.profile.animateHoverAngle.value_or(configuredAnimateHoverAngle()); }
 std::string runtimeBasePreset() { return g_pGlobalState->runtimeControl.profile.basePreset.value_or(configuredPreset()); }
 bool runtimeThemeIsDark() {
     const auto& theme = g_pGlobalState->runtimeControl.profile.theme;

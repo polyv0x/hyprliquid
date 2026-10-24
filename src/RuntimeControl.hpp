@@ -9,6 +9,7 @@
 struct SRuntimeProfile {
     std::optional<bool> enabled;
     std::optional<bool> animateDisplayAngle;
+    std::optional<bool> animateHoverAngle;
     std::optional<std::string> basePreset;
     std::optional<std::string> theme;
     SPresetValues overrides;
@@ -27,5 +28,6 @@ void unregisterRuntimeControl();
 void runtimeBaselineChanged(bool reloaded);
 bool runtimeEnabled();
 bool runtimeAnimateDisplayAngle();
+bool runtimeAnimateHoverAngle();
 std::string runtimeBasePreset();
 bool runtimeThemeIsDark();

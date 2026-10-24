@@ -426,7 +426,15 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         // A layer can survive locking and later be allowed above the lock.
         // Its next desktop pass must acquire a fresh backdrop after unlocking.
         g_pGlobalState->layerSurfaces.clear();
+        g_pGlobalState->hoverAngles.clear();
     }));
+    g_pGlobalState->listeners.push_back(g_pSessionLockManager->m_events.unlock.listen([] {
+        g_pGlobalState->hoverAngles.refresh();
+    }));
+    g_pGlobalState->listeners.push_back(Event::bus()->m_events.input.mouse.move.listen(
+        [](Vector2D position, Event::SCallbackInfo&) { g_pGlobalState->hoverAngles.update(position); }));
+    g_pGlobalState->listeners.push_back(Event::bus()->m_events.monitor.layoutChanged.listen(
+        [] { g_pGlobalState->hoverAngles.refresh(); }));
 
     // Z-order / visibility changes invalidate layer glass caches on the affected monitor only.
     // Per-monitor to avoid triggering re-samples on idle monitors (feedback loop).
@@ -446,15 +454,23 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         [](eRenderStage stage) {
             if (stage == RENDER_PRE_WINDOW)
                 drawGlassForFullscreenWindow();
-            if (stage == RENDER_BEGIN)
+            if (stage == RENDER_BEGIN) {
+                g_pGlobalState->hoverAngles.refresh(false);
                 g_pGlobalState->renderBuffers.beginFrame(g_pHyprRenderer->m_renderData.pMonitor.lock());
+            }
             if (stage == RENDER_POST)
                 g_pGlobalState->renderBuffers.endFrame();
         }));
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.monitor.removed.listen(
-        [](PHLMONITOR monitor) { WindowScene::retireMonitor(monitor->m_id); }));
+        [](PHLMONITOR monitor) {
+            g_pGlobalState->hoverAngles.remove(monitor->m_id);
+            WindowScene::retireMonitor(monitor->m_id);
+        }));
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.monitor.destroyMon.listen(
-        [](PHLMONITOR monitor) { WindowScene::retireMonitor(monitor->m_id); }));
+        [](PHLMONITOR monitor) {
+            g_pGlobalState->hoverAngles.remove(monitor->m_id);
+            WindowScene::retireMonitor(monitor->m_id);
+        }));
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.window.moveToWorkspace.listen(
         [=](PHLWINDOW w, PHLWORKSPACE) { bumpWindowMonitor(w); }));
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.workspace.active.listen(
@@ -550,6 +566,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     unregisterRuntimeControl();
 
     g_pGlobalState->listeners.clear();
+    g_pGlobalState->hoverAngles.clear();
 
     g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassPassElement");
     g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassLayerPassElement");

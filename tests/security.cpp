@@ -3,6 +3,7 @@
 #include "BuiltInPresets.hpp"
 #include "RenderSafety.hpp"
 #include "ResizeAngle.hpp"
+#include "PointerAngle.hpp"
 
 #include <bit>
 #include <cassert>
@@ -202,9 +203,33 @@ static void resizeAngles() {
     std::cout << "PASS: resize highlight sweep, signed angles, spring bounds, retarget continuity and finite defaults\n";
 }
 
+static void pointerAngles() {
+    assert(PointerAngle::lookup(0, -100) == 0);
+    assert(PointerAngle::lookup(100, 0) == 90);
+    assert(PointerAngle::lookup(0, 100) == 180);
+    assert(PointerAngle::lookup(-100, 0) == -90);
+    assert(!PointerAngle::lookup(0, 0) && !PointerAngle::lookup(4, 4));
+    assert(!PointerAngle::lookup(NAN, 10) && !PointerAngle::lookup(10, INFINITY));
+    double worst = 0;
+    for (int x = -150; x <= 150; ++x) for (int y = -100; y <= 100; ++y) {
+        const auto angle = PointerAngle::lookup(x, y);
+        if (!angle) continue;
+        const double exact = std::atan2(double(x), double(-y)) * 180 / std::numbers::pi;
+        worst = std::max(worst, std::abs(std::remainder(*angle - exact, 360.0)));
+    }
+    assert(worst < 0.0002);
+    assert(PointerAngle::nearest(179, -179) == 181);
+    assert(PointerAngle::nearest(-179, 179) == -181);
+    assert(PointerAngle::nearest(359, 1) == 361);
+    assert(PointerAngle::wrap(720) == 0 && PointerAngle::wrap(NAN) == 0);
+    assert(PointerAngle::nearest(INFINITY, 45) == 45);
+    std::cout << "PASS: pointer lookup cardinal directions, center stability, finite inputs and shortest angle transitions (error " << worst << " degrees)\n";
+}
+
 int main() {
     geometry();
     materialFamilies();
     luaErrors();
     resizeAngles();
+    pointerAngles();
 }

@@ -184,7 +184,7 @@ void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
     updateNoBlurProp(enabled);
     const auto material = resolveMaterial({resolvePresetName(), resolveThemeIsDark(), g_pGlobalState->config,
                                            g_pGlobalState->customPresets, runtimeOverrides()});
-    const float previousAngle = m_displayAngle.value();
+    const float previousAngle = m_renderedDisplayAngle;
     const auto owner = m_window.lock();
     if (enabled && material.family == EMaterialFamily::LIQUID && runtimeAnimateDisplayAngle() && owner && owner->sizeAnimation()) {
         const auto& animation = owner->sizeAnimation();
@@ -194,7 +194,10 @@ void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
     } else {
         m_displayAngle.reset(enabled && material.family == EMaterialFamily::LIQUID ? material.display_angle_degrees : 0.0f);
     }
-    if (previousAngle != m_displayAngle.value()) {
+    m_renderedDisplayAngle = m_displayAngle.value();
+    if (enabled && material.family == EMaterialFamily::LIQUID && runtimeAnimateHoverAngle() && owner)
+        m_renderedDisplayAngle += g_pGlobalState->hoverAngles.value(owner->m_monitor.lock());
+    if (previousAngle != m_renderedDisplayAngle) {
         damageEntire();
         if (owner) if (const auto mon = owner->m_monitor.lock())
             g_pGlobalState->bumpSceneGeneration(mon);
@@ -245,6 +248,10 @@ PHLWINDOW CGlassDecoration::getOwner() {
     return m_window.lock();
 }
 
+bool CGlassDecoration::usesLiquidGlass() const {
+    return resolveEnabled() && resolveMaterialFamily(resolvePresetName(), g_pGlobalState->customPresets) == EMaterialFamily::LIQUID;
+}
+
 void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
                                  const std::shared_ptr<SWindowScene>& scene, bool sceneBase) {
     auto& shaderManager = g_pGlobalState->shaderManager;
@@ -281,7 +288,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     const SResolveContext ctx  = {preset, isDark, g_pGlobalState->config, g_pGlobalState->customPresets, runtimeOverrides()};
 
     auto material = resolveMaterial(ctx);
-    material.display_angle_degrees = m_displayAngle.value();
+    material.display_angle_degrees = m_renderedDisplayAngle;
     const bool liquid = material.family == EMaterialFamily::LIQUID;
     const float effectScale = monitor->m_scale * material.effect_scale;
     const float blurSigma = materialBlurSigma(material);
@@ -443,7 +450,8 @@ json_object* CGlassDecoration::diagnostics() const {
     addMaterialInfo(result, material);
     json_object_object_add(result, "owns_shadow", json_object_new_boolean(m_noShadowApplied));
     json_object_object_add(result, "animate_display_angle", json_object_new_boolean(runtimeAnimateDisplayAngle()));
-    json_object_object_add(result, "rendered_display_angle_degrees", json_object_new_double(m_displayAngle.value()));
+    json_object_object_add(result, "animate_hover_angle", json_object_new_boolean(runtimeAnimateHoverAngle()));
+    json_object_object_add(result, "rendered_display_angle_degrees", json_object_new_double(m_renderedDisplayAngle));
     if (window) if (const auto monitor = window->m_monitor.lock()) {
         json_object_object_add(result, "monitor_id", json_object_new_int64(monitor->m_id));
         if (const auto box = WindowGeometry::computeWindowBox(window, monitor)) {
