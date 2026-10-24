@@ -12,6 +12,12 @@ struct SWindowScene {
     SP<Render::IFramebuffer> image;
     std::vector<PHLWINDOWREF> windows;
     bool ready = false;
+    // Local panes can be painted below clients once and reused as an exact
+    // native-format backdrop. Geometry is still available for shadow occlusion.
+    bool local = false;
+    bool failed = false;
+    struct SCache { bool valid = false; };
+    std::shared_ptr<SCache> cache;
 };
 
 namespace WindowScene {
@@ -23,4 +29,7 @@ void retireMonitor(MONITORID monitor);
 void finishFrame(MONITORID monitor, uint64_t frame);
 std::shared_ptr<SWindowScene> queuedFor(PHLWINDOW window);
 bool buildingBase();
+bool skipDecoration(PHLWINDOW window);
+void invalidateBackground(PHLMONITOR monitor);
+void invalidateAll();
 }

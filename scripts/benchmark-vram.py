@@ -46,6 +46,44 @@ def distribution(samples):
             'max_ms': max(ordered)} if ordered else {'count': 0}
 
 
+def device_stats(snapshot):
+    """System-wide context only; process GPU work comes from deduplicated fdinfo."""
+    result = {}
+    for client in snapshot['clients']:
+        device = client.get('drm-pdev')
+        if not device or device in result:
+            continue
+        root = Path('/sys/bus/pci/devices') / device
+        values = {}
+        for name in ('gpu_busy_percent', 'mem_info_vram_used', 'mem_info_gtt_used', 'pp_dpm_sclk', 'pp_dpm_mclk'):
+            try: values[name] = (root / name).read_text().strip()
+            except OSError: pass
+        for hwmon in (root / 'hwmon').glob('hwmon*'):
+            for name in ('power1_average', 'temp1_input'):
+                try: values[name] = (hwmon / name).read_text().strip()
+                except OSError: pass
+        result[device] = values
+    return result
+
+
+def engine_deltas(before, after, elapsed_ns):
+    first = {(c.get('drm-pdev'), c.get('drm-client-id')): c for c in before['clients']}
+    result = []
+    for client in after['clients']:
+        key = (client.get('drm-pdev'), client.get('drm-client-id'))
+        previous = first.get(key, {})
+        for name, value in client.items():
+            if not name.startswith('drm-engine-') or name not in previous:
+                continue
+            # DRM counters are cumulative ns. A reset/disappearing client is
+            # unavailable, never negative work or another engine's percentage.
+            delta = int(value.split()[0]) - int(previous[name].split()[0])
+            if delta >= 0:
+                result.append({'device': key[0], 'client_id': key[1], 'engine': name,
+                               'elapsed_ns': delta, 'ms_per_second': delta / elapsed_ns * 1000})
+    return result
+
+
 def set_pattern(path, data):
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(data))
@@ -62,13 +100,20 @@ def main():
     parser.add_argument('--steady-only', action='store_true', help='Measure the fixed warm scene without the visual/lifecycle matrix')
     parser.add_argument('--steady-preset', default='lens', help='Material for --steady-only (default: lens)')
     parser.add_argument('--steady-panes', type=int, default=2, help='Pane count for --steady-only (default: 2)')
+    parser.add_argument('--warmup-seconds', type=float, default=1, help='Foreground repaint warmup before sampling')
+    parser.add_argument('--sample-seconds', type=float, default=6, help='Duration of foreground repaint sampling')
+    parser.add_argument('--native-blur', action='store_true', help='With --steady-only, disable Liquid and enable native blur (size 8, three passes)')
     parser.add_argument('--only-arm', choices=('baseline', 'reference', 'candidate'),
                         help='With --steady-only, measure one build in a fresh compositor for comparable DRM residency')
     args = parser.parse_args()
     if args.only_arm and not args.steady_only:
         parser.error('--only-arm requires --steady-only')
+    if args.native_blur and not args.steady_only:
+        parser.error('--native-blur requires --steady-only')
     if args.steady_panes < 1:
         parser.error('--steady-panes must be positive')
+    if args.warmup_seconds < 0 or args.sample_seconds < 3:
+        parser.error('--warmup-seconds must be nonnegative and --sample-seconds at least 3')
     if not args.steady_only and (args.steady_preset != 'lens' or args.steady_panes != 2):
         parser.error('--steady-preset and --steady-panes require --steady-only')
     output = args.output.resolve()
@@ -76,7 +121,10 @@ def main():
     arms = {key: getattr(args, key).resolve() for key in ('baseline', 'reference', 'candidate')}
     if args.only_arm: arms = {args.only_arm: arms[args.only_arm]}
     results = {'versions': subprocess.check_output(['Hyprland', '--version'], text=True),
-               'workload': {'preset': args.steady_preset, 'panes': args.steady_panes},
+               'workload': {'preset': args.steady_preset, 'panes': args.steady_panes,
+                            'warmup_seconds': args.warmup_seconds, 'sample_seconds': args.sample_seconds,
+                            'native_blur': args.native_blur,
+                            'client_update_interval_seconds': .025},
                'builds': {key: {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
                           for key, path in arms.items()}, 'arms': {}, 'comparisons': []}
     (output / 'result.json').write_text(json.dumps(results, indent=2))
@@ -197,6 +245,9 @@ while True:
                         'shadow = { enabled = true } }, cursor = { no_warps = true, inactive_timeout = 0.1 } })')
                     ctl('eval', 'hl.monitor({ output = "HYPRLIQUID-TEST", mode = "1280x800@60", position = "auto", scale = 1, transform = 0 })')
                     control('apply', profile={'base_preset': args.steady_preset, 'theme': 'dark'})
+                    if args.native_blur:
+                        control('apply', patch={'enabled': False})
+                        ctl('eval', 'hl.config({ decoration = { blur = { enabled = true, size = 8, passes = 3, new_optimizations = true } } })')
                     spawn_panes()
                     time.sleep(.6)
                     arm_result = {'captures': {}, 'settings': {}, 'steady_drm': [], 'timing': {}}
@@ -210,13 +261,34 @@ while True:
                     if reference_geometry is None:
                         reference_geometry = geometry
                     assert geometry == reference_geometry, 'Workload geometry changed between builds'
-                    if has_buffers: arm_result['warm'] = control('buffers')['buffers']
-                    # Warm repetitive redraws with fixed geometry/materials.
-                    arm_result['warm_drm'] = drm(compositor.pid)
-                    ctl('hyprliquid-test:timing')
-                    for iteration in range(240):
+                    # Real foreground damage with fixed geometry/materials.
+                    warm_until = time.monotonic() + args.warmup_seconds
+                    iteration = 0
+                    while time.monotonic() < warm_until:
                         set_pattern(controls[-1], {'color': colors[-1], 'phase': iteration % 2})
+                        iteration += 1
                         time.sleep(.025)
+                    if has_buffers: arm_result['warm'] = control('buffers')['buffers']
+                    arm_result['warm_drm'] = drm(compositor.pid)
+                    gpu_started = time.monotonic_ns()
+                    ctl('hyprliquid-test:timing')
+                    arm_result['gpu_samples'] = []
+                    sample_until = time.monotonic() + args.sample_seconds
+                    next_sample = time.monotonic()
+                    while time.monotonic() < sample_until:
+                        set_pattern(controls[-1], {'color': colors[-1], 'phase': iteration % 2})
+                        iteration += 1
+                        if time.monotonic() >= next_sample:
+                            snapshot = drm(compositor.pid)
+                            arm_result['gpu_samples'].append({'monotonic_ns': time.monotonic_ns(), 'unix_ns': time.time_ns(),
+                                                             'drm': snapshot, 'device': device_stats(snapshot)})
+                            next_sample = time.monotonic() + 1
+                        time.sleep(.025)
+                    gpu_finished = time.monotonic_ns()
+                    arm_result['gpu_end_drm'] = drm(compositor.pid)
+                    arm_result['gpu_interval_ns'] = gpu_finished - gpu_started
+                    arm_result['gpu_engines'] = engine_deltas(arm_result['warm_drm'], arm_result['gpu_end_drm'],
+                                                             arm_result['gpu_interval_ns'])
                     arm_result['timing'] = json.loads(ctl('hyprliquid-test:timing'))
                     arm_result['timing']['distribution'] = distribution(arm_result['timing']['cpu_frame_ms'])
                     assert len(json.loads(ctl('-j', 'clients'))) == args.steady_panes, 'A pattern client exited'
@@ -238,6 +310,9 @@ while True:
                         'clear-glass': {'base_preset': 'lens'},
                         'frosted-glass': {'base_preset': 'lens', 'overrides': {'blur_alpha0': 0.96, 'blur_alpha3': 1}},
                         'frosted-glass-clear-edge': {'base_preset': 'lens', 'overrides': {'blur_alpha0': 0.02, 'blur_alpha3': 1, 'blur_dist3': 38.4}},
+                        # Local default isolation deliberately changes neighbor
+                        # pixels. Outward optics keep the baseline scene path.
+                        'liquid-outward': {'base_preset': 'frosted-liquid', 'overrides': {'inner_refraction_amount': 60}},
                     }
                     cases = [(f'{preset}-{theme}', profile | {'theme': theme})
                              for preset, profile in materials.items()
@@ -315,6 +390,16 @@ while True:
                         focus(windows[0])
                         time.sleep(.4)
                         arm_result['captures'][name] = capture(directory, name)
+                        if name == 'overlap':
+                            for theme in ('dark', 'light'):
+                                for sigma in (0, 19):
+                                    control('apply', profile={'base_preset': 'frosted-liquid', 'theme': theme,
+                                                            'overrides': {'blur_sigma': sigma}})
+                                    time.sleep(.15)
+                                    case = f'liquid-underlay-{theme}-{sigma}'
+                                    arm_result['captures'][case] = capture(directory, case)
+                            control('apply', profile={'base_preset': 'lens'})
+                            time.sleep(.15)
                     action(windows[0], 'fullscreen', 'mode = "fullscreen", action = "set"')
                     time.sleep(.3)
                     arm_result['captures']['fullscreen'] = capture(directory, 'fullscreen')
@@ -382,6 +467,11 @@ while True:
                         assert pool['pairs'] <= pool['retained_limit_pairs'], pool
                         assert pool['bytes'] <= pool['retained_limit_bytes'] or pool['pairs'] == 1, pool
                         assert pool['leased_bytes'] == 0 and diagnostic['allocation_failures'] == 0
+                        if 'scratch_pool' in diagnostic:
+                            scratch = diagnostic['scratch_pool']
+                            assert scratch['sets'] <= scratch['retained_limit_sets']
+                            assert scratch['bytes'] <= scratch['retained_limit_bytes']
+                            assert scratch['leased_bytes'] == 0
                     lifecycle.append({'cycle': cycle, 'resized': diagnostic, 'drm': drm(compositor.pid)})
                     action(windows[0], 'float', 'action = "disable"')
                     control('apply', patch={'enabled': False})
@@ -389,6 +479,7 @@ while True:
                     disabled = control('buffers')['buffers']
                     assert not any(b['role'].startswith('scene-') for b in disabled['buffers']), disabled
                     assert disabled['window_pool']['bytes'] == 0, disabled
+                    if 'scratch_pool' in disabled: assert disabled['scratch_pool']['bytes'] == 0, disabled
                     lifecycle[-1]['disabled'] = disabled
                     control('apply', patch={'enabled': True})
                     time.sleep(.3)

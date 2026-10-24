@@ -7,6 +7,7 @@
 #include "MaterialInfo.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <json-c/json.h>
 #include <GLES3/gl32.h>
 #include <hyprland/src/desktop/view/Window.hpp>
@@ -15,6 +16,7 @@
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprutils/math/Misc.hpp>
+#include <hyprutils/utils/ScopeGuard.hpp>
 
 CGlassDecoration::CGlassDecoration(PHLWINDOW window)
     : IHyprWindowDecoration(window), m_window(window) {
@@ -197,6 +199,9 @@ void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
     m_renderedDisplayAngle = m_displayAngle.value();
     if (enabled && material.family == EMaterialFamily::LIQUID && runtimeAnimateHoverAngle() && owner)
         m_renderedDisplayAngle += g_pGlobalState->hoverAngles.value(owner->m_monitor.lock());
+    // Diagnostics must pair the angle with geometry from the same draw. IPC
+    // can otherwise observe a newer native animation tick beside an old angle.
+    m_renderedAngleBox = WindowGeometry::computeWindowBox(owner, monitor);
     if (previousAngle != m_renderedDisplayAngle) {
         damageEntire();
         if (owner) if (const auto mon = owner->m_monitor.lock())
@@ -213,7 +218,8 @@ void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
         return;
 
     CGlassPassElement::SGlassPassData data{m_self, alpha, WindowScene::queuedFor(m_window.lock()), WindowScene::buildingBase()};
-    g_pHyprRenderer->addPassElement(makeUnique<CGlassPassElement>(data));
+    if (!WindowScene::skipDecoration(owner))
+        g_pHyprRenderer->addPassElement(makeUnique<CGlassPassElement>(data));
 
     if (data.sceneBase)
         return;
@@ -252,8 +258,29 @@ bool CGlassDecoration::usesLiquidGlass() const {
     return resolveEnabled() && resolveMaterialFamily(resolvePresetName(), g_pGlobalState->customPresets) == EMaterialFamily::LIQUID;
 }
 
+bool CGlassDecoration::needsNeighborScene() const {
+    return materialNeedsNeighborScene(resolveMaterial({resolvePresetName(), resolveThemeIsDark(), g_pGlobalState->config,
+                                                       g_pGlobalState->customPresets, runtimeOverrides()}));
+}
+
+void CGlassDecoration::appendCacheKey(std::vector<uint64_t>& key) const {
+    const auto material = resolveMaterial({resolvePresetName(), resolveThemeIsDark(), g_pGlobalState->config,
+                                           g_pGlobalState->customPresets, runtimeOverrides()});
+    key.push_back(resolveEnabled());
+    key.push_back(static_cast<uint64_t>(material.family));
+    key.push_back(material.darkTheme);
+#define GLASS_PARAM(name, value, lo, hi) key.push_back(std::bit_cast<uint32_t>(material.name));
+#include "MaterialParams.inc"
+#undef GLASS_PARAM
+    key.push_back(std::bit_cast<uint32_t>(m_renderedDisplayAngle));
+}
+
 void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
                                  const std::shared_ptr<SWindowScene>& scene, bool sceneBase) {
+    bool completed = false;
+    Hyprutils::Utils::CScopeGuard result([&] {
+        if (scene && scene->local && !completed) scene->failed = true;
+    });
     auto& shaderManager = g_pGlobalState->shaderManager;
     shaderManager.initializeIfNeeded();
 
@@ -295,9 +322,9 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     // Base glass sees only the background; the final pass sees the completed
     // neighbouring panes outside its bounds and the true backdrop inside.
     const auto backdrop = sceneBase && scene ? scene->background : source;
-    const auto neighbours = !sceneBase && scene && scene->ready ? scene->image : nullptr;
+    const auto neighbours = !sceneBase && scene && !scene->local && scene->ready ? scene->image : nullptr;
     std::vector<GlassRenderer::SUnderlayShape> underlayShapes;
-    if (neighbours && (liquid || material.neighbor_contribution < 1.0f)) {
+    if (scene && (scene->local || neighbours) && (liquid || material.neighbor_contribution < 1.0f)) {
         CBox receivingBox = transformBox;
         receivingBox.expand(materialOutputExtent(material) * effectScale);
         // The scene is ordered in native painting order. Only windows already
@@ -333,7 +360,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     // Falloff only changes the sharp/blur mix; it needs no reference backdrop.
     // A separate image is needed solely to protect actual underlays when the
     // additional neighbor contribution is reduced.
-    const bool separateNeighbors = material.neighbor_contribution < 1.0f &&
+    const bool separateNeighbors = !(scene && scene->local) && material.neighbor_contribution < 1.0f &&
         std::ranges::any_of(underlayShapes, [](const auto& shape) { return shape[6] > 0.0f; });
     const int padding = materialPadding(material, effectScale);
     const auto geometry = RenderSafety::sampleGeometry(transformBox.x, transformBox.y, transformBox.w, transformBox.h, padding);
@@ -350,10 +377,16 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
                                           padding, liquid ? nullptr : neighbours, scene ? scene->background : nullptr,
                                           separateNeighbors ? 1.0f : material.neighbor_contribution))
         return;
+    ++m_captures;
     samples->sharp->setImageDescription(backdrop->imageDescription());
     GlassRenderer::SNeighborBackdrop composition{
         scene ? scene->background : nullptr, nullptr, {geometry->x0, geometry->y0}, geometry->owner, underlayShapes,
         nullptr, neighbours};
+    if (scene && scene->local) {
+        // No neighboring client color enters the half-size reduction or blur.
+        // The exact destination crop still supplies local shadow attenuation.
+        composition.scene = scene->background;
+    }
     if (sceneBase && scene) {
         // The auxiliary material sees the immutable background, while the
         // exact destination crop still contains previously painted panes.
@@ -368,6 +401,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     if (!GlassRenderer::blurBackground(samples->sharp, blurred, blurSigma * effectScale, source, nullptr,
                                        liquid ? samples->halfSharp : nullptr))
         return;
+    if (blurred) ++m_blurs;
     if (blurred) {
         samples->blurred = blurred;
         blurred->setImageDescription(backdrop->imageDescription());
@@ -399,6 +433,8 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
                                          windowBox, transformBox, glassAlpha,
                                          cornerRadius, roundingPower, paddingRatio, material, nullptr, neighbors,
                                          liquid ? samples->halfSharp : nullptr, !sceneBase);
+        ++m_materialDraws;
+        completed = true;
     };
     if (separateNeighbors) {
         auto neighbors = composition;
@@ -449,9 +485,19 @@ json_object* CGlassDecoration::diagnostics() const {
     json_object_object_add(result, "material", values);
     addMaterialInfo(result, material);
     json_object_object_add(result, "owns_shadow", json_object_new_boolean(m_noShadowApplied));
+    json_object_object_add(result, "material_draws", json_object_new_uint64(m_materialDraws));
+    json_object_object_add(result, "captures", json_object_new_uint64(m_captures));
+    json_object_object_add(result, "blurs", json_object_new_uint64(m_blurs));
+    json_object_object_add(result, "local_cache_reuses", json_object_new_uint64(m_cacheReuses));
     json_object_object_add(result, "animate_display_angle", json_object_new_boolean(runtimeAnimateDisplayAngle()));
     json_object_object_add(result, "animate_hover_angle", json_object_new_boolean(runtimeAnimateHoverAngle()));
     json_object_object_add(result, "rendered_display_angle_degrees", json_object_new_double(m_renderedDisplayAngle));
+    if (m_renderedAngleBox) {
+        auto* box = json_object_new_array();
+        for (double value : {m_renderedAngleBox->x, m_renderedAngleBox->y, m_renderedAngleBox->w, m_renderedAngleBox->h})
+            json_object_array_add(box, json_object_new_double(value));
+        json_object_object_add(result, "rendered_angle_box", box);
+    }
     if (window) if (const auto monitor = window->m_monitor.lock()) {
         json_object_object_add(result, "monitor_id", json_object_new_int64(monitor->m_id));
         if (const auto box = WindowGeometry::computeWindowBox(window, monitor)) {

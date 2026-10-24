@@ -32,6 +32,9 @@ class CGlassDecoration : public IHyprWindowDecoration {
                                        const std::shared_ptr<SWindowScene>& scene = {}, bool sceneBase = false);
     [[nodiscard]] bool      usesGlass() const { return resolveEnabled(); }
     [[nodiscard]] bool      usesLiquidGlass() const;
+    [[nodiscard]] bool      needsNeighborScene() const;
+    void                    appendCacheKey(std::vector<uint64_t>& key) const;
+    void                    reusedLocalBackdrop() { ++m_cacheReuses; }
     [[nodiscard]] json_object* diagnostics() const;
     void                    onFullscreenStateChanged();
 
@@ -47,6 +50,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
     Vector2D m_lastSize;
     CResizeAngle m_displayAngle;
     float m_renderedDisplayAngle = 0.0f;
+    std::optional<CBox> m_renderedAngleBox;
 
     // Whether we currently hold the noblur window property on our window.
     // Glass replaces Hyprland's blur, and Hyprland's cached-blur optimization
@@ -58,6 +62,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
     std::optional<bool> m_savedNoShadow;
     float m_outputExtent = 0.0f;
     std::optional<CBox> m_lastDamageBox;
+    uint64_t m_materialDraws = 0, m_captures = 0, m_blurs = 0, m_cacheReuses = 0;
 
     void updateNoBlurProp(bool glassEnabled);
     void withdrawNoBlur();

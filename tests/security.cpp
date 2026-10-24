@@ -160,12 +160,26 @@ void materialFamilies() {
     material.refraction_threshold1 = 0;
     sanitizeMaterial(material);
     const auto effective = effectiveLiquidMaterial(material);
+    assert(materialNeedsNeighborScene(material));
     assert(effective.refraction.outerHeight > 999 && effective.refraction.outerAmount == 120);
     assert(effective.refraction.outerDistances[0] < effective.refraction.outerDistances[1]);
     assert(std::is_sorted(effective.blur.distances.begin(), effective.blur.distances.end()));
     assert(materialOutputExtent(material) == 127 && materialPadding(material, 1) == 519);
     material.refraction_opacity = 0;
     assert(effectiveLiquidMaterial(material).refraction.outerHeight == 0 && effectiveLiquidMaterial(material).refraction.innerAmount == 0);
+    assert(!materialNeedsNeighborScene(material));
+    for (bool dark : {false, true}) {
+        auto local = liquidControlDefaults(dark);
+        assert(!materialNeedsNeighborScene(local));
+        local.inner_refraction_amount = 45;
+        assert(materialNeedsNeighborScene(local));
+        local.inner_refraction_amount = -45;
+        local.outer_refraction_amount = 45;
+        assert(materialNeedsNeighborScene(local));
+        local.family = EMaterialFamily::LEGACY;
+        local.inner_refraction_amount = local.outer_refraction_amount = 0;
+        assert(materialNeedsNeighborScene(local));
+    }
     std::cout << "PASS: typed material variants, family inheritance, disabled heights and sample/output extents\n";
 }
 }

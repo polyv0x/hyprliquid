@@ -17,6 +17,16 @@ struct SMaterial {
 #undef GLASS_PARAM
 };
 
+// Local Liquid uses the wallpaper/real underlay for its filter support, even
+// when that support crosses the owner edge. Outward rays opt into the color
+// scene. Keep legacy optics on their existing dependency path.
+inline bool materialNeedsNeighborScene(const SMaterial& material) {
+    if (material.family != EMaterialFamily::LIQUID) return true;
+    const auto& rays = effectiveLiquidMaterial(material).refraction;
+    return (rays.innerHeight > 0 && rays.innerAmount > 0) ||
+        (rays.outerHeight > 0 && rays.outerAmount > 0 && rays.outerOpacity > 0);
+}
+
 // Negative material values are valid; use an out-of-range inheritance sentinel.
 inline constexpr float SENTINEL_FLOAT = -1000000.0f;
 

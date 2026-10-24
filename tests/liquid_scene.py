@@ -144,7 +144,7 @@ while True:
 
     def angle_sample():
         window = next(w for w in control('buffers')['buffers']['windows'] if w['owner'] == owner)
-        return {'box': window['pixel_box'], 'angle': window['rendered_display_angle_degrees']}
+        return {'box': window.get('rendered_angle_box', window['pixel_box']), 'angle': window['rendered_display_angle_degrees']}
 
     recordings = {}
     for curve, specification in (
@@ -168,7 +168,8 @@ while True:
         for sample in samples:
             progress = max(0, min(1, (sample['box'][2] - 320) / 200))
             assert 0 <= sample['angle'] <= 45
-            # IPC can run after a size tick but before that frame is drawn.
+            # Older comparison binaries expose only the current native box;
+            # new diagnostics pair geometry and angle from the same draw.
             assert abs(sample['angle'] - 45 * math.sin(math.pi * progress)) < 6, (curve, sample, progress)
         recordings[curve] = samples
         ctl('eval', 'hl.config({ animations = { enabled = false } })')

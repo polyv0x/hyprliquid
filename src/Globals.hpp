@@ -36,10 +36,6 @@ struct SGlobalState {
     // User-defined presets (populated from config keyword, swapped in on configReloaded)
     std::unordered_map<std::string, SCustomPreset> customPresets;
 
-    // Shared blur workspaces (decorations and layers render sequentially).
-    SP<Render::IFramebuffer> blurTempFramebuffer;
-    std::vector<SP<Render::IFramebuffer>> blurPyramid;
-
     // Layer surface glass state (one per tracked layer, keyed by raw pointer).
     // shared_ptr so CGlassLayerPassElement can hold a copy that survives map erasure mid-frame.
     std::unordered_map<Desktop::View::CLayerSurface*, std::shared_ptr<CGlassLayerSurface>> layerSurfaces;

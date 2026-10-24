@@ -22,6 +22,7 @@ from control_api import verify_control
 from window_scene import verify_window_scene
 from liquid_scene import verify_liquid
 from hover_angle import verify_hover_angle
+from gpu_cache import verify_gpu_cache
 
 
 def wait_for(predicate, process, seconds=20):
@@ -158,6 +159,11 @@ def main():
 
                 if '--hover-only' in sys.argv:
                     verify_hover_angle(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), PLUGIN)
+                    return
+
+                if '--gpu-only' in sys.argv or '--gpu-isolation-only' in sys.argv:
+                    verify_gpu_cache(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES,
+                                     isolation_only='--gpu-isolation-only' in sys.argv)
                     return
 
                 if shutil.which('kitty') and shutil.which('grim'):

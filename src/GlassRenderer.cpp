@@ -235,20 +235,23 @@ bool blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFram
     std::array<SP<Render::IFramebuffer>, std::numeric_limits<int>::digits> levelStorage;
     size_t levelCount = 1;
     levelStorage[0] = blurredFramebuffer;
-    auto& pyramid = g_pGlobalState->blurPyramid;
     while ((sigma * width / sourceWidth > 2.8f || sigma * height / sourceHeight > 2.8f) &&
            (width > 1 || height > 1)) {
         width = std::max(1, (width + 1) / 2);
         height = std::max(1, (height + 1) / 2);
-        const size_t index = levelCount - 1;
-        if (pyramid.size() <= index)
-            pyramid.emplace_back();
-        if (!allocate(pyramid[index], width, height, "blur-pyramid"))
+        ++levelCount;
+    }
+    auto scratch = g_pGlobalState->renderBuffers.acquireBlur(sourceWidth, sourceHeight, levelCount, sampleFramebuffer);
+    int levelWidth = (sourceWidth + 1) / 2, levelHeight = (sourceHeight + 1) / 2;
+    for (size_t index = 0; index + 1 < levelCount; ++index) {
+        levelWidth = std::max(1, (levelWidth + 1) / 2);
+        levelHeight = std::max(1, (levelHeight + 1) / 2);
+        if (!allocate(scratch->pyramid[index], levelWidth, levelHeight, "blur-pyramid"))
             return false;
-        levelStorage[levelCount++] = pyramid[index];
+        levelStorage[index + 1] = scratch->pyramid[index];
     }
     const std::span levels{levelStorage.data(), levelCount};
-    auto& temporary = g_pGlobalState->blurTempFramebuffer;
+    auto& temporary = scratch->temporary;
     if (!allocate(temporary, width, height, "blur-temp"))
         return false;
 

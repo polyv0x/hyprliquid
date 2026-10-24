@@ -35,6 +35,11 @@ uint64_t size(const SP<Render::IFramebuffer>& fb) {
     return fb && fb->isAllocated() ? CRenderBuffers::bytes(fb->m_size.x, fb->m_size.y, fb->m_drmFormat) : 0;
 }
 uint64_t size(const CRenderBuffers::SSamples& samples) { return size(samples.sharp) + size(samples.blurred) + size(samples.halfSharp); }
+uint64_t size(const CRenderBuffers::SBlurScratch& scratch) {
+    uint64_t result = size(scratch.temporary);
+    for (const auto& fb : scratch.pyramid) result += size(fb);
+    return result;
+}
 }
 
 uint64_t CRenderBuffers::bytes(int width, int height, DRMFormat format) {
@@ -75,6 +80,38 @@ CRenderBuffers::CLease CRenderBuffers::acquire(int width, int height, const SP<R
     ++m_misses;
     m_pool.push_back(samples);
     return CLease(*this, std::move(samples));
+}
+
+CRenderBuffers::CBlurLease::CBlurLease(CRenderBuffers& pool, std::shared_ptr<SBlurScratch> scratch)
+    : m_pool(pool), m_scratch(std::move(scratch)) {}
+
+CRenderBuffers::CBlurLease::~CBlurLease() {
+    m_scratch.reset();
+    m_pool.trim();
+    m_pool.scheduleCleanup();
+}
+
+CRenderBuffers::CBlurLease CRenderBuffers::acquireBlur(int width, int height, size_t levels,
+                                                     const SP<Render::IFramebuffer>& source) {
+    const auto color = source->imageDescription();
+    const SKey key{width, height, source->m_drmFormat, color ? color->id() : 0,
+                   eglGetCurrentDisplay(), eglGetCurrentContext()};
+    for (auto& scratch : m_scratchPool) {
+        if (scratch.use_count() != 1 || scratch->key != key || scratch->levels != levels) continue;
+        scratch->used = Clock::now();
+        scratch->sequence = ++m_sequence;
+        ++m_scratchHits;
+        return CBlurLease(*this, scratch);
+    }
+    auto scratch = std::make_shared<SBlurScratch>();
+    scratch->key = key;
+    scratch->levels = levels;
+    scratch->pyramid.resize(levels - 1);
+    scratch->used = Clock::now();
+    scratch->sequence = ++m_sequence;
+    ++m_scratchMisses;
+    m_scratchPool.push_back(scratch);
+    return CBlurLease(*this, std::move(scratch));
 }
 
 bool CRenderBuffers::prepare(SP<Render::IFramebuffer>& fb, int width, int height, DRMFormat format,
@@ -148,7 +185,7 @@ void CRenderBuffers::release(SP<Render::IFramebuffer>& fb) {
 }
 
 void CRenderBuffers::trim(bool expired) {
-    if (m_pool.empty()) return;
+    if (m_pool.empty() && m_scratchPool.empty()) return;
     // The hit path needs no GL queries. Capture state only if something is
     // actually being deleted (glGet* can serialize some drivers).
     std::optional<SBindings> restore;
@@ -179,6 +216,33 @@ void CRenderBuffers::trim(bool expired) {
         m_pool.erase(oldest);
         ++m_evictions;
     }
+    // Exact dimensions, format, context and level count preserve every filter
+    // tap and texel center. Only unleased sets may be evicted; an auxiliary or
+    // nested blur cannot overwrite an invocation that still owns its scratch.
+    if (expired) {
+        const auto now = Clock::now();
+        std::erase_if(m_scratchPool, [&](const auto& entry) {
+            if (entry.use_count() != 1 || now - entry->used < IDLE_TIMEOUT) return false;
+            if (!restore) restore.emplace();
+            ++m_scratchEvictions;
+            return true;
+        });
+    }
+    while (true) {
+        uint64_t retained = 0;
+        size_t count = 0;
+        auto oldest = m_scratchPool.end();
+        for (auto it = m_scratchPool.begin(); it != m_scratchPool.end(); ++it) {
+            if (it->use_count() != 1) continue;
+            retained += size(**it);
+            ++count;
+            if (oldest == m_scratchPool.end() || (*it)->sequence < (*oldest)->sequence) oldest = it;
+        }
+        if (count <= SCRATCH_RETAINED_SETS && retained <= SCRATCH_RETAINED_BYTES) break;
+        if (!restore) restore.emplace();
+        m_scratchPool.erase(oldest);
+        ++m_scratchEvictions;
+    }
 }
 
 void CRenderBuffers::scheduleCleanup() {
@@ -192,7 +256,7 @@ void CRenderBuffers::scheduleCleanup() {
                 trim(true);
                 WindowScene::collectUnused();
             }
-            if (!m_pool.empty() || WindowScene::hasRetired()) scheduleCleanup();
+            if (!m_pool.empty() || !m_scratchPool.empty() || WindowScene::hasRetired()) scheduleCleanup();
         }, nullptr);
         g_pEventLoopManager->addTimer(m_cleanup);
     }
@@ -220,6 +284,7 @@ void CRenderBuffers::shutdown() {
         m_cleanup.reset();
     }
     m_pool.clear();
+    m_scratchPool.clear();
     m_records.clear();
 }
 CRenderBuffers::~CRenderBuffers() { shutdown(); }
@@ -275,6 +340,21 @@ json_object* CRenderBuffers::diagnostics() const {
     number(pool, "retained_limit_pairs", RETAINED_PAIRS);
     number(pool, "idle_timeout_ms", std::chrono::duration_cast<std::chrono::milliseconds>(IDLE_TIMEOUT).count());
     json_object_object_add(result, "window_pool", pool);
+    auto* scratch = json_object_new_object();
+    uint64_t scratchBytes = 0, scratchLeased = 0;
+    for (const auto& entry : m_scratchPool) {
+        scratchBytes += size(*entry);
+        if (entry.use_count() > 1) scratchLeased += size(*entry);
+    }
+    number(scratch, "sets", m_scratchPool.size());
+    number(scratch, "bytes", scratchBytes);
+    number(scratch, "leased_bytes", scratchLeased);
+    number(scratch, "hits", m_scratchHits);
+    number(scratch, "misses", m_scratchMisses);
+    number(scratch, "evictions", m_scratchEvictions);
+    number(scratch, "retained_limit_bytes", SCRATCH_RETAINED_BYTES);
+    number(scratch, "retained_limit_sets", SCRATCH_RETAINED_SETS);
+    json_object_object_add(result, "scratch_pool", scratch);
     auto* times = json_object_new_array();
     for (double ms : m_frameTimes) json_object_array_add(times, json_object_new_double(ms));
     json_object_object_add(result, "cpu_frame_ms", times);

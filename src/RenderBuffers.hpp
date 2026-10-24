@@ -21,6 +21,8 @@ class CRenderBuffers {
     static constexpr uint64_t RETAINED_BYTES = 128ULL * 1024 * 1024;
     static constexpr size_t RETAINED_PAIRS = 8;
     static constexpr auto IDLE_TIMEOUT = std::chrono::seconds(5);
+    static constexpr uint64_t SCRATCH_RETAINED_BYTES = 32ULL * 1024 * 1024;
+    static constexpr size_t SCRATCH_RETAINED_SETS = 16;
 
     struct SKey {
         int width, height;
@@ -50,8 +52,29 @@ class CRenderBuffers {
         std::shared_ptr<SSamples> m_samples;
     };
 
+    struct SBlurScratch {
+        SKey key;
+        size_t levels;
+        std::vector<SP<Render::IFramebuffer>> pyramid;
+        SP<Render::IFramebuffer> temporary;
+        Clock::time_point used;
+        uint64_t sequence = 0;
+    };
+    class CBlurLease {
+      public:
+        CBlurLease(CRenderBuffers& pool, std::shared_ptr<SBlurScratch> scratch);
+        CBlurLease(const CBlurLease&) = delete;
+        CBlurLease& operator=(const CBlurLease&) = delete;
+        ~CBlurLease();
+        SBlurScratch* operator->() const { return m_scratch.get(); }
+      private:
+        CRenderBuffers& m_pool;
+        std::shared_ptr<SBlurScratch> m_scratch;
+    };
+
     ~CRenderBuffers();
     CLease acquire(int width, int height, const SP<Render::IFramebuffer>& source);
+    CBlurLease acquireBlur(int width, int height, size_t levels, const SP<Render::IFramebuffer>& source);
     bool prepare(SP<Render::IFramebuffer>& fb, int width, int height, DRMFormat format,
                  const std::string& role, const std::string& owner = "shared");
     void identify(const SP<Render::IFramebuffer>& fb, const std::string& role, const std::string& owner);
@@ -73,11 +96,13 @@ class CRenderBuffers {
         std::string role, owner;
     };
     std::vector<std::shared_ptr<SSamples>> m_pool;
+    std::vector<std::shared_ptr<SBlurScratch>> m_scratchPool;
     std::unordered_map<Render::IFramebuffer*, SRecord> m_records;
     SP<CEventLoopTimer> m_cleanup;
     uint64_t m_nextId = 0, m_sequence = 0, m_hits = 0, m_misses = 0, m_evictions = 0;
     uint64_t m_allocations = 0, m_reallocations = 0, m_failures = 0;
     uint64_t m_peakRetainedBytes = 0;
+    uint64_t m_scratchHits = 0, m_scratchMisses = 0, m_scratchEvictions = 0;
     uint64_t m_frame = 0;
     int64_t m_monitor = -1;
     Clock::time_point m_frameStart;

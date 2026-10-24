@@ -20,6 +20,7 @@
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/debug/log/Logger.hpp>
 #include <hyprland/src/event/EventBus.hpp>
+#include <hyprland/src/state/MonitorState.hpp>
 
 #include <cstdlib>
 #include <algorithm>
@@ -134,6 +135,33 @@ static void hkDamageSurface(Render::IHyprRenderer* thisptr, SP<CWLSurfaceResourc
     if (!g_pGlobalState || !surface)
         return;
 
+    const auto wlSurface = Desktop::View::CWLSurface::fromResource(surface);
+    if (!wlSurface) {
+        // Unknown surface ownership cannot prove independence.
+        WindowScene::invalidateAll();
+    } else if (!wlSurface->computeDamage().empty()) {
+        const auto view = wlSurface->view();
+        if (const auto layer = Desktop::View::CLayerSurface::fromView(view)) {
+            // Top/overlay bars and their playback animations are above glass.
+            if (layer->m_layer < 2) WindowScene::invalidateBackground(layer->m_monitor.lock());
+        } else if (!Desktop::View::CWindow::fromView(view)) {
+            // Subsurfaces have their own view type. Resolve their root before
+            // treating a client's video/content commit as unknown damage.
+            bool known = false;
+            for (const auto& window : Desktop::viewState()->windows()) {
+                if (surfaceInTree(surface, window->resource())) { known = true; break; }
+            }
+            if (!known) for (const auto& monitor : State::monitorState()->monitors()) {
+                for (const auto& plane : monitor->m_layerSurfaceLayers) for (const auto& layer : plane) {
+                    if (!layer || !surfaceInTree(surface, layer->resource())) continue;
+                    known = true;
+                    if (layer->m_layer < 2) WindowScene::invalidateBackground(monitor);
+                }
+            }
+            if (!known) WindowScene::invalidateAll();
+        }
+    }
+
     const auto& config = g_pGlobalState->config;
     if (!config.layersEnabled || !**config.layersEnabled ||
         g_pGlobalState->layerSurfaces.empty())
@@ -144,7 +172,6 @@ static void hkDamageSurface(Render::IHyprRenderer* thisptr, SP<CWLSurfaceResourc
     if (!globalLive && std::ranges::none_of(g_pGlobalState->layerNamespaceLiveResample, [](const auto& kv) { return kv.second; }))
         return;
 
-    const auto wlSurface = Desktop::View::CWLSurface::fromResource(surface);
     if (!wlSurface)
         return;
 
@@ -422,11 +449,18 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.window.close.listen([&](PHLWINDOW w) { onCloseWindow(w); }));
 
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.layer.closed.listen([&](PHLLS layerSurface) { clearLayerGlassOnClose(layerSurface); }));
+    const auto invalidateLayer = [](PHLLS layer) {
+        if (layer && layer->m_layer < 2) WindowScene::invalidateBackground(layer->m_monitor.lock());
+    };
+    g_pGlobalState->listeners.push_back(Event::bus()->m_events.layer.opened.listen(invalidateLayer));
+    g_pGlobalState->listeners.push_back(Event::bus()->m_events.layer.closed.listen(invalidateLayer));
+    g_pGlobalState->listeners.push_back(Event::bus()->m_events.layer.updateRules.listen(invalidateLayer));
     g_pGlobalState->listeners.push_back(g_pSessionLockManager->m_events.lock.listen([] {
         // A layer can survive locking and later be allowed above the lock.
         // Its next desktop pass must acquire a fresh backdrop after unlocking.
         g_pGlobalState->layerSurfaces.clear();
         g_pGlobalState->hoverAngles.clear();
+        WindowScene::invalidateAll();
     }));
     g_pGlobalState->listeners.push_back(g_pSessionLockManager->m_events.unlock.listen([] {
         g_pGlobalState->hoverAngles.refresh();
