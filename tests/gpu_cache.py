@@ -19,7 +19,7 @@ def verify_gpu_cache(ctl, env, log, clients, build, wait, fixtures, isolation_on
 
     def counters():
         fields = ('captures', 'blurs', 'material_draws', 'local_cache_reuses')
-        if legacy: fields += ('backdrop_cache_reuses',)
+        if legacy: fields += ('backdrop_cache_reuses', 'scene_base_cache_reuses', 'window_backdrop_reuses', 'partial_captures', 'partial_blurs')
         return {w['owner']: {k: w[k] for k in fields}
                 for w in control('buffers')['buffers']['windows'] if w['enabled']}
 
@@ -116,9 +116,11 @@ while True:
     for owner in before:
         if legacy:
             delta = {k: after[owner][k] - before[owner][k] for k in before[owner]}
-            assert delta['backdrop_cache_reuses'] > 0, delta
-            assert delta['material_draws'] == delta['captures'] + delta['backdrop_cache_reuses'], delta
-            assert delta['captures'] == delta['blurs'] == delta['backdrop_cache_reuses'], delta
+            assert delta['scene_base_cache_reuses'] > 0, delta
+            assert delta['material_draws'] == delta['captures'] + delta['backdrop_cache_reuses'] + delta['window_backdrop_reuses'], delta
+            assert delta['captures'] == delta['blurs'], delta
+            if owner == 'window:' + windows[1]['address']:
+                assert delta['captures'] == 0 and delta['window_backdrop_reuses'] > 0, delta
         else:
             assert after[owner]['captures'] == before[owner]['captures'], (owner, before, after)
             assert after[owner]['blurs'] == before[owner]['blurs'], (owner, before, after)
@@ -126,8 +128,43 @@ while True:
             assert after[owner]['local_cache_reuses'] > before[owner]['local_cache_reuses'], (owner, before, after)
     evidence['client_repaints'] = {'before': before, 'after': after}
     parity('local-dark')
-    print('PASS: unequal panes reuse background samples and retain live frosted-glass refraction' if legacy else
+    print('PASS: unequal panes reuse rendered base glass and retain live frosted-glass refraction' if legacy else
           'PASS: unequal local panes ignore foreground damage, isolate neighbors and reuse exact raw material output', flush=True)
+
+    if legacy:
+        action(windows[2], 'resize', 'x = 430, y = 150, relative = false')
+        action(windows[2], 'move', 'x = 40, y = 580, relative = false')
+        time.sleep(.3)
+        before = counters()
+        write(paths[1], [90, 210, 130]); time.sleep(.2)
+        after = counters()
+        distant = 'window:' + windows[2]['address']
+        assert after[distant]['captures'] == before[distant]['captures'], (before, after)
+        assert after[distant]['window_backdrop_reuses'] > before[distant]['window_backdrop_reuses'], (before, after)
+        adjacent = 'window:' + windows[0]['address']
+        assert after[adjacent]['partial_captures'] > before[adjacent]['partial_captures'], (before, after)
+        assert after[adjacent]['partial_blurs'] > before[adjacent]['partial_blurs'], (before, after)
+        evidence['spatial_dependencies'] = {'before': before, 'after': after}
+        parity('outside-sampling-region')
+        # Changes made while the overlap fallback is active must not resurrect
+        # the old retained input when the original layout returns.
+        action(windows[0], 'move', 'x = 650, y = 100, relative = false')
+        time.sleep(.2)
+        write(paths[1], [160, 80, 230]); time.sleep(.2)
+        action(windows[0], 'move', 'x = 30, y = 40, relative = false')
+        time.sleep(.3)
+        parity('resume-after-overlap')
+        workspace = str(windows[0]['workspace']['id'])
+        ctl('dispatch', 'hl.dsp.focus({ workspace = "99" })')
+        time.sleep(.2)
+        write(paths[1], [210, 170, 60]); time.sleep(.2)
+        ctl('dispatch', 'hl.dsp.focus({ workspace = ' + json.dumps(workspace) + ' })')
+        time.sleep(.3)
+        parity('resume-after-hidden-damage')
+        action(windows[2], 'resize', 'x = 430, y = 310, relative = false')
+        action(windows[2], 'move', 'x = 40, y = 420, relative = false')
+        time.sleep(.3)
+        print('PASS: distant changes skip blur; adjacent damage updates regions; fallback transitions rebuild stale inputs', flush=True)
 
     def layer(bottom=False):
         proc = subprocess.Popen([str(fixtures / 'layer-test'), '--animate', *(['--bottom'] if bottom else [])],
@@ -145,7 +182,8 @@ while True:
     if legacy:
         after_cache = control('buffers')['buffers']['backdrop_cache']
         assert after_cache['misses'] == before_cache['misses'], (before_cache, after_cache)
-        assert after_cache['hits'] > before_cache['hits'], (before_cache, after_cache)
+        assert all(after[k]['captures'] == before[k]['captures'] for k in before), (before, after)
+        assert any(after[k]['window_backdrop_reuses'] > before[k]['window_backdrop_reuses'] for k in before)
     else:
         assert all(after[k]['captures'] == before[k]['captures'] for k in before), (before, after)
         assert any(after[k]['local_cache_reuses'] > before[k]['local_cache_reuses'] for k in before)
@@ -185,21 +223,29 @@ while True:
         action(windows[0], 'resize', 'x = 480, y = 300, relative = false')
         control('apply', patch={'reset_fields': ['blur_sigma', 'neighbor_contribution']})
     monitor = json.loads(ctl('-j', 'monitors'))[0]['name']
-    for scale, transform in ((1.25, 0), (1.6, 0), (1, 1), (1.25, 3)):
+    for index, (scale, transform) in enumerate(((1.25, 0), (1.6, 0), (1, 1), (1.25, 3))):
         ctl('eval', 'hl.monitor({ output = ' + json.dumps(monitor) +
             f', mode = "1280x800@60", scale = {scale}, transform = {transform}' + ' })')
         time.sleep(.5)
+        if legacy:
+            write(paths[1], [140 + index * 10, 40 + index * 30, 220 - index * 20]); time.sleep(.2)
         parity(f'scale-{scale}-transform-{transform}')
     ctl('eval', 'hl.monitor({ output = ' + json.dumps(monitor) +
         ', mode = "1280x800@60", scale = 1, transform = 0, bitdepth = 10, cm = "srgb" })')
     time.sleep(.4)
+    if legacy:
+        write(paths[1], [10, 200, 210]); time.sleep(.2)
     parity('sdr-10bit')
     ctl('eval', 'hl.config({ render = { use_fp16 = 1 } })')
     time.sleep(.4)
+    if legacy:
+        write(paths[1], [160, 20, 100]); time.sleep(.2)
     parity('sdr-fp16')
     ctl('eval', 'hl.monitor({ output = ' + json.dumps(monitor) +
         ', mode = "1280x800@60", scale = 1, transform = 0, bitdepth = 10, cm = "hdr", supports_hdr = 1, supports_wide_color = 1 })')
     time.sleep(.4)
+    if legacy:
+        write(paths[1], [190, 180, 50]); time.sleep(.2)
     parity('hdr-fp16')
     ctl('eval', 'hl.config({ render = { use_fp16 = 2 } }); hl.monitor({ output = ' + json.dumps(monitor) +
         ', mode = "1280x800@60", scale = 1, transform = 0, bitdepth = 8, cm = "srgb", supports_hdr = 0, supports_wide_color = 0 })')

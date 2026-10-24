@@ -144,12 +144,22 @@ static void hkDamageSurface(Render::IHyprRenderer* thisptr, SP<CWLSurfaceResourc
         if (const auto layer = Desktop::View::CLayerSurface::fromView(view)) {
             // Top/overlay bars and their playback animations are above glass.
             if (layer->m_layer < 2) WindowScene::invalidateBackground(layer->m_monitor.lock());
-        } else if (!Desktop::View::CWindow::fromView(view)) {
+        } else if (const auto window = Desktop::View::CWindow::fromView(view)) {
+            auto damage = wlSurface->computeDamage();
+            if (scale != 1.0) damage.scale(scale);
+            WindowScene::damageWindow(window, damage.translate({x, y}));
+        } else {
             // Subsurfaces have their own view type. Resolve their root before
             // treating a client's video/content commit as unknown damage.
             bool known = false;
             for (const auto& window : Desktop::viewState()->windows()) {
-                if (surfaceInTree(surface, window->resource())) { known = true; break; }
+                if (surfaceInTree(surface, window->resource())) {
+                    auto damage = wlSurface->computeDamage();
+                    if (scale != 1.0) damage.scale(scale);
+                    WindowScene::damageWindow(window, damage.translate({x, y}));
+                    known = true;
+                    break;
+                }
             }
             if (!known) for (const auto& monitor : State::monitorState()->monitors()) {
                 for (const auto& plane : monitor->m_layerSurfaceLayers) for (const auto& layer : plane) {

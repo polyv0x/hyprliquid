@@ -100,6 +100,9 @@ def main():
     parser.add_argument('--steady-only', action='store_true', help='Measure the fixed warm scene without the visual/lifecycle matrix')
     parser.add_argument('--steady-preset', default='lens', help='Material for --steady-only (default: lens)')
     parser.add_argument('--steady-panes', type=int, default=2, help='Pane count for --steady-only (default: 2)')
+    parser.add_argument('--client-update-hz', type=float, default=40, help='Changing client repaint rate (default: 40 Hz)')
+    parser.add_argument('--animate-top-layer', action='store_true', help='Repaint a top layer independently at 60 Hz during steady timing')
+    parser.add_argument('--opaque-clients', action='store_true', help='Use fully opaque client surfaces to exercise occlusion')
     parser.add_argument('--warmup-seconds', type=float, default=1, help='Foreground repaint warmup before sampling')
     parser.add_argument('--sample-seconds', type=float, default=6, help='Duration of foreground repaint sampling')
     parser.add_argument('--native-blur', action='store_true', help='With --steady-only, disable Liquid and enable native blur (size 8, three passes)')
@@ -112,6 +115,9 @@ def main():
         parser.error('--native-blur requires --steady-only')
     if args.steady_panes < 1:
         parser.error('--steady-panes must be positive')
+    if not 1 <= args.client_update_hz <= 240:
+        parser.error('--client-update-hz must be between 1 and 240')
+    update_interval = 1 / args.client_update_hz
     if args.warmup_seconds < 0 or args.sample_seconds < 3:
         parser.error('--warmup-seconds must be nonnegative and --sample-seconds at least 3')
     if not args.steady_only and (args.steady_preset != 'lens' or args.steady_panes != 2):
@@ -124,7 +130,8 @@ def main():
                'workload': {'preset': args.steady_preset, 'panes': args.steady_panes,
                             'warmup_seconds': args.warmup_seconds, 'sample_seconds': args.sample_seconds,
                             'native_blur': args.native_blur,
-                            'client_update_interval_seconds': .025},
+                            'client_update_interval_seconds': update_interval,
+                            'animate_top_layer': args.animate_top_layer, 'opaque_clients': args.opaque_clients},
                'builds': {key: {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
                           for key, path in arms.items()}, 'arms': {}, 'comparisons': []}
     (output / 'result.json').write_text(json.dumps(results, indent=2))
@@ -197,7 +204,7 @@ while True:
                         set_pattern(path, {'color': color, 'phase': side % 2})
                         if len(controls) <= side: controls.append(path)
                         clients.append(subprocess.Popen(['kitty', '--start-as=normal', '--class', f'vram-pane-{side}',
-                            '-o', 'background_opacity=0', '-o', 'remember_window_size=no',
+                            '-o', 'background_opacity=' + ('1' if args.opaque_clients else '0'), '-o', 'remember_window_size=no',
                             '-o', 'cursor_blink_interval=0', '-o', 'font_size=16',
                             'python3', '-c', pattern, str(path)], env=env, stdout=log, stderr=log))
                         wait(lambda: len(json.loads(ctl('-j', 'clients'))) == side + 1)
@@ -211,7 +218,8 @@ while True:
                     metadata = json.loads(metadata_path.read_text())
                     assert metadata['gl_error'] == 0, metadata
                     raw = raw_path.read_bytes()
-                    assert len(set(raw)) > 8, f'Capture is blank: {path}'
+                    pixel_bytes = metadata['pixel_bytes']
+                    assert any(raw[i:i + pixel_bytes] != raw[:pixel_bytes] for i in range(pixel_bytes, len(raw), pixel_bytes)), f'Capture is blank: {path}'
                     # Store lossless artifacts without retaining hundreds of MiB
                     # of redundant uncompressed backgrounds.
                     with gzip.open(Path(str(path) + '.raw.gz'), 'wb') as compressed:
@@ -261,14 +269,24 @@ while True:
                     if reference_geometry is None:
                         reference_geometry = geometry
                     assert geometry == reference_geometry, 'Workload geometry changed between builds'
+                    top_layer = None
+                    if args.animate_top_layer:
+                        top_layer = subprocess.Popen([str(ROOT / 'build/layer-test'), '--animate'],
+                            env=env | {'GSK_RENDERER': 'cairo', 'GTK_A11Y': 'none'}, stdout=log, stderr=log)
+                        clients.append(top_layer)
+                        wait(lambda: 'hyprliquid-vram-test' in ctl('-j', 'layers'))
                     # Real foreground damage with fixed geometry/materials.
                     warm_until = time.monotonic() + args.warmup_seconds
                     iteration = 0
                     while time.monotonic() < warm_until:
                         set_pattern(controls[-1], {'color': colors[-1], 'phase': iteration % 2})
                         iteration += 1
-                        time.sleep(.025)
+                        time.sleep(update_interval)
                     if has_buffers: arm_result['warm'] = control('buffers')['buffers']
+                    if args.opaque_clients and not args.native_blur and has_buffers:
+                        panes = arm_result['warm']['windows']
+                        if any('occluded_draws' in pane for pane in panes):
+                            assert any(pane.get('occluded_draws', 0) for pane in panes), 'Opaque-client workload did not exercise occlusion'
                     arm_result['warm_drm'] = drm(compositor.pid)
                     gpu_started = time.monotonic_ns()
                     ctl('hyprliquid-test:timing')
@@ -283,7 +301,7 @@ while True:
                             arm_result['gpu_samples'].append({'monotonic_ns': time.monotonic_ns(), 'unix_ns': time.time_ns(),
                                                              'drm': snapshot, 'device': device_stats(snapshot)})
                             next_sample = time.monotonic() + 1
-                        time.sleep(.025)
+                        time.sleep(update_interval)
                     gpu_finished = time.monotonic_ns()
                     arm_result['gpu_end_drm'] = drm(compositor.pid)
                     arm_result['gpu_interval_ns'] = gpu_finished - gpu_started
@@ -298,6 +316,10 @@ while True:
                         arm_result['steady_drm'].append(drm(compositor.pid))
                         time.sleep(.1)
                     for side in range(len(colors)): set_pattern(controls[side], {'color': colors[side], 'phase': side % 2})
+                    if top_layer:
+                        top_layer.terminate()
+                        top_layer.wait(timeout=5)
+                        wait(lambda: 'hyprliquid-vram-test' not in ctl('-j', 'layers'))
                     if args.steady_only:
                         (output / 'result.json').write_text(json.dumps(results, indent=2))
                         print(f'Measured {arm}: CPU {arm_result["timing"]["distribution"]}', flush=True)
@@ -328,6 +350,11 @@ while True:
                     for name, profile in cases:
                         control('apply', profile=profile)
                         time.sleep(.12)
+                        arm_result['captures'][name] = capture(directory, name)
+                    for opacity in (.92, 1):
+                        ctl('eval', 'hl.config({ decoration = { active_opacity = ' + str(opacity) + ', inactive_opacity = ' + str(opacity) + ' } })')
+                        time.sleep(.2)
+                        name = 'native-opacity-' + str(opacity)
                         arm_result['captures'][name] = capture(directory, name)
                     for scale, transform in ((1.25, 0), (1.6, 0), (1, 1), (1.25, 3)):
                         name = f'scale-{scale}-transform-{transform}'
@@ -507,7 +534,9 @@ while True:
                 ctl('dispatch', 'hl.dsp.focus({ workspace = ' + json.dumps(workspace) + ' })')
                 time.sleep(1)
                 returned = control('buffers')['buffers']
-                assert len([b for b in returned['buffers'] if b['role'].startswith('scene-')]) == 2
+                assert len([b for b in returned['buffers'] if b['role'] == 'scene-background']) == 1
+                assert len([b for b in returned['buffers'] if b['role'] == 'scene-windows']) == 1
+                assert len([b for b in returned['buffers'] if b['role'] == 'scene-base']) <= 1
 
                 assert ctl('output', 'create', 'headless', 'HYPRLIQUID-REMOVE') == 'ok'
                 ctl('dispatch', 'hl.dsp.workspace.move({ workspace = ' + json.dumps(workspace) + ', monitor = "HYPRLIQUID-REMOVE" })')

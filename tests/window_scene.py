@@ -66,7 +66,9 @@ while True:
         assert initial_buffers['window_pool']['hits'] > 0, initial_buffers
         assert initial_buffers['window_pool']['leased_bytes'] == 0
         scene = [b for b in initial_buffers['buffers'] if b['role'].startswith('scene-')]
-        assert len(scene) == 2, scene
+        assert len([b for b in scene if b['role'] == 'scene-background']) == 1, scene
+        assert len([b for b in scene if b['role'] == 'scene-windows']) == 1, scene
+        assert len([b for b in scene if b['role'] == 'scene-base']) <= 1, scene
         (build / 'scene-buffers-warm.json').write_text(json.dumps(initial_buffers, indent=2))
 
         # These materials have the same 97-pixel padding and therefore share
@@ -74,13 +76,14 @@ while True:
         # needed by the next consumer with blur enabled.
         allocations = None
         last_frame = initial_buffers['frame']
-        for sigma in (10, 0, 10, 0, 10, 0, 10):
+        for index, sigma in enumerate((10, 0, 10, 0, 10, 0, 10)):
             request = {'op': 'apply', 'profile': {'base_preset': 'lens', 'overrides': {
                 'blur_sigma': sigma, 'outer_refraction_amount': 95 if sigma == 0 else 50,
                 'inner_refraction_amount': 0, 'aberration_amount': 0, 'edge_bleed_opacity': 0}}}
             assert json.loads(ctl('hyprliquid:control', json.dumps(request)))['ok']
             wait(lambda: buffers()['frame'] > last_frame)
             current = buffers()
+            (build / f'scene-zero-blur-{index}.json').write_text(json.dumps(current, indent=2))
             assert all(w['padding'] == 97 for w in current['windows'])
             if allocations is None:
                 allocations = current['allocations']

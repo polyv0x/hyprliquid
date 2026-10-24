@@ -36,7 +36,7 @@ uint64_t size(const SP<Render::IFramebuffer>& fb) {
 }
 uint64_t size(const CRenderBuffers::SSamples& samples) { return size(samples.sharp) + size(samples.blurred) + size(samples.halfSharp); }
 uint64_t size(const CRenderBuffers::SBlurScratch& scratch) {
-    uint64_t result = size(scratch.temporary);
+    uint64_t result = size(scratch.temporary) + size(scratch.reduction);
     for (const auto& fb : scratch.pyramid) result += size(fb);
     return result;
 }
@@ -60,30 +60,35 @@ CRenderBuffers::CLease::~CLease() {
     m_pool.scheduleCleanup();
 }
 
-CRenderBuffers::CLease CRenderBuffers::acquire(int width, int height, const SP<Render::IFramebuffer>& source) {
+CRenderBuffers::CLease CRenderBuffers::acquire(int width, int height, const SP<Render::IFramebuffer>& source,
+                                             const std::string& owner, const std::vector<uint64_t>& contentKey) {
     const auto color = source->imageDescription();
     const SKey key{width, height, source->m_drmFormat, color ? color->id() : 0,
                    eglGetCurrentDisplay(), eglGetCurrentContext()};
-    for (auto& samples : m_pool) {
-        if (samples.use_count() == 1 && samples->key == key) {
-            samples->used = Clock::now();
-            samples->sequence = ++m_sequence;
-            ++m_hits;
-            return CLease(*this, samples);
-        }
-    }
-    auto samples = std::make_shared<SSamples>();
+    auto slot = std::ranges::find_if(m_pool, [&](const auto& entry) {
+        return entry.use_count() == 1 && entry->key == key && entry->cacheOwner == owner;
+    });
+    // Keep transient samples available for base-scene rebuilds. Promoting the
+    // last shared pair to a named cache would allocate on the next invalidation.
+    if (slot == m_pool.end()) {
+        auto samples = std::make_shared<SSamples>();
+        samples->id = ++m_sequence;
+        m_pool.push_back(std::move(samples));
+        slot = std::prev(m_pool.end());
+        ++m_misses;
+    } else ++m_hits;
+    auto& samples = *slot;
+    samples->contentValid = !owner.empty() && samples->contentValid && samples->cacheOwner == owner && samples->contentKey == contentKey;
     samples->key = key;
+    samples->cacheOwner = owner;
+    samples->contentKey = contentKey;
     samples->used = Clock::now();
     samples->sequence = ++m_sequence;
-    samples->id = samples->sequence;
-    ++m_misses;
-    m_pool.push_back(samples);
-    return CLease(*this, std::move(samples));
+    return CLease(*this, samples);
 }
 
 CRenderBuffers::CLease CRenderBuffers::acquireBackdrop(int width, int height, const SP<Render::IFramebuffer>& source,
-                                                     const std::string& owner, const std::vector<uint64_t>& contentKey) {
+                                                     const std::string& owner, const std::vector<uint64_t>& contentKey, bool transientOnBypass) {
     const auto color = source->imageDescription();
     const SKey key{width, height, source->m_drmFormat, color ? color->id() : 0,
                    eglGetCurrentDisplay(), eglGetCurrentContext()};
@@ -105,6 +110,7 @@ CRenderBuffers::CLease CRenderBuffers::acquireBackdrop(int width, int height, co
         (slot != m_backdropCache.end() && (slot->use_count() != 1 || (*slot)->key.context != key.context ||
                                          (*slot)->key.display != key.display))) {
         ++m_backdropBypasses;
+        if (!transientOnBypass) return CLease(*this, nullptr);
         return acquire(width, height, source);
     }
     if (slot == m_backdropCache.end()) {
@@ -132,6 +138,16 @@ CRenderBuffers::CLease CRenderBuffers::acquireBackdrop(int width, int height, co
     samples->used = Clock::now();
     samples->sequence = ++m_sequence;
     return CLease(*this, samples);
+}
+
+void CRenderBuffers::discardBackdrop(const std::string& owner) {
+    const auto slot = std::ranges::find_if(m_backdropCache, [&](const auto& entry) { return entry->cacheOwner == owner; });
+    if (slot == m_backdropCache.end()) return;
+    (*slot)->contentValid = false;
+    if (slot->use_count() != 1) return;
+    SBindings restore;
+    m_backdropCache.erase(slot);
+    ++m_backdropEvictions;
 }
 
 CRenderBuffers::CBlurLease::CBlurLease(CRenderBuffers& pool, std::shared_ptr<SBlurScratch> scratch)

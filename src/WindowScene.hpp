@@ -2,6 +2,7 @@
 
 #include <hyprland/src/desktop/DesktopTypes.hpp>
 #include <hyprland/src/render/Framebuffer.hpp>
+#include <hyprutils/math/Region.hpp>
 #include <memory>
 #include <vector>
 
@@ -17,7 +18,13 @@ struct SWindowScene {
     bool local = false;
     bool failed = false;
     bool cacheBackground = false;
+    bool cacheBase = false;
+    bool cacheInputs = false;
+    uint64_t inputSerial = 0, previousInputSerial = 0;
     std::vector<uint64_t> backgroundKey;
+    std::vector<uint64_t> inputKey;
+    struct SDamage { PHLWINDOWREF window; CRegion region; };
+    std::vector<SDamage> damage;
     struct SCache { bool valid = false; };
     std::shared_ptr<SCache> cache;
 };
@@ -33,5 +40,6 @@ std::shared_ptr<SWindowScene> queuedFor(PHLWINDOW window);
 bool buildingBase();
 bool skipDecoration(PHLWINDOW window);
 void invalidateBackground(PHLMONITOR monitor);
+void damageWindow(PHLWINDOW window, const CRegion& globalDamage);
 void invalidateAll();
 }

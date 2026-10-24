@@ -115,6 +115,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
             return text;
         }});
     listener = Event::bus()->m_events.render.stage.listen([](eRenderStage stage) {
+        // Cursor visibility is asynchronous and can change between identical
+        // scene captures. Exclude it before this frame's passes are queued.
+        if (stage == RENDER_PRE && !pending.empty()) renderer->setCursorHidden(true);
         if (stage == RENDER_BEGIN) begun = std::chrono::steady_clock::now();
         if (stage == RENDER_POST) {
             ++frames;

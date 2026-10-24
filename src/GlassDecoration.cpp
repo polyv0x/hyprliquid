@@ -279,7 +279,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
                                  const std::shared_ptr<SWindowScene>& scene, bool sceneBase) {
     bool completed = false;
     Hyprutils::Utils::CScopeGuard result([&] {
-        if (scene && scene->local && !completed) scene->failed = true;
+        if (scene && (scene->local || scene->cacheBase || scene->cacheInputs) && !completed) scene->failed = true;
     });
     auto& shaderManager = g_pGlobalState->shaderManager;
     shaderManager.initializeIfNeeded();
@@ -371,19 +371,46 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     // auxiliary scene and snapshots consume their samples completely here.
     // All blits/draws use the same GL context and are ordered before the next
     // lease can overwrite them; no CPU/GPU wait or cross-context reuse is needed.
-    const bool cacheBackground = sceneBase && !liquid && scene && scene->cacheBackground;
+    const bool cacheBackground = sceneBase && !liquid && scene && scene->cacheBackground && !scene->cacheBase;
+    const bool cacheInputs = !sceneBase && !liquid && scene && scene->cacheInputs && scene->ready && !scene->failed;
+    const auto cacheOwner = std::format("monitor:{}:window:{}", monitor->m_id, reinterpret_cast<uintptr_t>(window.get()));
     auto samples = cacheBackground ? g_pGlobalState->renderBuffers.acquireBackdrop(width, height, backdrop,
-        std::format("monitor:{}:window:{}", monitor->m_id, reinterpret_cast<uintptr_t>(window.get())), scene->backgroundKey) :
-        g_pGlobalState->renderBuffers.acquire(width, height, backdrop);
+        cacheOwner, scene->backgroundKey) : g_pGlobalState->renderBuffers.acquire(width, height, backdrop,
+            cacheInputs ? cacheOwner : std::string{}, cacheInputs ? scene->inputKey : std::vector<uint64_t>{});
+    // Damage belongs to this scene update. A pane that missed the preceding
+    // update (for example during a popup or fallback) must rebuild its input.
+    if (cacheInputs && samples->sceneSerial != scene->previousInputSerial) samples->contentValid = false;
+    CRegion inputDamage;
+    if (cacheInputs && samples->contentValid) {
+        for (const auto& change : scene->damage) {
+            if (change.window == window) continue;
+            change.region.forEachRect([&](const auto& r) {
+                CBox box(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
+                box.transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y);
+                box = box.intersection(CBox{{}, source->m_size});
+                if (box.empty()) return;
+                const double left = std::clamp(box.x <= 0 ? 0 : box.x - geometry->x0, 0.0, double(width));
+                const double top = std::clamp(box.y <= 0 ? 0 : box.y - geometry->y0, 0.0, double(height));
+                const double right = std::clamp(box.x + box.w >= source->m_size.x ? width : box.x + box.w - geometry->x0, 0.0, double(width));
+                const double bottom = std::clamp(box.y + box.h >= source->m_size.y ? height : box.y + box.h - geometry->y0, 0.0, double(height));
+                if (right > left && bottom > top) inputDamage.add(CBox{left, top, right - left, bottom - top});
+            });
+        }
+    }
+    const bool partialUpdate = samples->contentValid && !inputDamage.empty();
+    if (partialUpdate) samples->contentValid = false;
     Vector2D paddingRatio = samples->paddingRatio;
     if (!samples->contentValid) {
         if (!GlassRenderer::sampleBackground(samples->sharp, liquid ? source : backdrop, transformBox, paddingRatio,
                                           padding, liquid ? nullptr : neighbours, scene ? scene->background : nullptr,
-                                          separateNeighbors ? 1.0f : material.neighbor_contribution))
+                                          separateNeighbors ? 1.0f : material.neighbor_contribution,
+                                          partialUpdate ? &inputDamage : nullptr))
             return;
         ++m_captures;
+        if (partialUpdate) ++m_partialCaptures;
         samples->sharp->setImageDescription(backdrop->imageDescription());
-    } else ++m_backdropCacheReuses;
+    } else if (cacheInputs) ++m_windowBackdropReuses;
+    else ++m_backdropCacheReuses;
     GlassRenderer::SNeighborBackdrop composition{
         scene ? scene->background : nullptr, nullptr, {geometry->x0, geometry->y0}, geometry->owner, underlayShapes,
         nullptr, neighbours};
@@ -406,11 +433,15 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     if (samples->contentValid) {
         if (!samples->hasBlur) blurred.reset();
     } else {
+        // Warm the retained-output scratch path on the first capture too,
+        // avoiding a new allocation when the first small update arrives.
+        if (cacheInputs && !partialUpdate) inputDamage = CRegion(CBox{0, 0, width, height});
         if (!GlassRenderer::blurBackground(samples->sharp, blurred, blurSigma * effectScale, source, nullptr,
-                                       liquid ? samples->halfSharp : nullptr))
+                                       liquid ? samples->halfSharp : nullptr, cacheInputs ? &inputDamage : nullptr))
             return;
         if (blurred) {
             ++m_blurs;
+            if (partialUpdate) ++m_partialBlurs;
             samples->blurred = blurred;
             blurred->setImageDescription(backdrop->imageDescription());
         }
@@ -419,8 +450,8 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
         samples->contentValid = !samples->cacheOwner.empty();
     }
     const auto owner = std::format("pool:{}", samples->id);
-    g_pGlobalState->renderBuffers.identify(samples->sharp, samples->cacheOwner.empty() ? "window-sharp" : "window-base-sharp", owner);
-    g_pGlobalState->renderBuffers.identify(samples->blurred, samples->cacheOwner.empty() ? "window-blurred" : "window-base-blurred", owner);
+    g_pGlobalState->renderBuffers.identify(samples->sharp, cacheBackground ? "window-base-sharp" : "window-sharp", owner);
+    g_pGlobalState->renderBuffers.identify(samples->blurred, cacheBackground ? "window-base-blurred" : "window-blurred", owner);
     if (liquid) g_pGlobalState->renderBuffers.identify(samples->halfSharp, "window-material-backdrop", owner);
 
     float monitorScale  = monitor->m_scale;
@@ -440,12 +471,31 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     if (const auto workspace = window->m_workspace; workspace && !window->m_pinned)
         glassAlpha *= workspace->m_alpha->value();
 
+    std::optional<CRegion> visible;
+    const auto surface = window->wlSurface();
+    const auto resource = window->resource();
+    if (!sceneBase && !liquid && resource && surface && window->m_transformers.empty() &&
+        resource->m_subsurfaces.empty() && resource->m_current.size == window->getReportedSize() &&
+        window->effectiveAlpha() == 1.0f && surface->m_alphaModifier == 1.0f && surface->m_overallOpacity == 1.0f &&
+        surface->m_visibleRegion.empty() && !window->positionAnimation()->isBeingAnimated() &&
+        !window->sizeAnimation()->isBeingAnimated() && g_pHyprRenderer->m_renderData.projectionType == Render::RPT_MONITOR) {
+        auto opaque = resource->m_current.opaque.copy().intersect(CBox{{}, resource->m_current.size});
+        if (!opaque.empty() && resource->m_current.size.x > 0 && resource->m_current.size.y > 0) {
+            opaque.scale(windowBox.size() / resource->m_current.size).translate(windowBox.pos()).expand(-std::ceil(cornerRadius + 2));
+            if (!opaque.empty()) {
+                visible = CRegion(windowBox).subtract(opaque);
+                ++m_occludedDraws;
+            }
+        }
+    }
+
     auto draw = [&](const GlassRenderer::SNeighborBackdrop* neighbors = nullptr) {
         GlassRenderer::applyGlassEffect(samples->sharp, blurred, source,
                                          windowBox, transformBox, glassAlpha,
                                          cornerRadius, roundingPower, paddingRatio, material, nullptr, neighbors,
-                                         liquid ? samples->halfSharp : nullptr, !sceneBase);
+                                         liquid ? samples->halfSharp : nullptr, !sceneBase, visible ? &*visible : nullptr);
         ++m_materialDraws;
+        if (cacheInputs) samples->sceneSerial = scene->inputSerial;
         completed = true;
     };
     if (separateNeighbors) {
@@ -502,6 +552,11 @@ json_object* CGlassDecoration::diagnostics() const {
     json_object_object_add(result, "blurs", json_object_new_uint64(m_blurs));
     json_object_object_add(result, "local_cache_reuses", json_object_new_uint64(m_cacheReuses));
     json_object_object_add(result, "backdrop_cache_reuses", json_object_new_uint64(m_backdropCacheReuses));
+    json_object_object_add(result, "scene_base_cache_reuses", json_object_new_uint64(m_sceneBaseCacheReuses));
+    json_object_object_add(result, "window_backdrop_reuses", json_object_new_uint64(m_windowBackdropReuses));
+    json_object_object_add(result, "partial_captures", json_object_new_uint64(m_partialCaptures));
+    json_object_object_add(result, "partial_blurs", json_object_new_uint64(m_partialBlurs));
+    json_object_object_add(result, "occluded_draws", json_object_new_uint64(m_occludedDraws));
     json_object_object_add(result, "animate_display_angle", json_object_new_boolean(runtimeAnimateDisplayAngle()));
     json_object_object_add(result, "animate_hover_angle", json_object_new_boolean(runtimeAnimateHoverAngle()));
     json_object_object_add(result, "rendered_display_angle_degrees", json_object_new_double(m_renderedDisplayAngle));

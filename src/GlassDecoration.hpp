@@ -35,6 +35,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
     [[nodiscard]] bool      needsNeighborScene() const;
     void                    appendCacheKey(std::vector<uint64_t>& key) const;
     void                    reusedLocalBackdrop() { ++m_cacheReuses; }
+    void                    reusedSceneBase() { ++m_sceneBaseCacheReuses; }
     [[nodiscard]] json_object* diagnostics() const;
     void                    onFullscreenStateChanged();
 
@@ -64,6 +65,9 @@ class CGlassDecoration : public IHyprWindowDecoration {
     std::optional<CBox> m_lastDamageBox;
     uint64_t m_materialDraws = 0, m_captures = 0, m_blurs = 0, m_cacheReuses = 0;
     uint64_t m_backdropCacheReuses = 0;
+    uint64_t m_sceneBaseCacheReuses = 0;
+    uint64_t m_windowBackdropReuses = 0;
+    uint64_t m_partialCaptures = 0, m_partialBlurs = 0, m_occludedDraws = 0;
 
     void updateNoBlurProp(bool glassEnabled);
     void withdrawNoBlur();

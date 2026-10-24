@@ -40,6 +40,7 @@ class CRenderBuffers {
         Clock::time_point used;
         uint64_t sequence = 0;
         uint64_t id = 0;
+        uint64_t sceneSerial = 0;
         std::string cacheOwner;
         std::vector<uint64_t> contentKey;
         Vector2D paddingRatio;
@@ -53,6 +54,7 @@ class CRenderBuffers {
         CLease(CLease&&) = delete;
         ~CLease();
         SSamples* operator->() const { return m_samples.get(); }
+        explicit operator bool() const { return bool(m_samples); }
       private:
         CRenderBuffers& m_pool;
         std::shared_ptr<SSamples> m_samples;
@@ -63,6 +65,7 @@ class CRenderBuffers {
         size_t levels;
         std::vector<SP<Render::IFramebuffer>> pyramid;
         SP<Render::IFramebuffer> temporary;
+        SP<Render::IFramebuffer> reduction;
         Clock::time_point used;
         uint64_t sequence = 0;
     };
@@ -79,9 +82,11 @@ class CRenderBuffers {
     };
 
     ~CRenderBuffers();
-    CLease acquire(int width, int height, const SP<Render::IFramebuffer>& source);
+    CLease acquire(int width, int height, const SP<Render::IFramebuffer>& source,
+                   const std::string& owner = {}, const std::vector<uint64_t>& contentKey = {});
     CLease acquireBackdrop(int width, int height, const SP<Render::IFramebuffer>& source,
-                           const std::string& owner, const std::vector<uint64_t>& contentKey);
+                           const std::string& owner, const std::vector<uint64_t>& contentKey, bool transientOnBypass = true);
+    void discardBackdrop(const std::string& owner);
     CBlurLease acquireBlur(int width, int height, size_t levels, const SP<Render::IFramebuffer>& source);
     bool prepare(SP<Render::IFramebuffer>& fb, int width, int height, DRMFormat format,
                  const std::string& role, const std::string& owner = "shared");

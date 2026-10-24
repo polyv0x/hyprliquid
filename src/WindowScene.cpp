@@ -6,9 +6,11 @@
 
 #include <GLES3/gl32.h>
 #include <hyprland/src/desktop/state/FocusState.hpp>
+#include <hyprland/src/desktop/state/FadingOutState.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
 #include <hyprland/src/desktop/view/LayerSurface.hpp>
 #include <hyprland/src/managers/SessionLockManager.hpp>
+#include <hyprland/src/protocols/core/Compositor.hpp>
 #include <hyprland/src/render/pass/Pass.hpp>
 #include <hyprutils/utils/ScopeGuard.hpp>
 #include <algorithm>
@@ -27,6 +29,7 @@ RenderWindow renderWindow = nullptr;
 std::shared_ptr<SWindowScene> queuedScene;
 bool queuingBase = false;
 uint64_t nextBackgroundGeneration = 0;
+uint64_t nextInputSerial = 0;
 
 struct SBuffers {
     PHLMONITORREF monitor;
@@ -35,9 +38,12 @@ struct SBuffers {
     std::weak_ptr<SWindowScene> scene;
     std::optional<CRenderBuffers::Clock::time_point> retired;
     uint64_t frame = 0;
+    uint64_t inputSerial = 0;
     // Retired/recreated scenes must not match inputs retained by the backdrop cache.
     uint64_t backgroundGeneration = ++nextBackgroundGeneration;
     std::vector<uint64_t> key;
+    std::vector<uint64_t> inputKey;
+    std::vector<SWindowScene::SDamage> damage;
     std::shared_ptr<SWindowScene::SCache> cache;
 };
 std::unordered_map<MONITORID, SBuffers> buffers;
@@ -57,7 +63,9 @@ class CWindowScenePassElement : public IPassElement {
   public:
     explicit CWindowScenePassElement(std::shared_ptr<SWindowScene> scene) : m_scene(std::move(scene)) {}
     Render::CRenderPass pass;
+    Render::CRenderPass basePass;
     bool reuse = false;
+    bool reuseBackground = false, reuseScene = false;
 
     std::vector<UP<IPassElement>> draw() override {
         auto& renderer = *g_pHyprRenderer;
@@ -86,24 +94,61 @@ class CWindowScenePassElement : public IPassElement {
             g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, scissor);
         });
 
+        const auto copy = [&](const SP<Render::IFramebuffer>& from, const SP<Render::IFramebuffer>& to) {
+            g_pGlobalState->renderBuffers.touch(from);
+            g_pGlobalState->renderBuffers.touch(to);
+            g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbId(from));
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbId(to));
+            glBlitFramebuffer(0, 0, source->m_size.x, source->m_size.y,
+                              0, 0, source->m_size.x, source->m_size.y, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        };
         if (!reuse) for (auto* framebuffer : {&m_scene->background, &m_scene->image}) {
             auto& fb = *framebuffer;
             if (!g_pGlobalState->renderBuffers.prepare(fb, source->m_size.x, source->m_size.y, source->m_drmFormat,
                     fb == m_scene->background ? "scene-background" : "scene-windows", std::format("monitor:{}", monitor->m_id)))
                 return {};
             fb->setImageDescription(source->imageDescription());
-            g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, fbId(source));
-            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbId(fb));
-            glBlitFramebuffer(0, 0, source->m_size.x, source->m_size.y,
-                              0, 0, source->m_size.x, source->m_size.y, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            if (fb == m_scene->background && !reuseBackground) copy(source, fb);
         }
 
-        if (!reuse) {
-            renderer.bindFB(m_scene->image);
+        if (!reuse && !reuseScene) {
             renderer.m_bBlockSurfaceFeedback = true;
             renderer.m_bRenderingSnapshot = true;
             renderer.m_renderData.noSimplify = true;
+            bool baseCopied = false;
+            if (m_scene->cacheBase) {
+                auto cached = g_pGlobalState->renderBuffers.acquireBackdrop(source->m_size.x, source->m_size.y, source,
+                    std::format("monitor:{}:base", monitor->m_id), m_scene->backgroundKey, false);
+                if (cached) {
+                    const bool hit = cached->contentValid;
+                    if (hit || g_pGlobalState->renderBuffers.prepare(cached->sharp, source->m_size.x, source->m_size.y,
+                            source->m_drmFormat, "scene-base", std::format("monitor:{}", monitor->m_id))) {
+                        if (!hit) {
+                            cached->sharp->setImageDescription(source->imageDescription());
+                            copy(m_scene->background, cached->sharp);
+                            renderer.bindFB(cached->sharp);
+                            basePass.render(CRegion(CBox{{}, monitor->m_transformedSize}));
+                            cached->contentValid = !m_scene->failed;
+                        } else for (const auto& ref : m_scene->windows)
+                            if (auto* decoration = decorationFor(ref.lock())) decoration->reusedSceneBase();
+                        copy(cached->sharp, m_scene->image);
+                        baseCopied = true;
+                    }
+                }
+            }
+            if (!baseCopied) {
+                copy(m_scene->background, m_scene->image);
+                if (m_scene->cacheBase) {
+                    // If the shared image cannot fit, retain the smaller
+                    // per-window input caches used by the fallback path.
+                    m_scene->cacheBase = false;
+                    CScopeGuard restoreBase([&] { m_scene->cacheBase = true; });
+                    renderer.bindFB(m_scene->image);
+                    basePass.render(CRegion(CBox{{}, monitor->m_transformedSize}));
+                }
+            }
+            renderer.bindFB(m_scene->image);
             pass.render(CRegion(CBox{{}, monitor->m_transformedSize}));
             if (m_scene->cache) m_scene->cache->valid = !m_scene->failed;
         }
@@ -159,6 +204,7 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
     bool local = !workspace->m_isSpecialWorkspace && !monitor->m_activeSpecialWorkspace &&
         !workspace->m_renderOffset->isBeingAnimated() && workspace->m_alpha->value() == 1.0f;
     bool cacheBackground = local;
+    bool disjoint = true, legacy = true;
     std::vector<CBox> currentBoxes;
     for (const auto& window : Desktop::windowState()->windows()) {
         if (!window->m_isMapped || window->isHidden() || !renderer->shouldRenderWindow(window, monitor))
@@ -193,8 +239,13 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
         const auto box = WindowGeometry::computeWindowBox(window, monitor);
         if (!box) return nullptr;
         for (const auto& other : currentBoxes)
-            if (!box->intersection(other).empty()) local = false;
+            if (!box->intersection(other).empty()) { local = false; disjoint = false; }
         currentBoxes.push_back(*box);
+        // Reordering base glass below clients requires their main surfaces to
+        // stay inside their panes. Subsurface trees keep native interleaving.
+        const auto surface = window->resource();
+        if (!surface || !surface->m_subsurfaces.empty() || surface->m_current.size != window->getReportedSize())
+            legacy = false;
         // Animations/snapshots and real underlays keep native painting order.
         if (window->positionAnimation()->isBeingAnimated() || window->sizeAnimation()->isBeingAnimated() ||
             window->alphaTotalWithout(Desktop::View::WINDOW_ALPHA_ACTIVE) != 1.0f) {
@@ -204,7 +255,8 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
         if (auto* decoration = decorationFor(window); decoration && decoration->usesGlass()) {
             hasGlass = true;
             if (decoration->needsNeighborScene()) local = false;
-        } else local = false; // Preserve native shadows and other materials' ordering.
+            if (decoration->usesLiquidGlass()) legacy = false;
+        } else { local = false; legacy = false; } // Preserve native shadows and other materials' ordering.
     }
     // Match the compositor's planes while preserving each plane's z-order.
     // A float may precede a tile in WindowState after either is raised/lowered;
@@ -215,6 +267,17 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
     });
     scene->local = local;
     scene->cacheBackground = cacheBackground && g_pGlobalState->damageSurfaceHook;
+    scene->cacheBase = scene->cacheBackground && disjoint && legacy;
+    scene->cacheInputs = scene->cacheBase && Desktop::fadingOutState()->fadeouts().empty();
+    if (scene->cacheInputs) for (const auto& ref : scene->windows) {
+        const auto window = ref.lock();
+        if (window->popupsCount() || window->m_group) scene->cacheInputs = false;
+        for (const auto& decoration : window->m_windowDecorations) {
+            const auto type = decoration->getDecorationType();
+            if (type != DECORATION_SHADOW && type != DECORATION_BORDER && type != DECORATION_INNER_GLOW &&
+                decoration.get() != decorationFor(window)) scene->cacheInputs = false;
+        }
+    }
     return hasGlass && (local || scene->windows.size() > 1) ? scene : nullptr;
 }
 
@@ -257,6 +320,52 @@ std::vector<uint64_t> localKey(const SWindowScene& scene, PHLMONITOR monitor, PH
     return key;
 }
 
+std::vector<uint64_t> inputKey(const SWindowScene& scene) {
+    auto key = scene.backgroundKey;
+    const auto number = [&](double value) { key.push_back(std::bit_cast<uint64_t>(value)); };
+    for (const auto& ref : scene.windows) {
+        const auto window = ref.lock();
+        number(window->effectiveAlpha());
+        number(window->getRealBorderSize());
+        key.push_back(window->m_ruleApplicator->opaque().valueOrDefault());
+        key.push_back(window->m_ruleApplicator->nearestNeighbor().valueOrDefault());
+        key.push_back(window->m_ruleApplicator->noDim().valueOrDefault());
+        key.push_back(window->m_ruleApplicator->dimAround().valueOrDefault());
+        for (const auto* value : {window->m_dimPercent.get(), window->m_notRespondingTint.get(),
+                window->m_borderFadeAnimationProgress.get(), window->m_borderAngleAnimationProgress.get(),
+                window->m_shadowFadeAnimationProgress.get(), window->m_shadowAngleAnimationProgress.get(),
+                window->m_glowFadeAnimationProgress.get(), window->m_glowAngleAnimationProgress.get()})
+            number(value ? value->value() : 0);
+        for (const auto* gradient : {&window->m_realBorderColor, &window->m_realBorderColorPrevious,
+                &window->m_realShadowColor, &window->m_realShadowColorPrevious,
+                &window->m_realGlowColor, &window->m_realGlowColorPrevious}) {
+            number(gradient->m_angle);
+            key.push_back(gradient->m_colors.size());
+            for (const auto& color : gradient->m_colors) {
+                number(color.r); number(color.g); number(color.b); number(color.a);
+            }
+        }
+        const auto surface = window->wlSurface();
+        number(surface->m_alphaModifier); number(surface->m_overallOpacity);
+        surface->m_visibleRegion.forEachRect([&](const auto& r) {
+            number(r.x1); number(r.y1); number(r.x2); number(r.y2);
+        });
+        key.push_back(UINT64_MAX);
+        const auto resource = window->resource();
+        const auto& state = resource->m_current;
+        key.push_back(state.transform); key.push_back(state.scale);
+        number(state.offset.x); number(state.offset.y);
+        number(state.bufferSize.x); number(state.bufferSize.y);
+        key.push_back(state.viewport.hasSource); key.push_back(state.viewport.hasDestination);
+        number(state.viewport.source.x); number(state.viewport.source.y);
+        number(state.viewport.source.w); number(state.viewport.source.h);
+        number(state.viewport.destination.x); number(state.viewport.destination.y);
+        const auto texture = state.texture;
+        key.push_back(texture && texture->m_imageDescription ? texture->m_imageDescription->id() : 0);
+    }
+    return key;
+}
+
 void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWORKSPACE workspace, const Time::steady_tp& now) {
     auto original = reinterpret_cast<RenderWorkspace>(workspaceHook->m_original);
     auto scene = collectScene(renderer, monitor, workspace);
@@ -265,12 +374,16 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
     for (auto& [_, storage] : buffers)
         if (!storage.monitor && !storage.retired) storage.retired = CRenderBuffers::Clock::now();
     if (!scene) {
+        if (monitor) if (const auto it = buffers.find(monitor->m_id); it != buffers.end())
+            it->second.inputSerial = ++nextInputSerial;
         if (hasRetired()) g_pGlobalState->renderBuffers.scheduleCleanup();
         original(renderer, monitor, workspace, now);
         return;
     }
 
     auto& storage = buffers[monitor->m_id];
+    scene->previousInputSerial = storage.inputSerial;
+    scene->inputSerial = storage.inputSerial = ++nextInputSerial;
     storage.monitor = monitor;
     storage.retired.reset();
     storage.frame = g_pGlobalState->renderBuffers.frame();
@@ -309,21 +422,33 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
         for (const auto& window : scene->windows) {
             // Only our glass plus the client's main surfaces. Popups, shadows
             // and other plugins' decorations belong to the normal scene pass.
-            if (auto* decoration = decorationFor(window.lock()))
-                decoration->draw(monitor, 1.0f);
+            if (auto* decoration = decorationFor(window.lock())) {
+                if (scene->cacheBase) {
+                    auto baseRedirect = renderer->redirectPass(&capture->basePass);
+                    decoration->draw(monitor, 1.0f);
+                } else decoration->draw(monitor, 1.0f);
+            }
             if (!scene->local)
                 renderWindow(renderer, window.lock(), monitor, now, false, Render::RENDER_PASS_MAIN, false, false);
         }
     }
     auto key = scene->local || scene->cacheBackground ? localKey(*scene, monitor, workspace) : std::vector<uint64_t>{};
     if (scene->cacheBackground) scene->backgroundKey = key;
+    if (scene->cacheInputs) scene->inputKey = inputKey(*scene);
+    scene->damage = std::move(storage.damage);
+    storage.damage.clear();
     const auto source = renderer->m_renderData.currentFB;
     capture->reuse = scene->local && g_pGlobalState->damageSurfaceHook && storage.cache->valid &&
         key == storage.key && source && storage.image->isAllocated() &&
         storage.image->m_size == source->m_size && storage.image->m_drmFormat == source->m_drmFormat;
     const bool reuse = capture->reuse;
-    if (!reuse) storage.cache->valid = false;
+    capture->reuseBackground = scene->cacheBase && storage.cache->valid && key == storage.key && source &&
+        storage.background->isAllocated() && storage.background->m_size == source->m_size &&
+        storage.background->m_drmFormat == source->m_drmFormat;
+    capture->reuseScene = capture->reuseBackground && scene->cacheInputs && scene->inputKey == storage.inputKey && scene->damage.empty();
+    if (!reuse && !capture->reuseScene) storage.cache->valid = false;
     storage.key = std::move(key);
+    storage.inputKey = scene->inputKey;
     renderer->addPassElement(std::move(capture));
 
     // The auxiliary scene reads the wallpaper across the monitor. Repaint it
@@ -382,6 +507,21 @@ void invalidateBackground(PHLMONITOR monitor) {
     }
 }
 
+void damageWindow(PHLWINDOW window, const CRegion& globalDamage) {
+    for (auto& [_, storage] : buffers) {
+        const auto monitor = storage.monitor.lock();
+        if (!monitor || !g_pHyprRenderer->shouldRenderWindow(window, monitor)) continue;
+        auto damage = globalDamage.copy().translate(-monitor->m_position).scale(monitor->m_scale).expand(1);
+        const auto box = WindowGeometry::computeWindowBox(window, monitor);
+        if (!box) continue;
+        damage.intersect(*box);
+        if (damage.empty()) continue;
+        auto found = std::ranges::find_if(storage.damage, [&](const auto& entry) { return entry.window == window; });
+        if (found == storage.damage.end()) storage.damage.push_back({window, std::move(damage)});
+        else found->region.add(damage);
+    }
+}
+
 void invalidateAll() {
     for (auto& [_, storage] : buffers) {
         storage.backgroundGeneration = ++nextBackgroundGeneration;
@@ -392,7 +532,9 @@ void invalidateAll() {
 void collectUnused() {
     const auto now = CRenderBuffers::Clock::now();
     std::erase_if(buffers, [&](const auto& item) {
-        return !item.second.monitor || (item.second.retired && now - *item.second.retired >= std::chrono::seconds(2));
+        const bool expired = !item.second.monitor || (item.second.retired && now - *item.second.retired >= std::chrono::seconds(2));
+        if (expired) g_pGlobalState->renderBuffers.discardBackdrop(std::format("monitor:{}:base", item.first));
+        return expired;
     });
 }
 
@@ -413,6 +555,9 @@ void finishFrame(MONITORID monitor, uint64_t frame) {
     // bypass renderWorkspaceWindows entirely. Other monitors keep their cache.
     if (auto it = buffers.find(monitor); it != buffers.end() && it->second.frame != frame && !it->second.retired) {
         if (it->second.cache) it->second.cache->valid = false;
+        // Hidden clients can commit without monitor damage. Returning to this
+        // scene must not reuse inputs from before the skipped workspace pass.
+        it->second.inputSerial = ++nextInputSerial;
         it->second.retired = CRenderBuffers::Clock::now();
         g_pGlobalState->renderBuffers.scheduleCleanup();
     }

@@ -8,6 +8,7 @@
 #include <hyprland/src/render/Framebuffer.hpp>
 #include <hyprutils/math/Box.hpp>
 #include <hyprutils/math/Vector2D.hpp>
+#include <hyprutils/math/Region.hpp>
 
 // Shared GL rendering pipeline used by both window decorations and layer surfaces.
 // Callers own their sample framebuffers; these functions operate on passed-in state.
@@ -57,13 +58,14 @@ struct SNeighborBackdrop {
 bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IFramebuffer> sourceFramebuffer,
                        CBox box, Vector2D& outPaddingRatio, int padding = SAMPLE_PADDING_PX,
                        SP<Render::IFramebuffer> neighbours = nullptr,
-                       SP<Render::IFramebuffer> sceneBackground = nullptr, float neighborContribution = 1.0f);
+                       SP<Render::IFramebuffer> sceneBackground = nullptr, float neighborContribution = 1.0f,
+                       const CRegion* damage = nullptr);
 
 // On every exit, re-bind callerFramebuffer and restore the entry viewport.
 // A false result must not be drawn or marked as a valid cached blur.
 [[nodiscard]] bool blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFramebuffer>& blurredFramebuffer, float sigma,
                     SP<Render::IFramebuffer> callerFramebuffer, const SNeighborBackdrop* clean = nullptr,
-                    SP<Render::IFramebuffer> materialBackdrop = nullptr);
+                    SP<Render::IFramebuffer> materialBackdrop = nullptr, const CRegion* damage = nullptr);
 
 [[nodiscard]] bool prepareMaterialBackdrop(SP<Render::IFramebuffer> sample, SP<Render::IFramebuffer>& halfSharp,
                     SP<Render::IFramebuffer> caller, const SNeighborBackdrop* composition = nullptr, float contribution = 1.0f);
@@ -78,6 +80,7 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
                        const Vector2D& paddingRatio, const SMaterial& material,
                        const SMaskInfo* mask = nullptr,
                        const SNeighborBackdrop* neighbors = nullptr,
-                       SP<Render::IFramebuffer> materialBackdrop = nullptr, bool renderShadow = true);
+                       SP<Render::IFramebuffer> materialBackdrop = nullptr, bool renderShadow = true,
+                       const CRegion* visible = nullptr);
 
 } // namespace GlassRenderer
