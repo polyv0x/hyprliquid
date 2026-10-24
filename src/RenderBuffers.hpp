@@ -23,7 +23,7 @@ class CRenderBuffers {
     static constexpr auto IDLE_TIMEOUT = std::chrono::seconds(5);
     static constexpr uint64_t SCRATCH_RETAINED_BYTES = 32ULL * 1024 * 1024;
     static constexpr size_t SCRATCH_RETAINED_SETS = 16;
-    static constexpr uint64_t BACKDROP_RETAINED_BYTES = 64ULL * 1024 * 1024;
+    static constexpr uint64_t BACKDROP_RETAINED_BYTES = 128ULL * 1024 * 1024;
     static constexpr size_t BACKDROP_RETAINED_PAIRS = 8;
 
     struct SKey {
