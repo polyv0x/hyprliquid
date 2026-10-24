@@ -16,6 +16,8 @@ struct SWindowScene {
     // native-format backdrop. Geometry is still available for shadow occlusion.
     bool local = false;
     bool failed = false;
+    bool cacheBackground = false;
+    std::vector<uint64_t> backgroundKey;
     struct SCache { bool valid = false; };
     std::shared_ptr<SCache> cache;
 };

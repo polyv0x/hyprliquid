@@ -82,6 +82,58 @@ CRenderBuffers::CLease CRenderBuffers::acquire(int width, int height, const SP<R
     return CLease(*this, std::move(samples));
 }
 
+CRenderBuffers::CLease CRenderBuffers::acquireBackdrop(int width, int height, const SP<Render::IFramebuffer>& source,
+                                                     const std::string& owner, const std::vector<uint64_t>& contentKey) {
+    const auto color = source->imageDescription();
+    const SKey key{width, height, source->m_drmFormat, color ? color->id() : 0,
+                   eglGetCurrentDisplay(), eglGetCurrentContext()};
+    // Reserve both sharp and half-size blurred storage, even at zero sigma.
+    // Admission never evicts the scratch samples needed by the live path.
+    const auto reservation = [](const SKey& key) {
+        const auto sharp = bytes(key.width, key.height, key.format);
+        const auto blurred = bytes(key.width / 2 + key.width % 2, key.height / 2 + key.height % 2, key.format);
+        if (!sharp || !blurred || sharp > BACKDROP_RETAINED_BYTES || blurred > BACKDROP_RETAINED_BYTES - sharp)
+            return BACKDROP_RETAINED_BYTES + 1;
+        return sharp + blurred;
+    };
+    auto slot = std::ranges::find_if(m_backdropCache, [&](const auto& entry) { return entry->cacheOwner == owner; });
+    uint64_t reserved = reservation(key);
+    for (auto it = m_backdropCache.begin(); it != m_backdropCache.end(); ++it)
+        if (it != slot) reserved += reservation((*it)->key);
+    if (reserved > BACKDROP_RETAINED_BYTES ||
+        (slot == m_backdropCache.end() && m_backdropCache.size() >= BACKDROP_RETAINED_PAIRS) ||
+        (slot != m_backdropCache.end() && (slot->use_count() != 1 || (*slot)->key.context != key.context ||
+                                         (*slot)->key.display != key.display))) {
+        ++m_backdropBypasses;
+        return acquire(width, height, source);
+    }
+    if (slot == m_backdropCache.end()) {
+        auto samples = std::make_shared<SSamples>();
+        samples->key = key;
+        samples->cacheOwner = owner;
+        samples->id = ++m_sequence;
+        m_backdropCache.push_back(std::move(samples));
+        slot = std::prev(m_backdropCache.end());
+    }
+    auto& samples = *slot;
+    const bool hit = samples->contentValid && samples->key == key && samples->contentKey == contentKey;
+    if (samples->key != key) {
+        // Zero sigma does not resize the blur target. Drop storage from an old
+        // size/format so it cannot exceed the new pair's admission reservation.
+        SBindings restore;
+        samples->sharp.reset();
+        samples->blurred.reset();
+    }
+    if (hit) ++m_backdropHits;
+    else ++m_backdropMisses;
+    samples->contentValid = hit;
+    samples->key = key;
+    samples->contentKey = contentKey;
+    samples->used = Clock::now();
+    samples->sequence = ++m_sequence;
+    return CLease(*this, samples);
+}
+
 CRenderBuffers::CBlurLease::CBlurLease(CRenderBuffers& pool, std::shared_ptr<SBlurScratch> scratch)
     : m_pool(pool), m_scratch(std::move(scratch)) {}
 
@@ -185,7 +237,7 @@ void CRenderBuffers::release(SP<Render::IFramebuffer>& fb) {
 }
 
 void CRenderBuffers::trim(bool expired) {
-    if (m_pool.empty() && m_scratchPool.empty()) return;
+    if (m_pool.empty() && m_scratchPool.empty() && m_backdropCache.empty()) return;
     // The hit path needs no GL queries. Capture state only if something is
     // actually being deleted (glGet* can serialize some drivers).
     std::optional<SBindings> restore;
@@ -195,6 +247,12 @@ void CRenderBuffers::trim(bool expired) {
             if (entry.use_count() != 1 || now - entry->used < IDLE_TIMEOUT) return false;
             if (!restore) restore.emplace();
             ++m_evictions;
+            return true;
+        });
+        std::erase_if(m_backdropCache, [&](const auto& entry) {
+            if (entry.use_count() != 1 || now - entry->used < IDLE_TIMEOUT) return false;
+            if (!restore) restore.emplace();
+            ++m_backdropEvictions;
             return true;
         });
     }
@@ -256,7 +314,7 @@ void CRenderBuffers::scheduleCleanup() {
                 trim(true);
                 WindowScene::collectUnused();
             }
-            if (!m_pool.empty() || !m_scratchPool.empty() || WindowScene::hasRetired()) scheduleCleanup();
+            if (!m_pool.empty() || !m_scratchPool.empty() || !m_backdropCache.empty() || WindowScene::hasRetired()) scheduleCleanup();
         }, nullptr);
         g_pEventLoopManager->addTimer(m_cleanup);
     }
@@ -284,6 +342,7 @@ void CRenderBuffers::shutdown() {
         m_cleanup.reset();
     }
     m_pool.clear();
+    m_backdropCache.clear();
     m_scratchPool.clear();
     m_records.clear();
 }
@@ -355,6 +414,22 @@ json_object* CRenderBuffers::diagnostics() const {
     number(scratch, "retained_limit_bytes", SCRATCH_RETAINED_BYTES);
     number(scratch, "retained_limit_sets", SCRATCH_RETAINED_SETS);
     json_object_object_add(result, "scratch_pool", scratch);
+    auto* backdrop = json_object_new_object();
+    uint64_t backdropBytes = 0, backdropLeased = 0;
+    for (const auto& entry : m_backdropCache) {
+        backdropBytes += size(*entry);
+        if (entry.use_count() > 1) backdropLeased += size(*entry);
+    }
+    number(backdrop, "pairs", m_backdropCache.size());
+    number(backdrop, "bytes", backdropBytes);
+    number(backdrop, "leased_bytes", backdropLeased);
+    number(backdrop, "hits", m_backdropHits);
+    number(backdrop, "misses", m_backdropMisses);
+    number(backdrop, "bypasses", m_backdropBypasses);
+    number(backdrop, "evictions", m_backdropEvictions);
+    number(backdrop, "retained_limit_bytes", BACKDROP_RETAINED_BYTES);
+    number(backdrop, "retained_limit_pairs", BACKDROP_RETAINED_PAIRS);
+    json_object_object_add(result, "backdrop_cache", backdrop);
     auto* times = json_object_new_array();
     for (double ms : m_frameTimes) json_object_array_add(times, json_object_new_double(ms));
     json_object_object_add(result, "cpu_frame_ms", times);

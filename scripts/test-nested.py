@@ -161,9 +161,9 @@ def main():
                     verify_hover_angle(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), PLUGIN)
                     return
 
-                if '--gpu-only' in sys.argv or '--gpu-isolation-only' in sys.argv:
+                if '--gpu-only' in sys.argv or '--gpu-isolation-only' in sys.argv or '--legacy-gpu-only' in sys.argv:
                     verify_gpu_cache(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES,
-                                     isolation_only='--gpu-isolation-only' in sys.argv)
+                                     isolation_only='--gpu-isolation-only' in sys.argv, legacy='--legacy-gpu-only' in sys.argv)
                     return
 
                 if shutil.which('kitty') and shutil.which('grim'):

@@ -472,6 +472,11 @@ while True:
                             assert scratch['sets'] <= scratch['retained_limit_sets']
                             assert scratch['bytes'] <= scratch['retained_limit_bytes']
                             assert scratch['leased_bytes'] == 0
+                        if 'backdrop_cache' in diagnostic:
+                            cache = diagnostic['backdrop_cache']
+                            assert cache['pairs'] <= cache['retained_limit_pairs']
+                            assert cache['bytes'] <= cache['retained_limit_bytes']
+                            assert cache['leased_bytes'] == 0
                     lifecycle.append({'cycle': cycle, 'resized': diagnostic, 'drm': drm(compositor.pid)})
                     action(windows[0], 'float', 'action = "disable"')
                     control('apply', patch={'enabled': False})
@@ -480,6 +485,7 @@ while True:
                     assert not any(b['role'].startswith('scene-') for b in disabled['buffers']), disabled
                     assert disabled['window_pool']['bytes'] == 0, disabled
                     if 'scratch_pool' in disabled: assert disabled['scratch_pool']['bytes'] == 0, disabled
+                    if 'backdrop_cache' in disabled: assert disabled['backdrop_cache']['bytes'] == 0, disabled
                     lifecycle[-1]['disabled'] = disabled
                     control('apply', patch={'enabled': True})
                     time.sleep(.3)

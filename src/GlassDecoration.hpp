@@ -63,6 +63,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
     float m_outputExtent = 0.0f;
     std::optional<CBox> m_lastDamageBox;
     uint64_t m_materialDraws = 0, m_captures = 0, m_blurs = 0, m_cacheReuses = 0;
+    uint64_t m_backdropCacheReuses = 0;
 
     void updateNoBlurProp(bool glassEnabled);
     void withdrawNoBlur();

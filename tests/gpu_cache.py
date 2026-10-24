@@ -5,16 +5,22 @@ import subprocess
 import time
 
 
-def verify_gpu_cache(ctl, env, log, clients, build, wait, fixtures, isolation_only=False):
+def verify_gpu_cache(ctl, env, log, clients, build, wait, fixtures, isolation_only=False, legacy=False):
     from PIL import Image, ImageChops
 
     def control(op, **values):
         reply = json.loads(ctl('hyprliquid:control', json.dumps({'op': op, **values})))
         assert reply['ok'], reply
+        if op == 'buffers' and 'backdrop_cache' in reply['buffers']:
+            cache = reply['buffers']['backdrop_cache']
+            assert cache['pairs'] <= cache['retained_limit_pairs'] and cache['bytes'] <= cache['retained_limit_bytes'], cache
+            assert cache['leased_bytes'] == 0, cache
         return reply
 
     def counters():
-        return {w['owner']: {k: w[k] for k in ('captures', 'blurs', 'material_draws', 'local_cache_reuses')}
+        fields = ('captures', 'blurs', 'material_draws', 'local_cache_reuses')
+        if legacy: fields += ('backdrop_cache_reuses',)
+        return {w['owner']: {k: w[k] for k in fields}
                 for w in control('buffers')['buffers']['windows'] if w['enabled']}
 
     def action(window, name, fields):
@@ -53,7 +59,7 @@ def verify_gpu_cache(ctl, env, log, clients, build, wait, fixtures, isolation_on
         'animations = { enabled = false }, decoration = { active_opacity = 1, inactive_opacity = 1, '
         'dim_inactive = false }, cursor = { no_warps = true, inactive_timeout = 0.1 } })')
     ctl('plugin', 'load', str(fixtures / 'capture-test.so'))
-    control('apply', profile={'base_preset': 'frosted-liquid', 'theme': 'dark',
+    control('apply', profile={'base_preset': 'frosted-glass' if legacy else 'frosted-liquid', 'theme': 'dark',
                              'animate_display_angle': False, 'animate_hover_angle': False})
     evidence = {'raw_parity': {}}
     code = r'''
@@ -98,19 +104,30 @@ while True:
     after_image = png('local-after')
     assert ImageChops.difference(before_image, after_image).getbbox(), 'Animated client did not repaint'
     # The neighboring pane's complete body, including its filter-sensitive edge.
-    assert not ImageChops.difference(before_image.crop((30, 40, 510, 340)),
-                                    after_image.crop((30, 40, 510, 340))).getbbox(), 'Neighbor color leaked into local Liquid'
+    neighbor_changed = ImageChops.difference(before_image.crop((30, 40, 510, 340)),
+                                           after_image.crop((30, 40, 510, 340))).getbbox()
+    if legacy:
+        assert neighbor_changed, 'Frosted glass lost its live neighbor refraction'
+    else:
+        assert not neighbor_changed, 'Neighbor color leaked into local Liquid'
     if isolation_only:
         print('PASS: default Liquid body is isolated from an adjacent client repaint', flush=True)
         return
     for owner in before:
-        assert after[owner]['captures'] == before[owner]['captures'], (owner, before, after)
-        assert after[owner]['blurs'] == before[owner]['blurs'], (owner, before, after)
-        assert after[owner]['material_draws'] == before[owner]['material_draws'], (owner, before, after)
-        assert after[owner]['local_cache_reuses'] > before[owner]['local_cache_reuses'], (owner, before, after)
+        if legacy:
+            delta = {k: after[owner][k] - before[owner][k] for k in before[owner]}
+            assert delta['backdrop_cache_reuses'] > 0, delta
+            assert delta['material_draws'] == delta['captures'] + delta['backdrop_cache_reuses'], delta
+            assert delta['captures'] == delta['blurs'] == delta['backdrop_cache_reuses'], delta
+        else:
+            assert after[owner]['captures'] == before[owner]['captures'], (owner, before, after)
+            assert after[owner]['blurs'] == before[owner]['blurs'], (owner, before, after)
+            assert after[owner]['material_draws'] == before[owner]['material_draws'], (owner, before, after)
+            assert after[owner]['local_cache_reuses'] > before[owner]['local_cache_reuses'], (owner, before, after)
     evidence['client_repaints'] = {'before': before, 'after': after}
     parity('local-dark')
-    print('PASS: unequal local panes ignore foreground damage, isolate neighbors and reuse exact raw material output', flush=True)
+    print('PASS: unequal panes reuse background samples and retain live frosted-glass refraction' if legacy else
+          'PASS: unequal local panes ignore foreground damage, isolate neighbors and reuse exact raw material output', flush=True)
 
     def layer(bottom=False):
         proc = subprocess.Popen([str(fixtures / 'layer-test'), '--animate', *(['--bottom'] if bottom else [])],
@@ -122,18 +139,27 @@ while True:
     top = layer()
     time.sleep(.5)
     before = counters()
+    before_cache = control('buffers')['buffers'].get('backdrop_cache')
     time.sleep(.5)
     after = counters()
-    assert all(after[k]['captures'] == before[k]['captures'] for k in before), (before, after)
-    assert any(after[k]['local_cache_reuses'] > before[k]['local_cache_reuses'] for k in before)
+    if legacy:
+        after_cache = control('buffers')['buffers']['backdrop_cache']
+        assert after_cache['misses'] == before_cache['misses'], (before_cache, after_cache)
+        assert after_cache['hits'] > before_cache['hits'], (before_cache, after_cache)
+    else:
+        assert all(after[k]['captures'] == before[k]['captures'] for k in before), (before, after)
+        assert any(after[k]['local_cache_reuses'] > before[k]['local_cache_reuses'] for k in before)
     top.terminate(); top.wait(timeout=5)
     wait(lambda: 'hyprliquid-vram-test' not in ctl('-j', 'layers'))
     bottom = layer(True)
     time.sleep(.5)
     before = counters()
+    before_cache = control('buffers')['buffers'].get('backdrop_cache')
     time.sleep(.5)
     after = counters()
     assert all(after[k]['captures'] > before[k]['captures'] for k in before), (before, after)
+    if legacy:
+        assert control('buffers')['buffers']['backdrop_cache']['misses'] > before_cache['misses']
     evidence['bottom_repaints'] = {'before': before, 'after': after}
     bottom.terminate(); bottom.wait(timeout=5)
     wait(lambda: 'hyprliquid-vram-test' not in ctl('-j', 'layers'))
@@ -146,6 +172,18 @@ while True:
             control('apply', patch={'theme': theme, 'overrides': {'glass_opacity': opacity}})
             time.sleep(.25)
             parity(f'{theme}-opacity-{opacity}')
+    if legacy:
+        for sigma in (0, 19.8):
+            for strength in (0, .5, 1):
+                control('apply', patch={'overrides': {'blur_sigma': sigma, 'neighbor_contribution': strength}})
+                time.sleep(.25)
+                parity(f'legacy-sigma-{sigma}-contribution-{strength}')
+        control('apply', patch={'overrides': {'blur_sigma': 0}})
+        action(windows[0], 'resize', 'x = 460, y = 300, relative = false')
+        time.sleep(.25)
+        parity('legacy-zero-blur-resize')
+        action(windows[0], 'resize', 'x = 480, y = 300, relative = false')
+        control('apply', patch={'reset_fields': ['blur_sigma', 'neighbor_contribution']})
     monitor = json.loads(ctl('-j', 'monitors'))[0]['name']
     for scale, transform in ((1.25, 0), (1.6, 0), (1, 1), (1.25, 3)):
         ctl('eval', 'hl.monitor({ output = ' + json.dumps(monitor) +
@@ -238,10 +276,33 @@ while True:
     monitor_id = next(m['id'] for m in json.loads(ctl('-j', 'monitors')) if m['name'] == secondary)
     ctl('output', 'remove', secondary)
     control('apply', patch={'reset_fields': ['outer_refraction_amount']})
-    time.sleep(6.2)
-    retired = control('buffers')['buffers']
+    retirement_start = control('buffers')['buffers']['frame']
+    started = last_draw = time.monotonic()
+    frame = retirement_start
+    timeline = []
+    while True:
+        retired = control('buffers')['buffers']
+        now = time.monotonic()
+        if retired['frame'] != frame:
+            frame, last_draw = retired['frame'], now
+        timeline.append({'seconds': now - started, 'frame': frame,
+                         'scratch_bytes': retired['scratch_pool']['bytes'],
+                         'backdrop_bytes': retired.get('backdrop_cache', {}).get('bytes', 0)})
+        if not timeline[-1]['scratch_bytes'] and not timeline[-1]['backdrop_bytes']:
+            break
+        # Output removal can deliver delayed configure/commit frames. Measure
+        # the five-second idle lifetime from the last draw, with timer slack.
+        if now - last_draw > 7 or now - started > 15:
+            break
+        time.sleep(.2)
+    evidence['retirement'] = {'start_frame': retirement_start, 'timeline': timeline, 'after': retired}
+    (build / 'gpu-cache.json').write_text(json.dumps(evidence, indent=2))
     assert retired['scratch_pool']['bytes'] == 0
+    if 'backdrop_cache' in retired:
+        assert retired['backdrop_cache']['bytes'] == 0
     assert not any(b['owner'] == f'monitor:{monitor_id}' for b in retired['buffers'])
+    time.sleep(.5)
+    assert control('buffers')['buffers']['frame'] == retired['frame'], 'Cleanup scheduled another frame'
     print('PASS: independent mixed-scale SDR/HDR outputs reuse exact scratch sizes and retire idle/removed storage', flush=True)
     (build / 'gpu-cache.json').write_text(json.dumps(evidence, indent=2))
-    print('PASS: settled local glass schedules no continuing frames', flush=True)
+    print('PASS: settled glass schedules no continuing frames', flush=True)

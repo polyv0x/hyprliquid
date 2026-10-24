@@ -371,14 +371,19 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     // auxiliary scene and snapshots consume their samples completely here.
     // All blits/draws use the same GL context and are ordered before the next
     // lease can overwrite them; no CPU/GPU wait or cross-context reuse is needed.
-    auto samples = g_pGlobalState->renderBuffers.acquire(width, height, backdrop);
-    Vector2D paddingRatio;
-    if (!GlassRenderer::sampleBackground(samples->sharp, liquid ? source : backdrop, transformBox, paddingRatio,
+    const bool cacheBackground = sceneBase && !liquid && scene && scene->cacheBackground;
+    auto samples = cacheBackground ? g_pGlobalState->renderBuffers.acquireBackdrop(width, height, backdrop,
+        std::format("monitor:{}:window:{}", monitor->m_id, reinterpret_cast<uintptr_t>(window.get())), scene->backgroundKey) :
+        g_pGlobalState->renderBuffers.acquire(width, height, backdrop);
+    Vector2D paddingRatio = samples->paddingRatio;
+    if (!samples->contentValid) {
+        if (!GlassRenderer::sampleBackground(samples->sharp, liquid ? source : backdrop, transformBox, paddingRatio,
                                           padding, liquid ? nullptr : neighbours, scene ? scene->background : nullptr,
                                           separateNeighbors ? 1.0f : material.neighbor_contribution))
-        return;
-    ++m_captures;
-    samples->sharp->setImageDescription(backdrop->imageDescription());
+            return;
+        ++m_captures;
+        samples->sharp->setImageDescription(backdrop->imageDescription());
+    } else ++m_backdropCacheReuses;
     GlassRenderer::SNeighborBackdrop composition{
         scene ? scene->background : nullptr, nullptr, {geometry->x0, geometry->y0}, geometry->owner, underlayShapes,
         nullptr, neighbours};
@@ -398,17 +403,24 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     // A zero-blur consumer passes a null result to the glass shader, but must
     // not discard storage that another matching window can use next.
     auto blurred = samples->blurred;
-    if (!GlassRenderer::blurBackground(samples->sharp, blurred, blurSigma * effectScale, source, nullptr,
+    if (samples->contentValid) {
+        if (!samples->hasBlur) blurred.reset();
+    } else {
+        if (!GlassRenderer::blurBackground(samples->sharp, blurred, blurSigma * effectScale, source, nullptr,
                                        liquid ? samples->halfSharp : nullptr))
-        return;
-    if (blurred) ++m_blurs;
-    if (blurred) {
-        samples->blurred = blurred;
-        blurred->setImageDescription(backdrop->imageDescription());
+            return;
+        if (blurred) {
+            ++m_blurs;
+            samples->blurred = blurred;
+            blurred->setImageDescription(backdrop->imageDescription());
+        }
+        samples->paddingRatio = paddingRatio;
+        samples->hasBlur = bool(blurred);
+        samples->contentValid = !samples->cacheOwner.empty();
     }
     const auto owner = std::format("pool:{}", samples->id);
-    g_pGlobalState->renderBuffers.identify(samples->sharp, "window-sharp", owner);
-    g_pGlobalState->renderBuffers.identify(samples->blurred, "window-blurred", owner);
+    g_pGlobalState->renderBuffers.identify(samples->sharp, samples->cacheOwner.empty() ? "window-sharp" : "window-base-sharp", owner);
+    g_pGlobalState->renderBuffers.identify(samples->blurred, samples->cacheOwner.empty() ? "window-blurred" : "window-base-blurred", owner);
     if (liquid) g_pGlobalState->renderBuffers.identify(samples->halfSharp, "window-material-backdrop", owner);
 
     float monitorScale  = monitor->m_scale;
@@ -489,6 +501,7 @@ json_object* CGlassDecoration::diagnostics() const {
     json_object_object_add(result, "captures", json_object_new_uint64(m_captures));
     json_object_object_add(result, "blurs", json_object_new_uint64(m_blurs));
     json_object_object_add(result, "local_cache_reuses", json_object_new_uint64(m_cacheReuses));
+    json_object_object_add(result, "backdrop_cache_reuses", json_object_new_uint64(m_backdropCacheReuses));
     json_object_object_add(result, "animate_display_angle", json_object_new_boolean(runtimeAnimateDisplayAngle()));
     json_object_object_add(result, "animate_hover_angle", json_object_new_boolean(runtimeAnimateHoverAngle()));
     json_object_object_add(result, "rendered_display_angle_degrees", json_object_new_double(m_renderedDisplayAngle));

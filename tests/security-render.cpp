@@ -67,6 +67,41 @@ class CSecurityPass : public IPassElement {
             glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &restored);
             require(restored == GLint(dynamic_cast<Render::GL::CGLFramebuffer*>(source.get())->getFBID()), "failed blur did not restore target");
             require(CRenderBuffers::bytes(INT_MAX, INT_MAX, DRM_FORMAT_ARGB8888) == uint64_t(INT_MAX) * INT_MAX * 4, "byte accounting overflowed");
+            {
+                auto cached = buffers.acquireBackdrop(20, 20, source, "receiver", {1});
+                require(!cached->contentValid, "new backdrop was already valid");
+                require(buffers.prepare(cached->sharp, 20, 20, source->m_drmFormat, "test-cache"), "backdrop allocation failed");
+                require(buffers.prepare(cached->blurred, 10, 10, source->m_drmFormat, "test-cache-blur"), "cached blur allocation failed");
+                cached->contentValid = true;
+                auto nested = buffers.acquireBackdrop(20, 20, source, "receiver", {1});
+                require(nested->cacheOwner.empty() && nested->sharp != cached->sharp, "overwrote a leased backdrop");
+            }
+            {
+                auto cached = buffers.acquireBackdrop(20, 20, source, "receiver", {1});
+                require(cached->contentValid && cached->sharp->isAllocated(), "lost a reusable backdrop");
+            }
+            {
+                auto changed = buffers.acquireBackdrop(20, 20, source, "receiver", {2});
+                require(!changed->contentValid, "reused a stale backdrop generation");
+                changed->contentValid = true;
+            }
+            {
+                auto resized = buffers.acquireBackdrop(10, 10, source, "receiver", {2});
+                require(!resized->contentValid && !resized->blurred, "zero-blur resize retained unreserved storage");
+                resized->contentValid = true;
+            }
+            for (size_t i = 1; i <= CRenderBuffers::BACKDROP_RETAINED_PAIRS; ++i) {
+                auto cached = buffers.acquireBackdrop(20, 20, source, std::to_string(i), {1});
+                require(cached->cacheOwner.empty() == (i == CRenderBuffers::BACKDROP_RETAINED_PAIRS), "backdrop pair limit failed");
+            }
+            {
+                auto oversized = buffers.acquireBackdrop(INT_MAX, INT_MAX, source, "receiver", {3});
+                require(oversized->cacheOwner.empty(), "oversized backdrop bypassed admission limit");
+            }
+            {
+                auto cached = buffers.acquireBackdrop(10, 10, source, "receiver", {2});
+                require(cached->contentValid, "cache pressure evicted the admitted working set");
+            }
             result = "pass";
         } catch (const std::exception& error) {
             result = std::string("FAIL: ") + error.what();

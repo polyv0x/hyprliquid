@@ -26,6 +26,7 @@ CFunctionHook* workspaceHook = nullptr;
 RenderWindow renderWindow = nullptr;
 std::shared_ptr<SWindowScene> queuedScene;
 bool queuingBase = false;
+uint64_t nextBackgroundGeneration = 0;
 
 struct SBuffers {
     PHLMONITORREF monitor;
@@ -34,7 +35,8 @@ struct SBuffers {
     std::weak_ptr<SWindowScene> scene;
     std::optional<CRenderBuffers::Clock::time_point> retired;
     uint64_t frame = 0;
-    uint64_t backgroundGeneration = 0;
+    // Retired/recreated scenes must not match inputs retained by the backdrop cache.
+    uint64_t backgroundGeneration = ++nextBackgroundGeneration;
     std::vector<uint64_t> key;
     std::shared_ptr<SWindowScene::SCache> cache;
 };
@@ -156,6 +158,7 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
     bool hasGlass = false;
     bool local = !workspace->m_isSpecialWorkspace && !monitor->m_activeSpecialWorkspace &&
         !workspace->m_renderOffset->isBeingAnimated() && workspace->m_alpha->value() == 1.0f;
+    bool cacheBackground = local;
     std::vector<CBox> currentBoxes;
     for (const auto& window : Desktop::windowState()->windows()) {
         if (!window->m_isMapped || window->isHidden() || !renderer->shouldRenderWindow(window, monitor))
@@ -165,6 +168,7 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
             continue;
 
         if (!window->m_transformers.empty()) {
+            cacheBackground = false;
             local = false;
             // Transformed floats keep their native pass without disabling
             // the ordinary windows' capture.
@@ -193,8 +197,10 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
         currentBoxes.push_back(*box);
         // Animations/snapshots and real underlays keep native painting order.
         if (window->positionAnimation()->isBeingAnimated() || window->sizeAnimation()->isBeingAnimated() ||
-            window->alphaTotalWithout(Desktop::View::WINDOW_ALPHA_ACTIVE) != 1.0f)
+            window->alphaTotalWithout(Desktop::View::WINDOW_ALPHA_ACTIVE) != 1.0f) {
             local = false;
+            cacheBackground = false;
+        }
         if (auto* decoration = decorationFor(window); decoration && decoration->usesGlass()) {
             hasGlass = true;
             if (decoration->needsNeighborScene()) local = false;
@@ -208,6 +214,7 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
         return window->m_isFloating ? (window->m_pinned ? 3 : 2) : (window == focused ? 1 : 0);
     });
     scene->local = local;
+    scene->cacheBackground = cacheBackground && g_pGlobalState->damageSurfaceHook;
     return hasGlass && (local || scene->windows.size() > 1) ? scene : nullptr;
 }
 
@@ -308,7 +315,8 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
                 renderWindow(renderer, window.lock(), monitor, now, false, Render::RENDER_PASS_MAIN, false, false);
         }
     }
-    auto key = scene->local ? localKey(*scene, monitor, workspace) : std::vector<uint64_t>{};
+    auto key = scene->local || scene->cacheBackground ? localKey(*scene, monitor, workspace) : std::vector<uint64_t>{};
+    if (scene->cacheBackground) scene->backgroundKey = key;
     const auto source = renderer->m_renderData.currentFB;
     capture->reuse = scene->local && g_pGlobalState->damageSurfaceHook && storage.cache->valid &&
         key == storage.key && source && storage.image->isAllocated() &&
@@ -369,14 +377,16 @@ bool skipDecoration(PHLWINDOW window) {
 void invalidateBackground(PHLMONITOR monitor) {
     if (!monitor) return;
     if (auto it = buffers.find(monitor->m_id); it != buffers.end()) {
-        ++it->second.backgroundGeneration;
+        it->second.backgroundGeneration = ++nextBackgroundGeneration;
         if (it->second.cache) it->second.cache->valid = false;
     }
 }
 
 void invalidateAll() {
-    for (auto& [_, storage] : buffers)
+    for (auto& [_, storage] : buffers) {
+        storage.backgroundGeneration = ++nextBackgroundGeneration;
         if (storage.cache) storage.cache->valid = false;
+    }
 }
 
 void collectUnused() {
