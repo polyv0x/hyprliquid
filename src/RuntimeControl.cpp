@@ -1,6 +1,7 @@
 #include "RuntimeControl.hpp"
 #include "Globals.hpp"
 #include "GlassDecoration.hpp"
+#include "MaterialInfo.hpp"
 
 #include <hyprland/src/state/MonitorState.hpp>
 #include <json-c/json.h>
@@ -50,6 +51,10 @@ bool configuredEnabled() {
     const auto ptr = g_pGlobalState->config.enabled;
     return ptr && *ptr && **ptr;
 }
+bool configuredAnimateDisplayAngle() {
+    const auto ptr = g_pGlobalState->config.animateDisplayAngle;
+    return ptr && *ptr && **ptr;
+}
 bool validPreset(std::string name) {
     std::unordered_set<std::string> visited;
     for (int depth = 0; depth < MAX_PRESET_INHERITANCE_DEPTH;) {
@@ -71,6 +76,7 @@ json_object* values(const SMaterial& material) {
 json_object* profileJson(const SRuntimeProfile& profile) {
     auto* result = object();
     if (profile.enabled) put(result, "enabled", json_object_new_boolean(*profile.enabled));
+    if (profile.animateDisplayAngle) put(result, "animate_display_angle", json_object_new_boolean(*profile.animateDisplayAngle));
     if (profile.basePreset) put(result, "base_preset", string(*profile.basePreset));
     if (profile.theme) put(result, "theme", string(*profile.theme));
     auto* overrides = object();
@@ -81,7 +87,7 @@ json_object* profileJson(const SRuntimeProfile& profile) {
     return result;
 }
 bool active(const SRuntimeProfile& profile) {
-    if (profile.enabled || profile.basePreset || profile.theme) return true;
+    if (profile.enabled || profile.animateDisplayAngle || profile.basePreset || profile.theme) return true;
 #define GLASS_PARAM(name, value, lo, hi) if (profile.overrides.name != SENTINEL_FLOAT) return true;
 #include "MaterialParams.inc"
 #undef GLASS_PARAM
@@ -98,23 +104,27 @@ json_object* state() {
     put(result, "revision", json_object_new_int64(runtime.revision));
     put(result, "generation", json_object_new_int64(runtime.generation));
     put(result, "enabled", json_object_new_boolean(runtimeEnabled()));
+    put(result, "animate_display_angle", json_object_new_boolean(runtimeAnimateDisplayAngle()));
     put(result, "base_preset", string(base));
     put(result, "theme", string(runtimeThemeIsDark() ? "dark" : "light"));
     put(result, "active", json_object_new_boolean(active(runtime.profile)));
     put(result, "panel", profileJson(runtime.profile));
     put(result, "inherited", values(resolveMaterial({base, runtimeThemeIsDark(), config, presets})));
     put(result, "material", values(resolveMaterial({base, runtimeThemeIsDark(), config, presets, &runtime.profile.overrides})));
+    addMaterialInfo(result, resolveMaterial({base, runtimeThemeIsDark(), config, presets, &runtime.profile.overrides}));
     auto* baseline = object();
     put(baseline, "enabled", json_object_new_boolean(configuredEnabled()));
+    put(baseline, "animate_display_angle", json_object_new_boolean(configuredAnimateDisplayAngle()));
     put(baseline, "base_preset", string(configured));
     put(baseline, "theme", string(configuredDark() ? "dark" : "light"));
     put(baseline, "material", values(resolveMaterial({configured, configuredDark(), config, presets})));
+    addMaterialInfo(baseline, resolveMaterial({configured, configuredDark(), config, presets}));
     put(result, "baseline", baseline);
     return result;
 }
 void describe(json_object* result) {
     auto* capabilities = json_object_new_array();
-    for (const auto* name : {"default_material", "atomic_apply", "revision_guard", "field_reset", "buffers"})
+    for (const auto* name : {"default_material", "atomic_apply", "revision_guard", "field_reset", "buffers", "material_models", "display_angle_animation"})
         json_object_array_add(capabilities, string(name));
     put(result, "capabilities", capabilities);
     auto* parameters = json_object_new_array();
@@ -124,6 +134,10 @@ void describe(json_object* result) {
     put(item, "default", json_object_new_double(value)); \
     put(item, "min", json_object_new_double(lo)); \
     put(item, "max", json_object_new_double(hi)); \
+    auto* models = json_object_new_array(); \
+    if (materialParameter(EMaterialFamily::LEGACY, #name)) json_object_array_add(models, string("legacy")); \
+    if (liquidParameter(#name)) json_object_array_add(models, string("liquid")); \
+    put(item, "models", models); \
     json_object_array_add(parameters, item); \
 }
 #include "MaterialParams.inc"
@@ -133,12 +147,21 @@ void describe(json_object* result) {
     std::vector<std::string> names;
     for (const auto& [name, preset] : g_pGlobalState->customPresets)
         if (!preset.hidden) names.push_back(name);
-    std::ranges::sort(names);
+    const auto priority = [](const std::string& name) {
+        if (name == "frosted-glass") return 0;
+        if (name == "frosted-glass-clear-edge") return 1;
+        return 2;
+    };
+    std::ranges::sort(names, [&](const auto& left, const auto& right) {
+        const auto leftPriority = priority(left), rightPriority = priority(right);
+        return leftPriority == rightPriority ? left < right : leftPriority < rightPriority;
+    });
     for (const auto& name : names) {
         auto* item = object();
         put(item, "id", string(name));
         put(item, "inherits", string(publicPresetName(g_pGlobalState->customPresets.at(name).inherits)));
         put(item, "valid", json_object_new_boolean(validPreset(name)));
+        put(item, "model", string(materialFamilyName(resolveMaterialFamily(name, g_pGlobalState->customPresets))));
         json_object_array_add(presets, item);
     }
     put(result, "presets", presets);
@@ -157,11 +180,16 @@ void setField(SPresetValues& target, const std::string& key, json_object* item) 
     throw std::invalid_argument("unknown material parameter: " + key);
 }
 void readProfile(SRuntimeProfile& target, json_object* input) {
-    keys(input, {"enabled", "base_preset", "theme", "overrides", "reset_fields"});
+    keys(input, {"enabled", "animate_display_angle", "base_preset", "theme", "overrides", "reset_fields"});
     if (has(input, "enabled")) {
         auto* v = get(input, "enabled");
         require(!v || json_object_is_type(v, json_type_boolean), "enabled: expected boolean or null");
         target.enabled = v ? std::optional<bool>(json_object_get_boolean(v)) : std::nullopt;
+    }
+    if (has(input, "animate_display_angle")) {
+        auto* v = get(input, "animate_display_angle");
+        require(!v || json_object_is_type(v, json_type_boolean), "animate_display_angle: expected boolean or null");
+        target.animateDisplayAngle = v ? std::optional<bool>(json_object_get_boolean(v)) : std::nullopt;
     }
     if (has(input, "base_preset")) {
         auto* v = get(input, "base_preset");
@@ -279,6 +307,7 @@ std::string dispatch(eHyprCtlOutputFormat, std::string request) {
 } // namespace
 
 bool runtimeEnabled() { return g_pGlobalState->runtimeControl.profile.enabled.value_or(configuredEnabled()); }
+bool runtimeAnimateDisplayAngle() { return g_pGlobalState->runtimeControl.profile.animateDisplayAngle.value_or(configuredAnimateDisplayAngle()); }
 std::string runtimeBasePreset() { return g_pGlobalState->runtimeControl.profile.basePreset.value_or(configuredPreset()); }
 bool runtimeThemeIsDark() {
     const auto& theme = g_pGlobalState->runtimeControl.profile.theme;

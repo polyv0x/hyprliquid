@@ -23,9 +23,13 @@ text; treat that as unavailable. Requests are limited to 16 KiB and JSON depth 1
 
 `describe` adds `capabilities`, `parameters`, and `presets`. Each parameter has
 `name`, `default`, `min`, and `max`, generated directly from `MaterialParams.inc`.
-Each preset has `id`, `inherits`, and `valid`. The list contains the five public
+Each preset has `id`, `inherits`, `valid`, and `model`. The list contains the seven public
 built-ins and configured user presets. Compatibility aliases are accepted by
 `apply` but omitted from this list; returned preset names use the public name.
+The list is in display order: `frosted-glass` first, `frosted-glass-clear-edge`
+second, then all remaining entries alphabetically. Clients should preserve this
+order. The default preset is `frosted-glass`; the old `clear-edge` and
+`frosted-clear-edge` names resolve to `frosted-glass-clear-edge`.
 An alias explicitly customized in Lua is listed and retains its own name and
 overrides. See the [preset guide](guide.md#configure) for old-name mappings.
 Missing parents, cycles, and inheritance chains beyond the renderer's supported
@@ -40,11 +44,16 @@ deleted or repaired by the control API.
 | `generation` | Configuration reload count within this epoch |
 | `revision` | Increases on accepted mutations, reloads, and dynamic `config()` writes |
 | `enabled`, `base_preset`, `theme` | Effective window defaults; theme is `dark` or `light` |
+| `animate_display_angle` | Boolean; sweep Liquid highlights during native window size transitions, default `false` |
 | `active` | Whether any panel override exists |
-| `panel` | Sparse explicit `enabled`, `base_preset`, `theme`, and `overrides` |
+| `panel` | Sparse explicit `enabled`, `animate_display_angle`, `base_preset`, `theme`, and `overrides` |
 | `inherited` | Resolved selected base material/theme before scalar panel overrides |
 | `material` | Actual resolved/sanitized material after panel overrides |
 | `baseline` | Configured enabled/preset/theme and resolved configured material |
+| `model` | Resolved material family: `legacy` or `liquid`, inherited through custom presets |
+| `applicable_parameters` | Scalar names that affect the effective model |
+| `effective_blur_sigma` | Resolved logical blur sigma, including fixed material values |
+| `model_data` | Liquid environment, base `parameters`, resolved `effective_parameters`, rendering assumptions, shadow owner and output extent |
 
 `material` includes shader invariants such as ordered refraction thresholds.
 `panel.overrides` retains the requested values, so callers can distinguish a
@@ -52,12 +61,61 @@ sanitized result from an explicit edit. Numbers are validated and stored with th
 renderer's float precision; signed refraction, shadow offset, and coverage remain
 signed. Boolean values and numeric strings are not accepted as scalar numbers.
 
+The additive `material_models` capability supplies these model fields in state,
+baseline, and window/layer diagnostics. Each described scalar also has a
+`models` array. The `material` and `inherited` objects keep the existing scalar
+contract; fields absent from `applicable_parameters` are inapplicable to Liquid. Model selection is
+through preset inheritance, never a numeric override. `model_data` is read-only
+and separate from those scalar objects. Unknown model fields in `apply` reject
+the entire request.
+
+```sh
+hyprctl hyprliquid:control '{"op":"apply","profile":{"base_preset":"frosted-liquid","theme":"dark","overrides":{"glass_opacity":0.9}}}'
+```
+
+Liquid supports 21 of the 34 scalar controls: all blur/refraction controls,
+face opacity, highlight width/strength/angle, shadow opacity/offset, and the four
+overall/neighbor controls. See the [material contract](guide.md#liquid-material)
+for their mappings and preset defaults. `neighbor_falloff` defaults to zero.
+`blur_sigma` defaults to 19 for `frosted-liquid` and 6 for
+`frosted-liquid-medium`; all their other resolved values are identical.
+The hidden `liquid-medium` alias resolves to `frosted-liquid`.
+Descriptor defaults remain generic.
+`light` selects the `default` material environment; `dark` selects `dark`.
+
+`model_data.parameters` contains the base material variant before preset and scalar overrides.
+The additive `model_data.effective_parameters` contains the resolved structured
+values uploaded to the renderer, before output/effect scaling. It equals the
+base variant for an unedited `frosted-liquid-medium`; `frosted-liquid`
+changes only the effective blur radius to 19. Both objects are read-only;
+edit scalar overrides rather than sending structured data back in `apply`.
+Older material-model responses may omit `effective_parameters`.
+
 `apply` accepts exactly one of `profile` or `patch`. A profile replaces all
 runtime ownership; an omitted field inherits configuration. A patch changes only
-provided fields. Both accept `enabled`, `base_preset`, `theme`, `overrides`, and
-`reset_fields`. In a patch, JSON null removes an enabled/preset/theme override,
+provided fields. Both accept `enabled`, `animate_display_angle`, `base_preset`, `theme`, `overrides`, and
+`reset_fields`. In a patch, JSON null removes an enabled/animation/preset/theme override,
 and a null scalar value removes that scalar override. `reset_fields` is an array
 of scalar names and is convenient for clients without a JSON-null value.
+
+The additive `display_angle_animation` capability advertises the boolean
+`animate_display_angle` and Liquid-only scalar `display_angle_degrees` (-180 to
+180, default 0). With the toggle off, the angle stays fixed. With it on, each
+native size transition sweeps 0° → configured angle → 0° using the window's
+eased resize progress. Idle windows remain at 0°; interrupted resizes continue
+from the last drawn angle. The boolean applies to all Liquid windows, including
+tagged presets, while their own resolved angle supplies the peak. Layers keep
+their static angle. A profile omission or patch null relinquishes ownership of
+the boolean; `reset_fields` remains for scalar controls only.
+
+```sh
+hyprctl hyprliquid:control '{"op":"apply","patch":{"animate_display_angle":true,"overrides":{"display_angle_degrees":30}}}'
+```
+
+`model_data.display_angle_degrees` reports the configured angle. Each window in
+`buffers.windows` additionally reports `animate_display_angle` and
+`rendered_display_angle_degrees`, the angle used by its last draw. No new frames
+are scheduled by querying diagnostics.
 
 Validation finishes before any mutation. Unknown keys, invalid types, unknown or
 invalid preset chains, non-finite values, and out-of-range values reject the
@@ -111,6 +169,13 @@ Roles distinguish `window-sharp`, `window-blurred`, `window-clean-blurred`, `sce
 window. Owners and color IDs are runtime identifiers, not persistent keys.
 Nominal byte counts use the DRM format's stride/block geometry and exclude
 driver alignment, metadata and compression.
+
+Liquid adds `window-material-backdrop`, `window-clean-material-backdrop` (only
+when protecting underlays at reduced contribution), and `layer-material-backdrop`.
+These are retained half-resolution unblurred inputs. Pool bytes, eviction, and
+idle cleanup include them; no extra full-resolution per-window copy is retained.
+The historical `pairs` counter counts pool entries even when they include this
+third texture. Window diagnostics also expose `owns_shadow`.
 
 The pool retains at most eight idle pairs or 128 MiB, with one oversized-pair
 exception to avoid allocating on every draw of a large HDR window. Active leases

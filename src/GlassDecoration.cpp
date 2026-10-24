@@ -4,6 +4,7 @@
 #include "GlassRenderer.hpp"
 #include "Globals.hpp"
 #include "WindowGeometry.hpp"
+#include "MaterialInfo.hpp"
 
 #include <algorithm>
 #include <json-c/json.h>
@@ -20,7 +21,27 @@ CGlassDecoration::CGlassDecoration(PHLWINDOW window)
 }
 
 CGlassDecoration::~CGlassDecoration() {
+    damageEntire();
+    updateShadowProp(false);
     withdrawNoBlur();
+}
+
+void CGlassDecoration::updateShadowProp(bool enabled) {
+    const auto window = m_window.lock();
+    if (!window || !window->m_ruleApplicator) return;
+    auto& prop = window->m_ruleApplicator->noShadow();
+    constexpr auto priority = Desktop::Types::PRIORITY_SET_PROP;
+    if (enabled && (!m_noShadowApplied || !prop.valueOrDefault())) {
+        // Preserve a pre-existing user setprop instead of clearing it on exit.
+        m_savedNoShadow = prop.hasValue() && prop.getPriority() == priority ? std::optional<bool>(prop.value()) : std::nullopt;
+        prop.set(true, priority);
+        m_noShadowApplied = true;
+    } else if (!enabled && m_noShadowApplied) {
+        if (prop.hasValue() && prop.getPriority() == priority && prop.value())
+            prop.matchOptional(m_savedNoShadow, priority);
+        m_savedNoShadow.reset();
+        m_noShadowApplied = false;
+    }
 }
 
 // Glass replaces Hyprland's blur for this window. Mark glassed windows with
@@ -143,6 +164,13 @@ SDecorationPositioningInfo CGlassDecoration::getPositioningInfo() {
     info.priority       = 10000;
     info.policy         = DECORATION_POSITION_ABSOLUTE;
     info.desiredExtents = {{0, 0}, {0, 0}};
+    if (g_pGlobalState && resolveEnabled()) {
+        const auto material = resolveMaterial({resolvePresetName(), resolveThemeIsDark(), g_pGlobalState->config,
+                                               g_pGlobalState->customPresets, runtimeOverrides()});
+        const float extent = materialOutputExtent(material) * material.effect_scale;
+        info.desiredExtents = {{extent, extent}, {extent, extent}};
+        info.edges = DECORATION_EDGE_TOP | DECORATION_EDGE_BOTTOM | DECORATION_EDGE_LEFT | DECORATION_EDGE_RIGHT;
+    }
     return info;
 }
 
@@ -154,6 +182,30 @@ void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
 
     const bool enabled = resolveEnabled();
     updateNoBlurProp(enabled);
+    const auto material = resolveMaterial({resolvePresetName(), resolveThemeIsDark(), g_pGlobalState->config,
+                                           g_pGlobalState->customPresets, runtimeOverrides()});
+    const float previousAngle = m_displayAngle.value();
+    const auto owner = m_window.lock();
+    if (enabled && material.family == EMaterialFamily::LIQUID && runtimeAnimateDisplayAngle() && owner && owner->sizeAnimation()) {
+        const auto& animation = owner->sizeAnimation();
+        const auto begun = animation->begun(), goal = animation->goal(), current = animation->value();
+        m_displayAngle.update(material.display_angle_degrees, animation->isBeingAnimated(),
+                              {begun.x, begun.y}, {goal.x, goal.y}, {current.x, current.y});
+    } else {
+        m_displayAngle.reset(enabled && material.family == EMaterialFamily::LIQUID ? material.display_angle_degrees : 0.0f);
+    }
+    if (previousAngle != m_displayAngle.value()) {
+        damageEntire();
+        if (owner) if (const auto mon = owner->m_monitor.lock())
+            g_pGlobalState->bumpSceneGeneration(mon);
+    }
+    updateShadowProp(enabled && material.family == EMaterialFamily::LIQUID);
+    const float extent = enabled ? materialOutputExtent(material) * material.effect_scale : 0.0f;
+    if (extent != m_outputExtent) {
+        m_outputExtent = extent;
+        g_pDecorationPositioner->repositionDeco(this);
+        damageEntire();
+    }
     if (!enabled)
         return;
 
@@ -198,8 +250,10 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     auto& shaderManager = g_pGlobalState->shaderManager;
     shaderManager.initializeIfNeeded();
 
-    if (!shaderManager.isInitialized())
+    if (!shaderManager.isInitialized()) {
+        updateShadowProp(false);
         return;
+    }
 
     const auto window = m_window.lock();
     if (!window)
@@ -226,41 +280,54 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     const std::string preset   = resolvePresetName();
     const SResolveContext ctx  = {preset, isDark, g_pGlobalState->config, g_pGlobalState->customPresets, runtimeOverrides()};
 
-    const auto material = resolveMaterial(ctx);
+    auto material = resolveMaterial(ctx);
+    material.display_angle_degrees = m_displayAngle.value();
+    const bool liquid = material.family == EMaterialFamily::LIQUID;
     const float effectScale = monitor->m_scale * material.effect_scale;
+    const float blurSigma = materialBlurSigma(material);
     // Base glass sees only the background; the final pass sees the completed
     // neighbouring panes outside its bounds and the true backdrop inside.
     const auto backdrop = sceneBase && scene ? scene->background : source;
     const auto neighbours = !sceneBase && scene && scene->ready ? scene->image : nullptr;
     std::vector<GlassRenderer::SUnderlayShape> underlayShapes;
-    if (neighbours && material.neighbor_contribution < 1.0f) {
+    if (neighbours && (liquid || material.neighbor_contribution < 1.0f)) {
+        CBox receivingBox = transformBox;
+        receivingBox.expand(materialOutputExtent(material) * effectScale);
         // The scene is ordered in native painting order. Only windows already
         // painted beneath this receiver can form its actual backdrop.
+        bool beneath = true;
         for (const auto& ref : scene->windows) {
             const auto underneath = ref.lock();
-            if (underneath == window)
-                break;
+            if (underneath == window) {
+                if (!liquid) break;
+                beneath = false;
+                continue;
+            }
             if (!underneath)
                 continue;
             auto box = WindowGeometry::computeWindowBox(underneath, monitor);
             if (!box)
                 continue;
             box->transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y);
-            if (box->x >= transformBox.x + transformBox.width || box->x + box->width <= transformBox.x ||
-                box->y >= transformBox.y + transformBox.height || box->y + box->height <= transformBox.y)
+            if (box->intersection(receivingBox).empty())
                 continue;
             const bool unrounded = Fullscreen::controller()->getFullscreenModes(underneath).internal == Fullscreen::FSMODE_FULLSCREEN;
+            // Adjacent panes always occlude exterior shadows, independently
+            // of focus painting order. Overlapping floats retain native order:
+            // a top pane's shadow may fall on a true underlying window.
+            const bool shadowOccluder = liquid && (!beneath || box->intersection(transformBox).empty());
             underlayShapes.push_back({static_cast<float>(box->x - transformBox.x),
                                      static_cast<float>(box->y - transformBox.y),
                                      static_cast<float>(box->width), static_cast<float>(box->height),
                                      unrounded ? 0.0f : underneath->rounding() * monitor->m_scale,
-                                     underneath->roundingPower(), 0.0f, 0.0f});
+                                     underneath->roundingPower(), beneath ? 1.0f : 0.0f, shadowOccluder ? 1.0f : 0.0f});
         }
     }
     // Falloff only changes the sharp/blur mix; it needs no reference backdrop.
     // A separate image is needed solely to protect actual underlays when the
     // additional neighbor contribution is reduced.
-    const bool separateNeighbors = !underlayShapes.empty();
+    const bool separateNeighbors = material.neighbor_contribution < 1.0f &&
+        std::ranges::any_of(underlayShapes, [](const auto& shape) { return shape[6] > 0.0f; });
     const int padding = materialPadding(material, effectScale);
     const auto geometry = RenderSafety::sampleGeometry(transformBox.x, transformBox.y, transformBox.w, transformBox.h, padding);
     if (!geometry)
@@ -272,15 +339,27 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     // lease can overwrite them; no CPU/GPU wait or cross-context reuse is needed.
     auto samples = g_pGlobalState->renderBuffers.acquire(width, height, backdrop);
     Vector2D paddingRatio;
-    if (!GlassRenderer::sampleBackground(samples->sharp, backdrop, transformBox, paddingRatio,
-                                          padding, neighbours, scene ? scene->background : nullptr,
+    if (!GlassRenderer::sampleBackground(samples->sharp, liquid ? source : backdrop, transformBox, paddingRatio,
+                                          padding, liquid ? nullptr : neighbours, scene ? scene->background : nullptr,
                                           separateNeighbors ? 1.0f : material.neighbor_contribution))
         return;
     samples->sharp->setImageDescription(backdrop->imageDescription());
+    GlassRenderer::SNeighborBackdrop composition{
+        scene ? scene->background : nullptr, nullptr, {geometry->x0, geometry->y0}, geometry->owner, underlayShapes,
+        nullptr, neighbours};
+    if (sceneBase && scene) {
+        // The auxiliary material sees the immutable background, while the
+        // exact destination crop still contains previously painted panes.
+        composition.scene = scene->background;
+        composition.ownerBounds = {0, 0, 0, 0};
+    }
+    if (liquid && !GlassRenderer::prepareMaterialBackdrop(samples->sharp, samples->halfSharp, source, &composition,
+                                                          separateNeighbors ? 1.0f : material.neighbor_contribution)) return;
     // A zero-blur consumer passes a null result to the glass shader, but must
     // not discard storage that another matching window can use next.
     auto blurred = samples->blurred;
-    if (!GlassRenderer::blurBackground(samples->sharp, blurred, material.blur_sigma * effectScale, source))
+    if (!GlassRenderer::blurBackground(samples->sharp, blurred, blurSigma * effectScale, source, nullptr,
+                                       liquid ? samples->halfSharp : nullptr))
         return;
     if (blurred) {
         samples->blurred = blurred;
@@ -289,6 +368,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     const auto owner = std::format("pool:{}", samples->id);
     g_pGlobalState->renderBuffers.identify(samples->sharp, "window-sharp", owner);
     g_pGlobalState->renderBuffers.identify(samples->blurred, "window-blurred", owner);
+    if (liquid) g_pGlobalState->renderBuffers.identify(samples->halfSharp, "window-material-backdrop", owner);
 
     float monitorScale  = monitor->m_scale;
 
@@ -310,25 +390,28 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     auto draw = [&](const GlassRenderer::SNeighborBackdrop* neighbors = nullptr) {
         GlassRenderer::applyGlassEffect(samples->sharp, blurred, source,
                                          windowBox, transformBox, glassAlpha,
-                                         cornerRadius, roundingPower, paddingRatio, ctx, nullptr, neighbors);
+                                         cornerRadius, roundingPower, paddingRatio, material, nullptr, neighbors,
+                                         liquid ? samples->halfSharp : nullptr, !sceneBase);
     };
     if (separateNeighbors) {
-        GlassRenderer::SNeighborBackdrop neighbors{
-            scene->background, nullptr,
-            {geometry->x0, geometry->y0}, geometry->owner,
-            underlayShapes};
-        if (material.blur_sigma <= 0.0f) {
+        auto neighbors = composition;
+        if (!liquid && blurSigma <= 0.0f) {
             // Clean sharp sampling is reconstructed from existing textures.
             // With no blur this path needs no additional framebuffer at all.
             draw(&neighbors);
             return;
         }
-        // Build only the half-resolution clean blur. Its first reduction
-        // selects native pixels inside the owner and background outside,
-        // removing the duplicate full-resolution clean image and copy pass.
+        // Liquid still needs its clean half-sharp input at zero blur. Legacy
+        // materials only need the clean blur, reconstructed on first reduction.
         auto clean = g_pGlobalState->renderBuffers.acquire((width + 1) / 2, (height + 1) / 2, backdrop);
         auto cleanBlurred = clean->sharp;
-        if (!GlassRenderer::blurBackground(samples->sharp, cleanBlurred, material.blur_sigma * effectScale, source, &neighbors))
+        if (liquid) {
+            if (!GlassRenderer::prepareMaterialBackdrop(samples->sharp, clean->halfSharp, source, &composition, 0.0f)) return;
+            neighbors.halfSharp = clean->halfSharp;
+            g_pGlobalState->renderBuffers.identify(clean->halfSharp, "window-clean-material-backdrop", std::format("pool:{}", clean->id));
+        }
+        if (!GlassRenderer::blurBackground(samples->sharp, cleanBlurred, blurSigma * effectScale, source,
+                                           liquid ? nullptr : &neighbors, liquid ? clean->halfSharp : nullptr))
             return;
         if (cleanBlurred) {
             clean->sharp = cleanBlurred;
@@ -339,7 +422,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
         draw(&neighbors);
         return;
     }
-    draw();
+    draw(liquid && !underlayShapes.empty() ? &composition : nullptr);
 }
 
 json_object* CGlassDecoration::diagnostics() const {
@@ -357,6 +440,10 @@ json_object* CGlassDecoration::diagnostics() const {
 #include "MaterialParams.inc"
 #undef GLASS_PARAM
     json_object_object_add(result, "material", values);
+    addMaterialInfo(result, material);
+    json_object_object_add(result, "owns_shadow", json_object_new_boolean(m_noShadowApplied));
+    json_object_object_add(result, "animate_display_angle", json_object_new_boolean(runtimeAnimateDisplayAngle()));
+    json_object_object_add(result, "rendered_display_angle_degrees", json_object_new_double(m_displayAngle.value()));
     if (window) if (const auto monitor = window->m_monitor.lock()) {
         json_object_object_add(result, "monitor_id", json_object_new_int64(monitor->m_id));
         if (const auto box = WindowGeometry::computeWindowBox(window, monitor)) {
@@ -379,6 +466,9 @@ void CGlassDecoration::updateWindow(PHLWINDOW window) {
 }
 
 void CGlassDecoration::damageEntire() {
+    if (!g_pHyprRenderer) return;
+    if (m_lastDamageBox)
+        g_pHyprRenderer->damageBox(*m_lastDamageBox);
     const auto window = m_window.lock();
     if (!window)
         return;
@@ -401,8 +491,10 @@ void CGlassDecoration::damageEntire() {
         return;
     surfaceBox.expand(samplingPadding(monitor) / scale);
 
-    if (RenderSafety::sampleGeometry(surfaceBox.x, surfaceBox.y, surfaceBox.w, surfaceBox.h, 0))
+    if (RenderSafety::sampleGeometry(surfaceBox.x, surfaceBox.y, surfaceBox.w, surfaceBox.h, 0)) {
         g_pHyprRenderer->damageBox(surfaceBox);
+        m_lastDamageBox = surfaceBox;
+    }
 }
 
 eDecorationLayer CGlassDecoration::getDecorationLayer() {

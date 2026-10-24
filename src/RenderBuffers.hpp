@@ -32,7 +32,7 @@ class CRenderBuffers {
     };
     struct SSamples {
         SKey key;
-        SP<Render::IFramebuffer> sharp, blurred;
+        SP<Render::IFramebuffer> sharp, blurred, halfSharp;
         Clock::time_point used;
         uint64_t sequence = 0;
         uint64_t id = 0;
@@ -56,6 +56,7 @@ class CRenderBuffers {
                  const std::string& role, const std::string& owner = "shared");
     void identify(const SP<Render::IFramebuffer>& fb, const std::string& role, const std::string& owner);
     void touch(const SP<Render::IFramebuffer>& fb);
+    void release(SP<Render::IFramebuffer>& fb);
     void beginFrame(PHLMONITOR monitor);
     void endFrame();
     uint64_t frame() const { return m_frame; }

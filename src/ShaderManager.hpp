@@ -5,6 +5,7 @@
 #include <string>
 #include <array>
 #include <span>
+#include "LiquidUniforms.hpp"
 
 struct SCleanSampleUniforms {
     GLint texture = -1;
@@ -52,6 +53,7 @@ struct SSceneSampleUniforms {
     GLint sampleOrigin = -1;
     GLint ownerBounds = -1;
     GLint neighborContribution = -1;
+    GLint useScene = -1;
 };
 
 class CShaderManager {
@@ -65,12 +67,17 @@ class CShaderManager {
 
     SP<CShader>    glassShader = makeShared<CShader>();
     SGlassUniforms glassUniforms;
+    SP<CShader> liquidShader = makeShared<CShader>();
+    SGlassUniforms liquidCommonUniforms;
+    SLiquidUniforms liquidUniforms;
 
     SP<CShader>    blurShader = makeShared<CShader>();
     SBlurUniforms  blurUniforms;
 
     SP<CShader> sceneSampleShader = makeShared<CShader>();
     SSceneSampleUniforms sceneSampleUniforms;
+    SP<CShader> materialBackdropShader = makeShared<CShader>();
+    SSceneSampleUniforms materialBackdropUniforms;
 
   private:
     bool m_initialized = false;
@@ -78,7 +85,7 @@ class CShaderManager {
     size_t m_underlayCapacity = 0;
 
     [[nodiscard]] static std::string loadShaderSource(const char* fileName);
-    [[nodiscard]] bool compileGlassShader();
+    [[nodiscard]] bool compileGlassShader(SP<CShader>& shader, SGlassUniforms& uniforms, const char* name);
     [[nodiscard]] bool compileBlurShader();
-    [[nodiscard]] bool compileSceneSampleShader();
+    [[nodiscard]] bool compileSceneSampleShader(SP<CShader>& shader, SSceneSampleUniforms& uniforms, const char* name);
 };

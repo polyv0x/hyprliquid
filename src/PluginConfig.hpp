@@ -48,6 +48,7 @@ inline constexpr auto ENABLED            = "plugin:hyprliquid:enabled";
 inline constexpr auto DEFAULT_THEME      = "plugin:hyprliquid:default_theme";
 inline constexpr auto DEFAULT_PRESET     = "plugin:hyprliquid:default_preset";
 inline constexpr auto MANAGE_WINDOW_BLUR = "plugin:hyprliquid:manage_window_blur";
+inline constexpr auto ANIMATE_DISPLAY_ANGLE = "plugin:hyprliquid:animate_display_angle";
 
 // Preset keyword, registered as unscoped because Hyprlang does not dispatch
 // scoped keyword handlers inside the plugin special category.
@@ -104,6 +105,7 @@ inline std::string_view readStringConfig(const StringConfigPtr& ptr) {
 
 struct SPluginConfig {
     Hyprlang::INT* const* enabled          = nullptr;
+    Hyprlang::INT* const* animateDisplayAngle = nullptr;
     // Glass replaces Hyprland's blur for glassed windows: when set, the plugin
     // marks them with the noblur window property so Hyprland composites them
     // against the live framebuffer (which contains the glass) instead of its

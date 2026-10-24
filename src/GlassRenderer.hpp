@@ -42,7 +42,8 @@ struct SMaskInfo {
 
 // Windows beneath the receiver are part of its real backdrop, not an extra
 // neighbour contribution. Each shape is two RGBA texels: local framebuffer
-// bounds (x, y, width, height), then radius, rounding power and two reserved values.
+// bounds (x, y, width, height), then radius, rounding power, underlying-window
+// eligibility and exterior-shadow occlusion. Legacy shaders ignore the flags.
 using SUnderlayShape = std::array<float, 8>;
 
 struct SNeighborBackdrop {
@@ -50,6 +51,7 @@ struct SNeighborBackdrop {
     std::array<GLint, 2> sampleOrigin;
     std::array<GLint, 4> ownerBounds;
     std::span<const SUnderlayShape> underlayShapes;
+    SP<Render::IFramebuffer> halfSharp, scene;
 };
 
 bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IFramebuffer> sourceFramebuffer,
@@ -60,7 +62,11 @@ bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IF
 // On every exit, re-bind callerFramebuffer and restore the entry viewport.
 // A false result must not be drawn or marked as a valid cached blur.
 [[nodiscard]] bool blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFramebuffer>& blurredFramebuffer, float sigma,
-                    SP<Render::IFramebuffer> callerFramebuffer, const SNeighborBackdrop* clean = nullptr);
+                    SP<Render::IFramebuffer> callerFramebuffer, const SNeighborBackdrop* clean = nullptr,
+                    SP<Render::IFramebuffer> materialBackdrop = nullptr);
+
+[[nodiscard]] bool prepareMaterialBackdrop(SP<Render::IFramebuffer> sample, SP<Render::IFramebuffer>& halfSharp,
+                    SP<Render::IFramebuffer> caller, const SNeighborBackdrop* composition = nullptr, float contribution = 1.0f);
 
 // When mask is non-null (layers only), the shader composites the surface content
 // over the glass effect in a single pass. When mask is null (windows), the shader
@@ -69,8 +75,9 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
                       SP<Render::IFramebuffer> targetFramebuffer,
                        CBox& rawBox, CBox& transformedBox,
                        float alpha, float cornerRadius, float roundingPower,
-                       const Vector2D& paddingRatio, const SResolveContext& resolveContext,
+                       const Vector2D& paddingRatio, const SMaterial& material,
                        const SMaskInfo* mask = nullptr,
-                       const SNeighborBackdrop* neighbors = nullptr);
+                       const SNeighborBackdrop* neighbors = nullptr,
+                       SP<Render::IFramebuffer> materialBackdrop = nullptr, bool renderShadow = true);
 
 } // namespace GlassRenderer

@@ -8,6 +8,7 @@
 // Runtime ownership never enters the config parser's pending preset map.
 struct SRuntimeProfile {
     std::optional<bool> enabled;
+    std::optional<bool> animateDisplayAngle;
     std::optional<std::string> basePreset;
     std::optional<std::string> theme;
     SPresetValues overrides;
@@ -25,5 +26,6 @@ void unregisterRuntimeControl();
 // Reload clears panel ownership; a dynamic config() edit also yields to the user.
 void runtimeBaselineChanged(bool reloaded);
 bool runtimeEnabled();
+bool runtimeAnimateDisplayAngle();
 std::string runtimeBasePreset();
 bool runtimeThemeIsDark();

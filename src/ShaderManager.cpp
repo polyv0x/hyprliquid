@@ -25,14 +25,14 @@ std::string CShaderManager::loadShaderSource(const char* fileName) {
     throw std::runtime_error(message);
 }
 
-bool CShaderManager::compileGlassShader() {
+bool CShaderManager::compileGlassShader(SP<CShader>& glassShader, SGlassUniforms& glassUniforms, const char* name) {
     if (!glassShader->createProgram(
             g_pHyprOpenGL->m_shaders->TEXVERTSRC,
-            loadShaderSource("glass.frag"),
+            loadShaderSource(name),
             true
         )) {
         HyprlandAPI::addNotification(PHANDLE,
-            std::format("[{}] Failed to compile glass shader", PLUGIN_NAME),
+            std::format("[{}] Failed to compile {}", PLUGIN_NAME, name),
             CHyprColor{1.0, 0.2, 0.2, 1.0}, 5000);
         return false;
     }
@@ -88,15 +88,16 @@ bool CShaderManager::compileBlurShader() {
     return true;
 }
 
-bool CShaderManager::compileSceneSampleShader() {
+bool CShaderManager::compileSceneSampleShader(SP<CShader>& sceneSampleShader, SSceneSampleUniforms& sceneSampleUniforms, const char* name) {
     if (!sceneSampleShader->createProgram(g_pHyprOpenGL->m_shaders->TEXVERTSRC,
-                                          loadShaderSource("scene-sample.frag"), true)) {
+                                          loadShaderSource(name), true)) {
         HyprlandAPI::addNotification(PHANDLE,
-            std::format("[{}] Failed to compile scene sampling shader", PLUGIN_NAME),
+            std::format("[{}] Failed to compile {}", PLUGIN_NAME, name),
             CHyprColor{1.0, 0.2, 0.2, 1.0}, 5000);
         return false;
     }
     const auto program = sceneSampleShader->program();
+    sceneSampleUniforms.useScene = glGetUniformLocation(program, "useScene");
     sceneSampleUniforms.sceneTex = glGetUniformLocation(program, "sceneTex");
     sceneSampleUniforms.backgroundTex = glGetUniformLocation(program, "backgroundTex");
     sceneSampleUniforms.sampleOrigin = glGetUniformLocation(program, "sampleOrigin");
@@ -109,15 +110,18 @@ void CShaderManager::initializeIfNeeded() {
     if (m_initialized)
         return;
 
-    if (!compileGlassShader())
+    if (!compileGlassShader(glassShader, glassUniforms, "glass.frag") ||
+        !compileGlassShader(liquidShader, liquidCommonUniforms, "liquid.frag"))
         return;
 
     if (!compileBlurShader())
         return;
 
-    if (!compileSceneSampleShader())
+    if (!compileSceneSampleShader(sceneSampleShader, sceneSampleUniforms, "scene-sample.frag") ||
+        !compileSceneSampleShader(materialBackdropShader, materialBackdropUniforms, "material-backdrop.frag"))
         return;
 
+    liquidUniforms.locate(liquidShader->program());
     m_initialized = true;
 }
 
@@ -148,6 +152,8 @@ int CShaderManager::bindUnderlayShapes(std::span<const std::array<float, 8>> sha
 
 void CShaderManager::destroy() noexcept {
     glassShader->destroy();
+    liquidShader->destroy();
+    materialBackdropShader->destroy();
     blurShader->destroy();
     sceneSampleShader->destroy();
     if (m_underlayShapes)

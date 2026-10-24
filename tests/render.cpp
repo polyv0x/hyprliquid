@@ -1,5 +1,6 @@
 #include "BuiltInPresets.hpp"
 #include "PixelTransfer.hpp"
+#include "LiquidUniforms.hpp"
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
@@ -103,6 +104,8 @@ static void blur(const Program& program, const Target& sharp, Target& temporary,
 static SMaterial presetMaterial(const std::string& name, bool dark = true) {
     const auto all = BuiltInPresets::getAll();
     SMaterial m;
+    m.family = resolveMaterialFamily(name, all);
+    m.darkTheme = dark;
     std::vector<const SCustomPreset*> chain;
     std::string current = name;
     for (int i = 0; i < 8 && !current.empty(); ++i) {
@@ -138,9 +141,9 @@ static void parameters(const Program& p, const SMaterial& m, float scale, int wi
         p.f("radius", 56 * scale); p.f("roundingPower", roundingPower); p.f("pixelScale", scale); p.f("fadeAlpha", 1);
         return;
     }
-    // The frozen study fixture retains its comparison switch. Production
+    // The frozen reference retains its comparison switch. Production
     // always uses the affine face tone, so pin the reference to that endpoint.
-    p.f("use_measured_face", 1.0f);
+    p.f("use_affine_face", 1.0f);
     p.i("source_texture", 0); p.i("blur_texture", 1);
     p.v2("uRes", width, height); p.v2("uInvRes", 1.0f / width, 1.0f / height);
     p.v2("uCenter", width * 0.5f, height * 0.5f); p.v2("uHalf", ww * 0.5f, wh * 0.5f);
@@ -344,7 +347,7 @@ static void neighborFalloff(const Program& shader) {
         }
         // Fully frosted pixels and glass alpha are unaffected. Zero blur also
         // makes falloff a no-op because there is no softer image to blend in.
-        auto frost = presetMaterial("clear-edge");
+        auto frost = presetMaterial("frosted-glass-clear-edge");
         frost.blur_alpha0 = frost.blur_alpha3 = 1;
         std::vector<unsigned char> baseline;
         for (bool zeroBlur : {false, true}) {
@@ -572,6 +575,8 @@ static void sceneSampling() {
     std::cout << "PASS: " << comparisons << " neighbour blends, exact owner pixels and clamped offscreen gutters.\n";
 }
 
+#include "liquid-render.hpp"
+
 int main() try {
     auto display = eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
     require(display != EGL_NO_DISPLAY && eglInitialize(display, nullptr, nullptr), "Cannot initialize surfaceless EGL");
@@ -597,11 +602,12 @@ int main() try {
     neighborFalloff(native);
     underlayProtection(native);
     cleanSampling();
+    liquidRendering(nativeBlur);
     bool passed = true;
     int comparisons = 0;
     std::vector<std::string> presets;
     for (const auto& [name, preset] : BuiltInPresets::getAll())
-        if (!preset.hidden) presets.push_back(name);
+        if (!preset.hidden && resolveMaterialFamily(name, BuiltInPresets::getAll()) == EMaterialFamily::LEGACY) presets.push_back(name);
     std::ranges::sort(presets);
     // Cover output scaling and Hyprland's full corner-power range, including
     // triangular and intermediate corners that must not be clamped to circles.

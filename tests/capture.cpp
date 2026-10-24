@@ -11,12 +11,14 @@
 #include <deque>
 #include <fstream>
 #include <filesystem>
+#include <dlfcn.h>
 #include "../src/PixelTransfer.hpp"
 #include "../src/RenderSafety.hpp"
 #include <hyprutils/utils/ScopeGuard.hpp>
 
 namespace {
 HANDLE handle;
+Render::IHyprRenderer* renderer = nullptr;
 SP<SHyprCtlCommand> captureCommand, timingCommand;
 Hyprutils::Signal::CHyprSignalListener listener;
 std::string pending;
@@ -28,7 +30,7 @@ class CCapture : public IPassElement {
   public:
     explicit CCapture(std::string path) : path(std::move(path)) {}
     std::vector<UP<IPassElement>> draw() override {
-        const auto fb = g_pHyprRenderer->m_renderData.currentFB;
+        const auto fb = renderer->m_renderData.currentFB;
         if (!fb || !RenderSafety::dimension(fb->m_size.x) || !RenderSafety::dimension(fb->m_size.y)) return {};
         auto* glFramebuffer = dynamic_cast<Render::GL::CGLFramebuffer*>(fb.get());
         if (!glFramebuffer) return {};
@@ -79,6 +81,13 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() { return HYPRLAND_API_VERSION; }
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     handle = h;
     if (std::string(__hyprland_api_get_hash()) != __hyprland_api_get_client_hash()) throw std::runtime_error("Capture ABI mismatch");
+    // The fixture's version script hides its helpers to prevent interposition
+    // on comparison plugins. It also hides Hyprland's inline globals, so our
+    // local g_pHyprRenderer is empty. Borrow the host's owner explicitly; never
+    // export numerical helpers just to make that inline global resolve.
+    const auto* owner = static_cast<const decltype(g_pHyprRenderer)*>(dlsym(RTLD_DEFAULT, "g_pHyprRenderer"));
+    if (!owner || !*owner) throw std::runtime_error("Capture host renderer unavailable");
+    renderer = owner->get();
     captureCommand = HyprlandAPI::registerHyprCtlCommand(handle, {"hyprliquid-test:capture", false,
         [](eHyprCtlOutputFormat, std::string request) {
             const auto at = request.find(' ');
@@ -88,7 +97,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
             if (!path.is_absolute() || !std::filesystem::is_directory(path.parent_path(), error)) return std::string("invalid artifact path");
             pending = path;
             for (const auto& monitor : State::monitorState()->monitors()) {
-                g_pHyprRenderer->damageMonitor(monitor);
+                renderer->damageMonitor(monitor);
                 monitor->scheduleFrame();
             }
             return std::string("ok");
@@ -113,15 +122,16 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
             if (times.size() > 1024) times.pop_front();
         }
         if (stage == RENDER_LAST_MOMENT && !pending.empty()) {
-            g_pHyprRenderer->addPassElement(makeUnique<CCapture>(std::exchange(pending, {})));
+            renderer->addPassElement(makeUnique<CCapture>(std::exchange(pending, {})));
         }
     });
     return {"hyprliquid-test-capture", "Internal framebuffer comparison fixture", "hyprliquid", "1"};
 }
 APICALL EXPORT void PLUGIN_EXIT() {
     listener.reset();
-    g_pHyprRenderer->m_renderPass.removeAllOfType("CHyprliquidTestCapture");
+    if (renderer) renderer->m_renderPass.removeAllOfType("CHyprliquidTestCapture");
     HyprlandAPI::unregisterHyprCtlCommand(handle, captureCommand);
     HyprlandAPI::unregisterHyprCtlCommand(handle, timingCommand);
     captureCommand.reset(); timingCommand.reset(); pending.clear(); times.clear();
+    renderer = nullptr;
 }

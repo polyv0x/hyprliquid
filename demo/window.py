@@ -8,7 +8,7 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
 parser = argparse.ArgumentParser()
-parser.add_argument('role', choices=['backdrop', 'frosted', 'soft-glass', 'clear-glass', 'frosted-glass', 'clear-edge'])
+parser.add_argument('role', choices=['backdrop', 'frosted', 'soft-glass', 'clear-glass', 'frosted-glass', 'frosted-glass-clear-edge'])
 parser.add_argument('--image')
 parser.add_argument('--label', default='SOFT GLASS')
 parser.add_argument('--compact', action='store_true')
@@ -81,7 +81,7 @@ class DemoWindow(QWidget):
                         'soft-glass': 'Gentle refraction. Soft highlights.',
                         'clear-glass': 'A sharp view through curved glass.',
                         'frosted-glass': 'Deep frost. A refractive rim.',
-                        'clear-edge': 'Frosted center. Clear border.'}
+                        'frosted-glass-clear-edge': 'Frosted center. Clear border.'}
             painter.drawText(margin, 143, captions[args.role])
             painter.setPen(QPen(QColor(255, 255, 255, 75), 1))
             painter.drawLine(margin, self.height() - 83, self.width() - margin, self.height() - 83)

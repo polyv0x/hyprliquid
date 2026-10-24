@@ -25,6 +25,8 @@ GLASS_PARAM(inv_aberration_height, 0.046f, 0.001f, 1.0f)
 GLASS_PARAM(rim_width, 6.5f, 0.01f, 30.0f)
 GLASS_PARAM(rim_soft, 1.5f, 0.01f, 6.0f)
 GLASS_PARAM(rim_opacity, 0.0f, 0.0f, 1.6f)
+// Liquid key/fill lighting rotation in degrees; zero preserves the base material.
+GLASS_PARAM(display_angle_degrees, 0.0f, -180.0f, 180.0f)
 GLASS_PARAM(face_slope, 0.6811f, 0.0f, 1.0f)
 GLASS_PARAM(face_intercept, 0.2788f, 0.0f, 0.6f)
 GLASS_PARAM(coverage_offset, 0.10f, -1.0f, 1.0f)

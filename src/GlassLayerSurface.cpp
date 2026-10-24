@@ -1,4 +1,5 @@
 #include "GlassLayerSurface.hpp"
+#include "MaterialInfo.hpp"
 #include "BuiltInPresets.hpp"
 #include "GlassRenderer.hpp"
 #include "Globals.hpp"
@@ -212,7 +213,8 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
                                  g_pGlobalState->config, g_pGlobalState->customPresets};
     const auto material = resolveMaterial(ctx);
     const float effectScale = monitor->m_scale * material.effect_scale;
-    const float blurSigma = material.blur_sigma * effectScale;
+    const bool liquid = material.family == EMaterialFamily::LIQUID;
+    const float blurSigma = materialBlurSigma(material) * effectScale;
     const int padding = materialPadding(material, effectScale);
 
     // Decide whether we need to re-sample and re-blur the background.
@@ -230,7 +232,7 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
     const bool backgroundChanged = !m_hasCachedSample ||
                                    currentGeneration != m_lastSceneGeneration ||
                                    isAnimating || m_backgroundDirty || forceLive ||
-                                   blurSigma != m_cachedBlurSigma || padding != m_cachedPadding;
+                                   blurSigma != m_cachedBlurSigma || padding != m_cachedPadding || material.family != m_cachedFamily;
 
     if (!layerSurface->m_mapped) {
         // During fade-out, re-sampling captures stale pixels. Reuse cached sample.
@@ -241,7 +243,10 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
         if (!GlassRenderer::sampleBackground(m_sampleFramebuffer, source, transformBox, m_samplePaddingRatio,
                                               padding))
             return;
-        if (!GlassRenderer::blurBackground(m_sampleFramebuffer, m_blurredFramebuffer, blurSigma, source))
+        m_sampleFramebuffer->setImageDescription(source->imageDescription());
+        if (liquid && !GlassRenderer::prepareMaterialBackdrop(m_sampleFramebuffer, m_materialBackdrop, source)) return;
+        if (!GlassRenderer::blurBackground(m_sampleFramebuffer, m_blurredFramebuffer, blurSigma, source, nullptr,
+                                           liquid ? m_materialBackdrop : nullptr))
             return;
 
         m_hasCachedSample      = true;
@@ -249,6 +254,8 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
         m_backgroundDirty      = false;
         m_cachedBlurSigma      = blurSigma;
         m_cachedPadding        = padding;
+        m_cachedFamily         = material.family;
+        if (!liquid) g_pGlobalState->renderBuffers.release(m_materialBackdrop);
     }
     // else: background unchanged, reuse cached blur — skip backdrop capture and blur
 
@@ -273,6 +280,7 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
         return;
     g_pGlobalState->renderBuffers.identify(m_sampleFramebuffer, "layer-sharp", owner);
     g_pGlobalState->renderBuffers.identify(m_blurredFramebuffer, "layer-blurred", owner);
+    g_pGlobalState->renderBuffers.identify(m_materialBackdrop, "layer-material-backdrop", owner);
 
     m_savedCurrentFB = source;
 
@@ -280,7 +288,7 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
     glBindFramebuffer(GL_FRAMEBUFFER, dynamic_cast<Render::GL::CGLFramebuffer*>(m_surfaceTempFramebuffer.get())->getFBID());
 
     CBox clearBox = transformBox;
-    clearBox.expand(samplingPadding(monitor));
+    clearBox.expand(padding);
     clearBox = clearBox.intersection(CBox{0.0, 0.0, static_cast<double>(monitorWidth), static_cast<double>(monitorHeight)}).noNegativeSize().round();
 
     if (std::isfinite(clearBox.x) && std::isfinite(clearBox.y) && std::isfinite(clearBox.w) && std::isfinite(clearBox.h) &&
@@ -327,6 +335,7 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
     const bool isDark          = resolveThemeIsDark();
     const std::string preset   = resolvePresetName();
     const SResolveContext ctx  = {preset, isDark, g_pGlobalState->config, g_pGlobalState->customPresets};
+    const auto material = resolveMaterial(ctx);
 
     float cornerRadius  = 0.0f;
     float roundingPower = 2.0f;
@@ -404,8 +413,8 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
     // in a single pass: glass behind, surface on top, using the temp FBO alpha.
     GlassRenderer::applyGlassEffect(m_sampleFramebuffer, m_blurredFramebuffer, target,
                                      rawBox, transformBox, alpha,
-                                     cornerRadius, roundingPower, m_samplePaddingRatio, ctx,
-                                     &maskInfo);
+                                     cornerRadius, roundingPower, m_samplePaddingRatio, material,
+                                     &maskInfo, nullptr, m_materialBackdrop);
 }
 
 int CGlassLayerSurface::samplingPadding(PHLMONITOR monitor) const {
@@ -431,6 +440,7 @@ json_object* CGlassLayerSurface::diagnostics() const {
 #include "MaterialParams.inc"
 #undef GLASS_PARAM
     json_object_object_add(result, "material", values);
+    addMaterialInfo(result, material, true);
     if (layer) if (const auto monitor = layer->m_monitor.lock()) {
         json_object_object_add(result, "monitor_id", json_object_new_int64(monitor->m_id));
         if (const auto box = LayerGeometry::computeLayerBox(layer, monitor)) {

@@ -58,18 +58,25 @@ def main():
     parser.add_argument('--reference', type=Path, required=True)
     parser.add_argument('--candidate', type=Path, default=ROOT / 'hyprliquid.so')
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--quick', action='store_true', help='Skip the 64 individual parameter-extreme cases')
+    parser.add_argument('--quick', action='store_true', help='Skip individual parameter-extreme cases')
     parser.add_argument('--steady-only', action='store_true', help='Measure the fixed warm scene without the visual/lifecycle matrix')
+    parser.add_argument('--steady-preset', default='lens', help='Material for --steady-only (default: lens)')
+    parser.add_argument('--steady-panes', type=int, default=2, help='Pane count for --steady-only (default: 2)')
     parser.add_argument('--only-arm', choices=('baseline', 'reference', 'candidate'),
                         help='With --steady-only, measure one build in a fresh compositor for comparable DRM residency')
     args = parser.parse_args()
     if args.only_arm and not args.steady_only:
         parser.error('--only-arm requires --steady-only')
+    if args.steady_panes < 1:
+        parser.error('--steady-panes must be positive')
+    if not args.steady_only and (args.steady_preset != 'lens' or args.steady_panes != 2):
+        parser.error('--steady-preset and --steady-panes require --steady-only')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     arms = {key: getattr(args, key).resolve() for key in ('baseline', 'reference', 'candidate')}
     if args.only_arm: arms = {args.only_arm: arms[args.only_arm]}
     results = {'versions': subprocess.check_output(['Hyprland', '--version'], text=True),
+               'workload': {'preset': args.steady_preset, 'panes': args.steady_panes},
                'builds': {key: {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
                           for key, path in arms.items()}, 'arms': {}, 'comparisons': []}
     (output / 'result.json').write_text(json.dumps(results, indent=2))
@@ -135,11 +142,11 @@ while True:
         print(out, end='', flush=True)
     time.sleep(.01)
 '''
-                colors = ([220, 40, 20], [20, 200, 70])
+                colors = tuple(([220, 40, 20], [20, 200, 70])[i % 2] for i in range(args.steady_panes))
                 def spawn_panes():
                     for side, color in enumerate(colors):
                         path = runtime / f'color-{side}.json'
-                        set_pattern(path, {'color': color, 'phase': side})
+                        set_pattern(path, {'color': color, 'phase': side % 2})
                         if len(controls) <= side: controls.append(path)
                         clients.append(subprocess.Popen(['kitty', '--start-as=normal', '--class', f'vram-pane-{side}',
                             '-o', 'background_opacity=0', '-o', 'remember_window_size=no',
@@ -171,6 +178,7 @@ while True:
                     return {'metadata': metadata, 'sha256': hashlib.sha256(raw).hexdigest(), 'bytes': len(raw)}
 
                 previous = None
+                reference_geometry = None
                 for arm, plugin in arms.items():
                     directory = output / arm
                     directory.mkdir()
@@ -188,7 +196,7 @@ while True:
                         'decoration = { active_opacity = 1, inactive_opacity = 1, dim_inactive = false, '
                         'shadow = { enabled = true } }, cursor = { no_warps = true, inactive_timeout = 0.1 } })')
                     ctl('eval', 'hl.monitor({ output = "HYPRLIQUID-TEST", mode = "1280x800@60", position = "auto", scale = 1, transform = 0 })')
-                    control('apply', profile={'base_preset': 'lens', 'theme': 'dark'})
+                    control('apply', profile={'base_preset': args.steady_preset, 'theme': 'dark'})
                     spawn_panes()
                     time.sleep(.6)
                     arm_result = {'captures': {}, 'settings': {}, 'steady_drm': [], 'timing': {}}
@@ -196,24 +204,28 @@ while True:
                     has_buffers = 'buffers' in control('describe')['capabilities']
                     arm_result['geometry'] = json.loads(ctl('-j', 'clients'))
                     geometry = sorted((w['class'], w['at'], w['size']) for w in arm_result['geometry'])
-                    assert geometry == [('vram-pane-0', [20, 20], [612, 760]),
-                                        ('vram-pane-1', [648, 20], [612, 760])], geometry
+                    if args.steady_panes == 2:
+                        assert geometry == [('vram-pane-0', [20, 20], [612, 760]),
+                                            ('vram-pane-1', [648, 20], [612, 760])], geometry
+                    if reference_geometry is None:
+                        reference_geometry = geometry
+                    assert geometry == reference_geometry, 'Workload geometry changed between builds'
                     if has_buffers: arm_result['warm'] = control('buffers')['buffers']
                     # Warm repetitive redraws with fixed geometry/materials.
                     arm_result['warm_drm'] = drm(compositor.pid)
                     ctl('hyprliquid-test:timing')
                     for iteration in range(240):
-                        set_pattern(controls[1], {'color': colors[1], 'phase': iteration % 2})
+                        set_pattern(controls[-1], {'color': colors[-1], 'phase': iteration % 2})
                         time.sleep(.025)
                     arm_result['timing'] = json.loads(ctl('hyprliquid-test:timing'))
                     arm_result['timing']['distribution'] = distribution(arm_result['timing']['cpu_frame_ms'])
-                    assert len(json.loads(ctl('-j', 'clients'))) == 2, 'A pattern client exited'
+                    assert len(json.loads(ctl('-j', 'clients'))) == args.steady_panes, 'A pattern client exited'
                     assert arm_result['timing']['distribution']['count'] >= 80, 'Insufficient rendered timing samples'
                     if has_buffers: arm_result['steady'] = control('buffers')['buffers']
                     for _ in range(3):
                         arm_result['steady_drm'].append(drm(compositor.pid))
                         time.sleep(.1)
-                    for side in range(2): set_pattern(controls[side], {'color': colors[side], 'phase': side})
+                    for side in range(len(colors)): set_pattern(controls[side], {'color': colors[side], 'phase': side % 2})
                     if args.steady_only:
                         (output / 'result.json').write_text(json.dumps(results, indent=2))
                         print(f'Measured {arm}: CPU {arm_result["timing"]["distribution"]}', flush=True)
@@ -225,7 +237,7 @@ while True:
                         'soft-glass': {'base_preset': 'platform'},
                         'clear-glass': {'base_preset': 'lens'},
                         'frosted-glass': {'base_preset': 'lens', 'overrides': {'blur_alpha0': 0.96, 'blur_alpha3': 1}},
-                        'clear-edge': {'base_preset': 'lens', 'overrides': {'blur_alpha0': 0.02, 'blur_alpha3': 1, 'blur_dist3': 38.4}},
+                        'frosted-glass-clear-edge': {'base_preset': 'lens', 'overrides': {'blur_alpha0': 0.02, 'blur_alpha3': 1, 'blur_dist3': 38.4}},
                     }
                     cases = [(f'{preset}-{theme}', profile | {'theme': theme})
                              for preset, profile in materials.items()
@@ -310,7 +322,10 @@ while True:
                     for window in windows: action(window, 'float', 'action = "disable"')
                     time.sleep(.4)
 
-                    ctl('eval', 'hl.plugin.hyprliquid.config({ layers = { enabled = true } })')
+                    # The GTK fixture supplies translucent content, not a
+                    # background-effect region. Exercise its alpha mask just
+                    # as the nested layer-cache/lock suite does.
+                    ctl('eval', 'hl.plugin.hyprliquid.config({ layers = { enabled = true, mask_mode = "alpha" } })')
                     layer_env = env | {'GSK_RENDERER': 'cairo', 'GTK_A11Y': 'none'}
                     layer = subprocess.Popen([str(ROOT / 'build/layer-test')], env=layer_env, stdout=log, stderr=log)
                     clients.append(layer)
@@ -414,8 +429,11 @@ while True:
                 ctl('dispatch', 'hl.dsp.exit()')
                 compositor.wait(timeout=10)
             finally:
+                (output / 'result.json').write_text(json.dumps(results, indent=2))
                 logs = list(runtime.glob('hypr/*/hyprland.log'))
                 if logs: (output / 'compositor.log').write_text(logs[-1].read_text())
+                for report in (runtime / 'cache/hyprland').glob('hyprlandCrashReport*.txt'):
+                    (output / report.name).write_bytes(report.read_bytes())
                 for client in clients:
                     if client.poll() is None:
                         client.terminate()

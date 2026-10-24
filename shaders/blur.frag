@@ -5,7 +5,7 @@ uniform sampler2D tex;
 #include "clean-backdrop.glsl"
 uniform int cleanInput; // reconstruct the clean crop during its first reduction
 uniform vec2 direction; // tap spacing in texture coordinates
-uniform int filterMode; // 0: Gaussian, 1: downsample, 2: reconstruct
+uniform int filterMode; // 0: Gaussian, 1: downsample, 2: reconstruct, 3: retained input copy
 in vec2 v_texcoord;
 layout(location = 0) out vec4 fragColor;
 
@@ -14,6 +14,7 @@ vec3 sample_input(vec2 uv) {
 }
 
 void main() {
+    if (filterMode == 3) { fragColor = vec4(sample_input(v_texcoord), 1.0); return; }
     if (filterMode != 0) {
         // Filter every reduction instead of skipping pixels in the sharp
         // image. Smaller offsets during reconstruction soften the coarse

@@ -4,7 +4,7 @@
 
 namespace BuiltInPresets {
 
-// Five distinct materials; old names remain available to saved profiles and tags.
+// Existing materials and aliases retain their values; Liquid is an opt-in family.
 inline std::unordered_map<std::string, SCustomPreset> getAll() {
     std::unordered_map<std::string, SCustomPreset> presets;
     const auto add = [&](const std::string& name, const std::string& parent = "") -> SPresetValues& {
@@ -68,12 +68,26 @@ inline std::unordered_map<std::string, SCustomPreset> getAll() {
     frostedGlass.blur_alpha0 = 0.96f;
     frostedGlass.blur_alpha3 = 1.0f;
 
-    auto& clearEdge = add("clear-edge", "lens");
+    auto& clearEdge = add("frosted-glass-clear-edge", "lens");
     clearEdge.blur_alpha0 = 0.02f;
     clearEdge.blur_alpha3 = 1.0f;
     clearEdge.blur_dist3 = 38.4f;
     alias("frosted-full", "frosted-glass");
-    alias("frosted-clear-edge", "clear-edge");
+    alias("clear-edge", "frosted-glass-clear-edge");
+    alias("frosted-clear-edge", "frosted-glass-clear-edge");
+    auto& liquid = add("frosted-liquid");
+    presets.at("frosted-liquid").family = EMaterialFamily::LIQUID;
+    const auto light = liquidControlDefaults(false), dark = liquidControlDefaults(true);
+#define GLASS_PARAM(name, value, lo, hi) \
+    if (liquidParameter(#name)) { \
+        liquid.name = light.name; \
+        if (dark.name != light.name) presets.at("frosted-liquid").dark.name = dark.name; \
+    }
+#include "MaterialParams.inc"
+#undef GLASS_PARAM
+    liquid.blur_sigma = 19.0f;
+    add("frosted-liquid-medium", "frosted-liquid").blur_sigma = light.blur_sigma;
+    alias("liquid-medium", "frosted-liquid");
     return presets;
 }
 

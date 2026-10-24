@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ResizeAngle.hpp"
+
 struct json_object;
 
 #include "GlassRenderer.hpp"
@@ -42,6 +44,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
     // Track last rendered position/size to detect actual changes and seed damage
     Vector2D m_lastPosition;
     Vector2D m_lastSize;
+    CResizeAngle m_displayAngle;
 
     // Whether we currently hold the noblur window property on our window.
     // Glass replaces Hyprland's blur, and Hyprland's cached-blur optimization
@@ -49,9 +52,14 @@ class CGlassDecoration : public IHyprWindowDecoration {
     // snapshot taken before plugin decorations render — without noblur the
     // glass is invisible on static windows (#46).
     bool m_noBlurApplied = false;
+    bool m_noShadowApplied = false;
+    std::optional<bool> m_savedNoShadow;
+    float m_outputExtent = 0.0f;
+    std::optional<CBox> m_lastDamageBox;
 
     void updateNoBlurProp(bool glassEnabled);
     void withdrawNoBlur();
+    void updateShadowProp(bool enabled);
 
     [[nodiscard]] bool        resolveEnabled() const;
     [[nodiscard]] bool        resolveThemeIsDark() const;

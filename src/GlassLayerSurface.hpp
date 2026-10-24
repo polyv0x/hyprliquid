@@ -43,12 +43,14 @@ class CGlassLayerSurface {
     PHLLSREF     m_layerSurface;
     SP<Render::IFramebuffer> m_sampleFramebuffer;
     SP<Render::IFramebuffer> m_blurredFramebuffer;
+    SP<Render::IFramebuffer> m_materialBackdrop;
     SP<Render::IFramebuffer> m_surfaceTempFramebuffer;
     Vector2D     m_samplePaddingRatio;
     bool         m_hasCachedSample = false;
     bool         m_backgroundDirty = false;
     float        m_cachedBlurSigma = -1.0f;
     int          m_cachedPadding = -1;
+    EMaterialFamily m_cachedFamily = EMaterialFamily::LEGACY;
     std::chrono::steady_clock::time_point m_lastDirtyMark{};
 
     void damageSampleRegion();

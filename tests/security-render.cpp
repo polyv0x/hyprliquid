@@ -59,6 +59,11 @@ class CSecurityPass : public IPassElement {
             Vector2D padding;
             require(!GlassRenderer::sampleBackground(target, source, CBox{0, 0, 2147483647.0, 100}, padding), "accepted oversized sample");
             require(!GlassRenderer::blurBackground(source, target, 5, source), "blur ignored failed allocation");
+            require(!GlassRenderer::prepareMaterialBackdrop(source, target, source), "material reduction ignored failed allocation");
+            glGetIntegerv(GL_VIEWPORT, restoredViewport);
+            require(std::equal(std::begin(viewport), std::end(viewport), restoredViewport), "failed material reduction changed viewport");
+            SP<Render::IFramebuffer> invalid;
+            require(!GlassRenderer::prepareMaterialBackdrop(invalid, target, source), "accepted missing material source");
             glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &restored);
             require(restored == GLint(dynamic_cast<Render::GL::CGLFramebuffer*>(source.get())->getFBID()), "failed blur did not restore target");
             require(CRenderBuffers::bytes(INT_MAX, INT_MAX, DRM_FORMAT_ARGB8888) == uint64_t(INT_MAX) * INT_MAX * 4, "byte accounting overflowed");

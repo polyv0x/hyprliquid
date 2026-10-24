@@ -1,0 +1,4 @@
+{
+    global: pluginAPIVersion; pluginInit; pluginExit;
+    local: *;
+};

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Capture real native glass windows over a rendered primitive scene.
 
-All generated images stay in ignored directories. A separate compositor and a
-1920x1200 virtual output keep captures independent of the user's desktop layout.
+All generated images stay in ignored directories. A separate compositor renders
+the 1920x1200 logical scene at twice the pixel density, then grim resolves it to
+1920x1200 for antialiased borders. The desktop's renderer/settings are untouched.
 """
 from pathlib import Path
+import argparse
 import json
 import os
 import subprocess
@@ -30,8 +32,14 @@ def wait_for(predicate, process, seconds=25):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--supersample', type=int, choices=(1, 2, 3, 4), default=2,
+                        help='Render density before resolving to 1920x1200 (default: 2; 1 disables supersampling)')
+    parser.add_argument('--output', type=Path, default=OUTPUT, help='Directory for the eight PNG captures')
+    args = parser.parse_args()
+    output = args.output.resolve()
     BUILD.mkdir(parents=True, exist_ok=True)
-    OUTPUT.mkdir(exist_ok=True)
+    output.mkdir(parents=True, exist_ok=True)
     for variant, name in enumerate(['classic', 'primitives', 'dark']):
         path = BUILD / (name + '.ppm')
         inputs = [ROOT / 'demo/backdrop.frag', ROOT / 'build/demo-scene']
@@ -48,6 +56,7 @@ def main():
         env.update(XDG_RUNTIME_DIR=str(runtime), WAYLAND_DISPLAY=str(display),
                    XDG_CONFIG_HOME=str(BUILD / 'config'), XDG_CACHE_HOME=str(BUILD / 'cache'),
                    XDG_STATE_HOME=str(BUILD / 'state'), HYPRLAND_NO_SD_VARS='1', HYPRLAND_NO_SD_NOTIFY='1',
+                   LIBSEAT_BACKEND='seatd', SEATD_SOCK=str(runtime / 'no-seatd.sock'),
                    QT_QPA_PLATFORM='wayland', QT_WAYLAND_DISABLE_WINDOWDECORATION='1')
         env.pop('HYPRLAND_INSTANCE_SIGNATURE', None)
         clients = []
@@ -67,9 +76,16 @@ def main():
 
             wait_for(lambda: json.loads(ctl('-j', 'monitors')), compositor)
             ctl('output', 'create', 'headless', 'HLQ-DEMO')
-            monitor = wait_for(lambda: next((m for m in json.loads(ctl('-j', 'monitors')) if m['name'] == 'HLQ-DEMO'), None), compositor)
-            assert [monitor['width'], monitor['height'], monitor['scale']] == [1920, 1200, 1], monitor
+            # Loading the plugin reloads the Lua config, including its native
+            # output mode. Set capture density only after that reload completes.
             ctl('plugin', 'load', str(ROOT / 'hyprliquid.so'))
+            density = args.supersample
+            dimensions = [1920 * density, 1200 * density, density]
+            ctl('eval', 'hl.monitor({ output = "HLQ-DEMO", mode = "' +
+                f'{dimensions[0]}x{dimensions[1]}@60", position = "0x0", scale = {density}' + ' })')
+            monitor = wait_for(lambda: next((m for m in json.loads(ctl('-j', 'monitors'))
+                if m['name'] == 'HLQ-DEMO' and [m['width'], m['height'], m['scale']] == dimensions), None), compositor)
+            assert [monitor['width'] / density, monitor['height'] / density] == [1920, 1200], monitor
             errors = ctl('configerrors')
             if errors:
                 raise RuntimeError(errors)
@@ -111,9 +127,9 @@ def main():
                 ('05-materials', 'primitives', [('frosted', 105, 345, 530, 600), ('soft-glass', 695, 345, 530, 600),
                                                ('clear-glass', 1285, 345, 530, 600)], 'THREE MATERIALS / 05'),
                 ('06-frosted-glass', 'dark', [('frosted-glass', 510, 365, 900, 540)], 'FROSTED GLASS / 06'),
-                ('07-clear-edge', 'dark', [('clear-edge', 510, 365, 900, 540)], 'CLEAR EDGE / 07'),
+                ('07-frosted-glass-clear-edge', 'dark', [('frosted-glass-clear-edge', 510, 365, 900, 540)], 'FROSTED GLASS CLEAR EDGE / 07'),
                 ('08-frosted-materials', 'dark', [('soft-glass', 105, 345, 530, 600), ('frosted-glass', 695, 345, 530, 600),
-                                              ('clear-edge', 1285, 345, 530, 600)], 'FROSTED MATERIALS / 08'),
+                                              ('frosted-glass-clear-edge', 1285, 345, 530, 600)], 'FROSTED MATERIALS / 08'),
             ]
             for filename, scene, panes, label in shots:
                 theme = ['--dark'] if scene == 'dark' else []
@@ -125,14 +141,21 @@ def main():
                 # Park the nested cursor on its other output, outside the shot.
                 ctl('dispatch', 'hl.dsp.cursor.move({ x = 2200, y = 300 })')
                 time.sleep(1)
-                path = OUTPUT / (filename + '.png')
-                subprocess.run(['grim', '-o', 'HLQ-DEMO', str(path)], env=env, check=True, capture_output=True, timeout=15)
+                monitor = next(m for m in json.loads(ctl('-j', 'monitors')) if m['name'] == 'HLQ-DEMO')
+                assert [monitor['width'], monitor['height'], monitor['scale']] == dimensions, monitor
+                path = output / (filename + '.png')
+                # Render the same logical geometry/materials at higher density
+                # and resolve during capture; no edits to the production shader.
+                subprocess.run(['grim', '-s', '1', '-o', 'HLQ-DEMO', str(path)], env=env, check=True, capture_output=True, timeout=15)
                 print('Captured ' + str(path), flush=True)
                 for client in reversed(scene_clients):
                     client.terminate()
                     client.wait(timeout=10)
                 wait_for(lambda: not json.loads(ctl('-j', 'clients')), compositor)
             (BUILD / 'plugins.json').write_text(ctl('-j', 'plugin', 'list'))
+            (output / 'capture-settings.json').write_text(json.dumps({
+                'supersample': density, 'render_size': dimensions[:2], 'image_size': [1920, 1200],
+            }, indent=2) + '\n')
             assert not ctl('configerrors')
             ctl('dispatch', 'hl.dsp.exit()')
             compositor.wait(timeout=10)

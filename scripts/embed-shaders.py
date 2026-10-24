@@ -12,7 +12,7 @@ def source_with_includes(path):
                   lambda match: source_with_includes(path.parent / match[1]),
                   path.read_text(), flags=re.MULTILINE)
 
-for name in ("glass.frag", "blur.frag", "scene-sample.frag"):
+for name in ("glass.frag", "liquid.frag", "blur.frag", "scene-sample.frag", "material-backdrop.frag"):
     source = source_with_includes(root / "shaders" / name)
     if ')GLSL"' in source:
         raise ValueError("Shader contains the C++ raw-string delimiter")

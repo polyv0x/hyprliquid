@@ -1,0 +1,37 @@
+#[cxx::bridge(namespace = "hyprliquid::ffi")]
+pub mod ffi {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Status { Ok, InvalidGeometry, InternalFailure }
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    struct OptionalNumber { present: bool, value: f64 }
+    // GENERATED_TYPES
+    struct MaterialResult { status: Status, value: Material }
+    struct LiquidResult { status: Status, value: LiquidMaterial }
+    struct FloatResult { status: Status, value: f32 }
+    struct IntResult { status: Status, value: i32 }
+    struct BoolResult { status: Status, value: bool }
+    struct BytesResult { status: Status, value: u64 }
+    #[derive(Default)]
+    struct SampleGeometry {
+        width: i32, height: i32,
+        x0: i32, y0: i32, x1: i32, y1: i32,
+        owner: [i32; 4],
+    }
+    struct GeometryResult { status: Status, value: SampleGeometry }
+
+    extern "Rust" {
+        fn liquid_control_defaults(dark: bool) -> MaterialResult;
+        fn sanitize_material(material: Material) -> MaterialResult;
+        fn effective_liquid_material(material: Material) -> LiquidResult;
+        fn material_blur_sigma(material: Material) -> FloatResult;
+        fn material_output_extent(material: Material) -> FloatResult;
+        fn material_padding(material: Material, scale: f32) -> IntResult;
+        fn integer_coordinate(value: f64) -> BoolResult;
+        fn dimension(value: f64) -> BoolResult;
+        fn sample_geometry(x: f64, y: f64, w: f64, h: f64, padding: i32) -> GeometryResult;
+        fn map_blit_coordinate(value: i32, from0: i32, from1: i32, to0: i32, to1: i32) -> IntResult;
+        fn buffer_bytes(width: i32, height: i32, block_width: u32, block_height: u32, bytes_per_block: u32) -> BytesResult;
+        #[cfg(feature = "fault_injection")]
+        fn panic_probe() -> MaterialResult;
+    }
+}

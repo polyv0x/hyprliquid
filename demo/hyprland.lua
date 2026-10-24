@@ -14,7 +14,7 @@ hl.config({
 hl.window_rule({ name = "demo-float", match = { class = "^hyprliquid-demo-.*$" }, float = true, no_focus = true })
 hl.window_rule({ name = "demo-backdrop", match = { class = "^hyprliquid-demo-backdrop$" },
                  tag = "+hyprliquid_disabled", rounding = 0, no_shadow = true })
-for _, preset in ipairs({ "frosted", "soft-glass", "clear-glass", "frosted-glass", "clear-edge" }) do
+for _, preset in ipairs({ "frosted", "soft-glass", "clear-glass", "frosted-glass", "frosted-glass-clear-edge" }) do
     hl.window_rule({ name = "demo-" .. preset, match = { class = "^hyprliquid-demo-" .. preset .. "$" },
                      tag = "+hyprliquid_preset_" .. preset })
 end

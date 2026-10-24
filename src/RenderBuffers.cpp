@@ -34,7 +34,7 @@ void string(json_object* o, const char* k, const std::string& s) { json_object_o
 uint64_t size(const SP<Render::IFramebuffer>& fb) {
     return fb && fb->isAllocated() ? CRenderBuffers::bytes(fb->m_size.x, fb->m_size.y, fb->m_drmFormat) : 0;
 }
-uint64_t size(const CRenderBuffers::SSamples& samples) { return size(samples.sharp) + size(samples.blurred); }
+uint64_t size(const CRenderBuffers::SSamples& samples) { return size(samples.sharp) + size(samples.blurred) + size(samples.halfSharp); }
 }
 
 uint64_t CRenderBuffers::bytes(int width, int height, DRMFormat format) {
@@ -43,9 +43,7 @@ uint64_t CRenderBuffers::bytes(int width, int height, DRMFormat format) {
         return 0;
     const int blockHeight = std::max(1, static_cast<int>(info->blockSize.y));
     const auto blockWidth = std::max(1, Hyprgraphics::Egl::pixelsPerBlock(info));
-    const uint64_t stride = ((uint64_t(width) + blockWidth - 1) / blockWidth) * info->bytesPerBlock;
-    const uint64_t rows = (uint64_t(height) + blockHeight - 1) / blockHeight;
-    return stride <= std::numeric_limits<uint64_t>::max() / rows ? stride * rows : 0;
+    return RenderSafety::bufferBytes(width, height, blockWidth, blockHeight, info->bytesPerBlock).value_or(0);
 }
 
 CRenderBuffers::CLease::CLease(CRenderBuffers& pool, std::shared_ptr<SSamples> samples)
@@ -141,6 +139,12 @@ void CRenderBuffers::identify(const SP<Render::IFramebuffer>& fb, const std::str
 
 void CRenderBuffers::touch(const SP<Render::IFramebuffer>& fb) {
     if (fb) if (auto it = m_records.find(fb.get()); it != m_records.end()) it->second.frame = m_frame;
+}
+
+void CRenderBuffers::release(SP<Render::IFramebuffer>& fb) {
+    if (!fb) return;
+    SBindings restore;
+    fb.reset();
 }
 
 void CRenderBuffers::trim(bool expired) {

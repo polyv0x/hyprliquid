@@ -10,12 +10,17 @@ import time
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
-BUILD = ROOT / 'build'
+FIXTURES = ROOT / 'build'
+OUTPUT_DIRECTORY = os.environ.get('HYPRLIQUID_TEST_OUTPUT')
+BUILD = Path(OUTPUT_DIRECTORY).resolve() if OUTPUT_DIRECTORY else FIXTURES
 PLUGIN = Path(os.environ.get('HYPRLIQUID_TEST_PLUGIN', ROOT / 'hyprliquid.so')).resolve()
-BUILD.mkdir(exist_ok=True)
+# Explicit output directories must be fresh: old screenshots must never inflate
+# a before/after comparison. Compiled fixtures still come from the normal build.
+BUILD.mkdir(parents=True, exist_ok=not OUTPUT_DIRECTORY)
 sys.path.insert(0, str(ROOT / 'tests'))
 from control_api import verify_control
 from window_scene import verify_window_scene
+from liquid_scene import verify_liquid
 
 
 def wait_for(predicate, process, seconds=20):
@@ -25,7 +30,7 @@ def wait_for(predicate, process, seconds=20):
         if value:
             return value
         if process.poll() is not None:
-            raise RuntimeError(f'Nested Hyprland exited ({process.returncode}); see build/nested.log')
+            raise RuntimeError(f'Nested Hyprland exited ({process.returncode}); see {BUILD / "nested.log"}')
         time.sleep(0.1)
     raise TimeoutError('Timed out waiting for nested Hyprland')
 
@@ -83,14 +88,14 @@ def main():
                 assert shadow.get('bool', shadow.get('int')) == 1, shadow
                 print('PASS: load and Lua configuration (including signed preset values)', flush=True)
                 control = verify_control(ctl, config_path)
-                security_plugin = BUILD / 'security-test.so'
+                security_plugin = FIXTURES / 'security-test.so'
                 # The fault-injection fixture links the current checkout's library.
                 if security_plugin.exists() and PLUGIN == (ROOT / 'hyprliquid.so').resolve():
                     ctl('plugin', 'load', str(security_plugin))
                     ctl('hyprliquid-test:security', 'run')
                     result = wait_for(lambda: (status if (status := ctl('hyprliquid-test:security', 'status')) != 'pending' else None), compositor)
                     assert result == 'pass', result
-                    layer_binary = BUILD / 'layer-test'
+                    layer_binary = FIXTURES / 'layer-test'
                     if layer_binary.exists():
                         saved_config = config_path.read_text()
                         config_path.write_text(saved_config + '\nhl.plugin.hyprliquid.config({ layers = { enabled = true, mask_mode = "alpha" } })\n')
@@ -108,6 +113,18 @@ def main():
                                     'config_errors': ctl('configerrors'),
                                 }, indent=2))
                                 raise
+                            for preset, model in [('frosted', 'legacy'), ('frosted-liquid', 'liquid'), ('frosted', 'legacy'), ('frosted-liquid-medium', 'liquid')]:
+                                config_path.write_text(saved_config + '\nhl.plugin.hyprliquid.config({ layers = { enabled = true, mask_mode = "alpha" } })\n'
+                                                       'hl.plugin.hyprliquid.layer("hyprliquid-vram-test", { preset = ' + json.dumps(preset) + ' })\n')
+                                ctl('reload')
+                                wait_for(lambda: any(item['cached'] and item['model'] == model
+                                                     for item in control('buffers')['buffers']['layers']), compositor)
+                                wait_for(lambda: any(b['role'] == 'layer-material-backdrop'
+                                                     for b in control('buffers')['buffers']['buffers']) == (model == 'liquid'), compositor)
+                                data = control('buffers')['buffers']
+                                assert any(b['role'] == 'layer-material-backdrop' for b in data['buffers']) == (model == 'liquid')
+                                if model == 'liquid':
+                                    assert all(item['model_data']['shadow_owner'] == 'surface' for item in data['layers'])
                             ctl('hyprliquid-test:security', 'lock')
                             assert ctl('hyprliquid-test:security', 'locked') == 'yes'
                             time.sleep(0.2)
@@ -133,6 +150,10 @@ def main():
                 if '--security-only' in sys.argv:
                     return
                 ctl('dismissnotify')
+
+                if '--liquid-only' in sys.argv:
+                    verify_liquid(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor))
+                    return
 
                 if shutil.which('kitty') and shutil.which('grim'):
                     backdrop = "import time; print('\\x1b[2J\\x1b[H' + '\\n'.join(''.join('\\x1b[48;2;%d;%d;%dm  ' % (((x//6+y//4)%3==0)*150+20, ((x//6+y//4)%3==1)*140+20, ((x//6+y//4)%3==2)*160+30) for x in range(90)) for y in range(50)), flush=True); time.sleep(120)"
@@ -208,10 +229,10 @@ def main():
                     window_action(address, 'resize', f'x = {width}, y = {height}, relative = false')
                     window_action(address, 'move', position)
                     print('PASS: idle live edit/reset and per-window preset isolation', flush=True)
-                    public_presets = {'frosted', 'soft-glass', 'clear-glass', 'frosted-glass', 'clear-edge'}
+                    public_presets = {'frosted', 'soft-glass', 'clear-glass', 'frosted-glass', 'frosted-glass-clear-edge', 'frosted-liquid', 'frosted-liquid-medium'}
                     listed = {p['id'] for p in control('describe')['presets']}
                     assert public_presets <= listed, listed
-                    assert not listed & {'default', 'measured', 'platform', 'lens', 'lighter', 'darker', 'ultra_darker', 'no_bleed'}, listed
+                    assert not listed & {'default', 'measured', 'platform', 'lens', 'lighter', 'darker', 'ultra_darker', 'no_bleed', 'liquid-medium', 'clear-edge', 'frosted-clear-edge'}, listed
                     # Renaming must preserve existing profiles, including the
                     # saved lens-based frost settings that became built-ins.
                     equivalents = [
@@ -219,7 +240,10 @@ def main():
                         ('platform', 'soft-glass', {}),
                         ('lens', 'clear-glass', {}),
                         ('lens', 'frosted-glass', {'blur_alpha0': 0.96, 'blur_alpha3': 1}),
-                        ('lens', 'clear-edge', {'blur_alpha0': 0.02, 'blur_alpha3': 1, 'blur_dist3': 38.4}),
+                        ('lens', 'frosted-glass-clear-edge', {'blur_alpha0': 0.02, 'blur_alpha3': 1, 'blur_dist3': 38.4}),
+                        ('clear-edge', 'frosted-glass-clear-edge', {}),
+                        ('frosted-clear-edge', 'frosted-glass-clear-edge', {}),
+                        ('liquid-medium', 'frosted-liquid', {}),
                     ]
                     for legacy, preset, overrides in equivalents:
                         before = control('apply', profile={'base_preset': legacy, 'overrides': overrides})
@@ -239,8 +263,8 @@ def main():
                         assert control('apply', patch={'theme': 'dark'})['ok']
                         assert capture('nested-theme-' + preset + '-dark-restored') == dark_pixels, preset + ' theme round trip changed pixels'
                     assert control('reset')['ok']
-                    print('PASS: all five dark/light variants repaint idle windows and restore identical pixels', flush=True)
-                    for preset in ['frosted', 'soft-glass', 'frosted-glass', 'clear-edge', 'clear-glass']:
+                    print('PASS: all seven dark/light variants repaint idle windows and restore identical pixels', flush=True)
+                    for preset in ['frosted', 'soft-glass', 'frosted-glass', 'frosted-glass-clear-edge', 'clear-glass']:
                         ctl('eval', 'hl.plugin.hyprliquid.config({ default_preset = ' + json.dumps(preset) + ' })')
                         window_action(address, 'alter_zorder', 'mode = "top"')
                         option = json.loads(ctl('-j', 'getoption', 'plugin:hyprliquid:default_preset'))
@@ -266,11 +290,13 @@ def main():
                     assert edge['fullscreen'] == 0 and edge['at'] == [-40, -40], edge
                     subprocess.run(['grim', str(BUILD / 'nested-edge.png')], env=env, check=True, capture_output=True, timeout=10)
                     assert (BUILD / 'nested-frosted.png').read_bytes() != (BUILD / 'nested-soft-glass.png').read_bytes(), 'Preset change did not render'
-                    assert (BUILD / 'nested-frosted-glass.png').read_bytes() != (BUILD / 'nested-clear-edge.png').read_bytes(), 'Frosted edge treatments did not differ'
+                    assert (BUILD / 'nested-frosted-glass.png').read_bytes() != (BUILD / 'nested-frosted-glass-clear-edge.png').read_bytes(), 'Frosted edge treatments did not differ'
                     assert (BUILD / 'nested-clear-glass.png').read_bytes() != (BUILD / 'nested-disabled.png').read_bytes(), 'Disable did not render'
                     print('PASS: render, switch presets, disable/enable, fullscreen, offscreen padding', flush=True)
                     verify_window_scene(ctl, env, log, clients, BUILD,
                                         lambda predicate: wait_for(predicate, compositor))
+                    verify_liquid(ctl, env, log, clients, BUILD,
+                                  lambda predicate: wait_for(predicate, compositor))
                 else:
                     print('SKIP: window/screenshot exercise requires kitty and grim', flush=True)
 

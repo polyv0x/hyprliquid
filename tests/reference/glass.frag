@@ -7,13 +7,13 @@ uniform sampler2D blur_texture;     // backdrop, blurRadius 45
 uniform vec2  uRes;
 uniform vec2  uInvRes;
 
-// --- shape (ShaderUtils<T>::supercircle_sdf) ---
+// --- shape ---
 uniform vec2  uCenter;
 uniform vec2  uHalf;
 uniform float uCornerRadius;
 uniform float uSuperness;           // superellipse exponent; 2.0 = plain rounded rect
 
-// --- GlassBackgroundUniforms ---
+// --- background material ---
 uniform float outer_refraction_amount;
 uniform float outer_refraction_inv_height;
 uniform float inner_refraction_amount;
@@ -33,42 +33,40 @@ uniform float face_opacity;
 uniform float holding_tone_opacity;
 uniform float refraction_opacity;
 
-// --- GlassForegroundUniforms ---
+// --- foreground material ---
 uniform float aberration_amount;
 uniform float inv_aberration_height;
 uniform vec2  aberration_angle;
 
-// --- RimOutlineUniforms ---
+// --- rim outline ---
 uniform vec3  rim_color;
 uniform float rim_width;
 uniform float rim_soft;
 uniform float rim_opacity;
 uniform vec2  uLightDir;
 
-// --- measured on this machine, via glassprobe ---
+// --- face tone and coverage ---
 uniform float face_slope;          // 0.6811
 uniform float face_intercept;      // 0.2788
-uniform float use_measured_face;   // 1 = measured affine, 0 = shipped recipe
+uniform float use_affine_face;     // 1 = affine, 0 = luma matrix
 uniform float coverage_offset;     // 0.20
 uniform float coverage_width;      // 2.00
 
-// platformContentGlass.materialrecipe, factored:
+// Luma matrix, factored:
 //   out = c - 0.371 * luma709(c) + 0.235
 const vec3  LUMA709   = vec3(0.2126, 0.7152, 0.0722);
 const float CM_WEIGHT = 0.371;
 const float CM_LIFT   = 0.235;
 
-// The recipe matrix is what ships in platformContentGlass.materialrecipe.
-// The affine form is what NSGlassEffectView was measured to actually apply --
-// they are not the same, and the measurement wins.
+// The regression comparison selects the affine face tone.
 vec3 face_color_matrix(vec3 c) {
-  vec3 recipe   = c - CM_WEIGHT * dot(c, LUMA709) + CM_LIFT;
-  vec3 measured = c * face_slope + face_intercept;
-  return mix(recipe, measured, use_measured_face);
+  vec3 matrix = c - CM_WEIGHT * dot(c, LUMA709) + CM_LIFT;
+  vec3 affine = c * face_slope + face_intercept;
+  return mix(matrix, affine, use_affine_face);
 }
 
 // Superellipse SDF. At uSuperness == 2 this is the familiar rounded
-// rect; Apple's continuous corners sit nearer 4.
+// rect; larger values produce flatter corners.
 float supercircle_sdf(vec2 p, vec2 half_size, float r, float n) {
   vec2  q  = abs(p) - (half_size - r);
   vec2  qc = max(q, 0.0);
@@ -109,7 +107,7 @@ void main() {
   float d  = sdf_at(p);                 // < 0 inside
   vec3  bg = texture2D(source_texture, vUV).rgb;
 
-  // air.discard_fragment: nothing to do well outside the shape
+  // Nothing to do well outside the shape.
   if (d > 2.0) { gl_FragColor = vec4(bg, 1.0); return; }
 
   vec2  n     = sdf_normal(p);
@@ -161,9 +159,7 @@ void main() {
   float spec = pow(max(lit, 0.0), 3.0) + 0.55 * pow(max(-lit, 0.0), 6.0);
   refr += rim_color * band * spec * rim_opacity;
 
-  // Coverage ramp measured off a flat-field capture rather than guessed.
-  // The 0.20px offset matters: before it was fitted, 97% of all residual
-  // error against the real material sat in this three-pixel ring.
+  // Coverage ramp with an explicit offset and width.
   float cov = clamp(0.5 - (d + coverage_offset) / coverage_width, 0.0, 1.0);
   gl_FragColor = vec4(mix(bg, refr, cov), 1.0);
 }

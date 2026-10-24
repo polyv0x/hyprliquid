@@ -1,0 +1,358 @@
+{
+  "variants": {
+    "default": {
+      "backdrop": {
+        "scale": 0.5,
+        "tracksLuminance": false,
+        "captureOnly": false,
+        "allowsWindowServerAware": true,
+        "updateRate": 0.0,
+        "inverseMeshed": false
+      },
+      "sdf": {
+        "inset": 0.0,
+        "range": [
+          -83.0,
+          30.687304932756238
+        ],
+        "ovalizationAmount": 0.0
+      },
+      "shadow": {
+        "offset": [
+          0.0,
+          8.0
+        ],
+        "amount": 75.0,
+        "height": 66.4,
+        "inset": 0.0,
+        "blurRadius": 0.0,
+        "shadowRadius": 24.0,
+        "ycc": {
+          "black": 0.0,
+          "white": 1.0,
+          "saturation": 1.2,
+          "normalFill": [
+            0,
+            0,
+            0,
+            0.1
+          ],
+          "dodgeFill": null,
+          "burnFill": null
+        },
+        "opacity": 0.15,
+        "vibrancyContribution": 0.0
+      },
+      "blur": {
+        "radius": 6.0,
+        "distances": [
+          -83.0,
+          -1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "opacities": [
+          1.0,
+          0.5,
+          0.5,
+          1.0,
+          1.0
+        ],
+        "opacity": 1.0
+      },
+      "refraction": {
+        "innerHeight": 20.0,
+        "innerAmount": -60.0,
+        "outerHeight": 0.0,
+        "outerAmount": 0.0,
+        "outerDistances": [
+          -1.0,
+          0.0
+        ],
+        "outerOpacity": 0.2
+      },
+      "face": {
+        "opacity": 1.0,
+        "ycc": {
+          "black": 0.15,
+          "white": 0.9,
+          "saturation": 1.05,
+          "normalFill": [
+            1,
+            1,
+            1,
+            0.1
+          ],
+          "dodgeFill": null,
+          "burnFill": null
+        }
+      },
+      "bleed": {
+        "amount": 0.0,
+        "height": 0.0,
+        "blurRadius": 0.0,
+        "opacity": 0.0,
+        "distances": [
+          1.0,
+          0.0
+        ],
+        "ycc": {
+          "black": 0.75,
+          "white": 1.0,
+          "saturation": 1.2,
+          "normalFill": null,
+          "dodgeFill": null,
+          "burnFill": null
+        },
+        "useDarkenBlending": true
+      },
+      "sdrAdjustment": {
+        "headroomTransitionPoint": 9999.0,
+        "shadowOpacityShift": 0.24,
+        "faceDimming": {
+          "whitePointShift": 0.97,
+          "distances": [
+            -2.0,
+            -1.0
+          ]
+        }
+      },
+      "environmentFlags": 559491,
+      "highlight": {
+        "inset": 0.0,
+        "appliesDisplayAngle": true,
+        "curvature": 0.7,
+        "keyColor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "keyAngle": 0.0,
+        "keyHeight": 1.0,
+        "keySpread": 1.5707963267948966,
+        "keyAmount": 0.5,
+        "fillColor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "fillAngle": 3.141592653589793,
+        "fillHeight": 1.0,
+        "fillSpread": 1.5707963267948966,
+        "fillAmount": 0.5,
+        "maxColorComponent": 1.0,
+        "colorHeadroom": null,
+        "colorMatrix": [
+          [
+            1.0193,
+            -0.608,
+            -0.0613,
+            0,
+            0.65
+          ],
+          [
+            -0.18069999,
+            0.59209996,
+            -0.0614,
+            0,
+            0.65
+          ],
+          [
+            -0.18079999,
+            -0.60789996,
+            1.1386,
+            0,
+            0.65
+          ],
+          [
+            0,
+            0,
+            0,
+            1,
+            0
+          ]
+        ]
+      }
+    },
+    "dark": {
+      "backdrop": {
+        "scale": 0.5,
+        "tracksLuminance": false,
+        "captureOnly": false,
+        "allowsWindowServerAware": true,
+        "updateRate": 0.0,
+        "inverseMeshed": false
+      },
+      "sdf": {
+        "inset": 0.0,
+        "range": [
+          -83.0,
+          22.26279173691581
+        ],
+        "ovalizationAmount": 0.0
+      },
+      "shadow": {
+        "offset": [
+          0.0,
+          8.0
+        ],
+        "amount": 75.0,
+        "height": 66.4,
+        "inset": 0.0,
+        "blurRadius": 0.0,
+        "shadowRadius": 24.0,
+        "ycc": {
+          "black": 0.0,
+          "white": 1.0,
+          "saturation": 1.2,
+          "normalFill": [
+            0,
+            0,
+            0,
+            0.1
+          ],
+          "dodgeFill": null,
+          "burnFill": null
+        },
+        "opacity": 0.05,
+        "vibrancyContribution": 0.0
+      },
+      "blur": {
+        "radius": 6.0,
+        "distances": [
+          -83.0,
+          -1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "opacities": [
+          1.0,
+          0.5,
+          0.5,
+          1.0,
+          1.0
+        ],
+        "opacity": 1.0
+      },
+      "refraction": {
+        "innerHeight": 20.0,
+        "innerAmount": -60.0,
+        "outerHeight": 0.0,
+        "outerAmount": 0.0,
+        "outerDistances": [
+          -1.0,
+          0.0
+        ],
+        "outerOpacity": 0.2
+      },
+      "face": {
+        "opacity": 1.0,
+        "ycc": {
+          "black": 0.075,
+          "white": 0.9,
+          "saturation": 1.06,
+          "normalFill": [
+            0,
+            0,
+            0,
+            0.1
+          ],
+          "dodgeFill": null,
+          "burnFill": null
+        }
+      },
+      "bleed": {
+        "amount": 0.0,
+        "height": 0.0,
+        "blurRadius": 0.0,
+        "opacity": 0.0,
+        "distances": [
+          1.0,
+          0.0
+        ],
+        "ycc": {
+          "black": 0.75,
+          "white": 1.0,
+          "saturation": 1.2,
+          "normalFill": null,
+          "dodgeFill": null,
+          "burnFill": null
+        },
+        "useDarkenBlending": true
+      },
+      "sdrAdjustment": {
+        "headroomTransitionPoint": 9999.0,
+        "shadowOpacityShift": 0.24,
+        "faceDimming": {
+          "whitePointShift": 0.97,
+          "distances": [
+            -2.0,
+            -1.0
+          ]
+        }
+      },
+      "environmentFlags": 559491,
+      "highlight": {
+        "inset": 0.0,
+        "appliesDisplayAngle": true,
+        "curvature": 0.7,
+        "keyColor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "keyAngle": 0.0,
+        "keyHeight": 1.0,
+        "keySpread": 1.5707963267948966,
+        "keyAmount": 0.5,
+        "fillColor": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "fillAngle": 3.141592653589793,
+        "fillHeight": 1.0,
+        "fillSpread": 1.5707963267948966,
+        "fillAmount": 0.5,
+        "maxColorComponent": 1.0,
+        "colorHeadroom": null,
+        "colorMatrix": [
+          [
+            1.2149999,
+            -0.2862,
+            -0.0288,
+            0,
+            0.29999998
+          ],
+          [
+            -0.085,
+            1.0138999,
+            -0.0289,
+            0,
+            0.29999998
+          ],
+          [
+            -0.085099995,
+            -0.28599998,
+            1.2710999,
+            0,
+            0.29999998
+          ],
+          [
+            0,
+            0,
+            0,
+            1,
+            0
+          ]
+        ]
+      }
+    }
+  }
+}

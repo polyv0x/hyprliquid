@@ -1,6 +1,8 @@
 #include "LuaSafety.hpp"
 #include "Material.hpp"
+#include "BuiltInPresets.hpp"
 #include "RenderSafety.hpp"
+#include "ResizeAngle.hpp"
 
 #include <bit>
 #include <cassert>
@@ -128,9 +130,81 @@ void geometry() {
     }
     std::cout << "PASS: geometry overflow regressions and 100000 adversarial numeric inputs\n";
 }
+
+void materialFamilies() {
+    auto presets = BuiltInPresets::getAll();
+    presets["custom-liquid"].inherits = "frosted-liquid-medium";
+    presets["custom-child"].inherits = "custom-liquid";
+    assert(resolveMaterialFamily("custom-child", presets) == EMaterialFamily::LIQUID);
+    assert(resolveMaterialFamily("frosted-glass-clear-edge", presets) == EMaterialFamily::LEGACY);
+    presets["a"].inherits = "b"; presets["b"].inherits = "a";
+    assert(resolveMaterialFamily("a", presets) == EMaterialFamily::LEGACY);
+    assert(LIQUID_DEFAULT.refraction.outerHeight == 0 && LIQUID_DEFAULT.refraction.innerAmount == -60);
+    assert(LIQUID_DEFAULT.blur.distances == (std::array<double, 5>{-83, -1, 0, 0, 0}));
+    assert(LIQUID_DARK.shadow.opacity == 0.05 && LIQUID_DEFAULT.shadow.opacity == 0.15);
+    assert(!LIQUID_DARK.highlight.colorHeadroom && !LIQUID_DEFAULT.face.ycc.dodgeFill);
+    auto material = liquidControlDefaults(true);
+    assert(materialBlurSigma(material) == 6 && materialOutputExtent(material) == 105);
+    assert(materialPadding(material, 1) == 209);
+    assert(materialPadding(material, std::numeric_limits<float>::infinity()) == 0);
+    material.effect_scale = std::numeric_limits<float>::quiet_NaN();
+    sanitizeMaterial(material);
+    assert(material.effect_scale == 1 && material.family == EMaterialFamily::LIQUID);
+    material.blur_sigma = 60;
+    material.outer_refraction_amount = 120;
+    material.outer_refraction_inv_height = 0.001f;
+    material.shadow_offset = -30;
+    material.blur_dist3 = 0.1f;
+    material.refraction_threshold0 = 160;
+    material.refraction_threshold1 = 0;
+    sanitizeMaterial(material);
+    const auto effective = effectiveLiquidMaterial(material);
+    assert(effective.refraction.outerHeight > 999 && effective.refraction.outerAmount == 120);
+    assert(effective.refraction.outerDistances[0] < effective.refraction.outerDistances[1]);
+    assert(std::is_sorted(effective.blur.distances.begin(), effective.blur.distances.end()));
+    assert(materialOutputExtent(material) == 127 && materialPadding(material, 1) == 519);
+    material.refraction_opacity = 0;
+    assert(effectiveLiquidMaterial(material).refraction.outerHeight == 0 && effectiveLiquidMaterial(material).refraction.innerAmount == 0);
+    std::cout << "PASS: typed material variants, family inheritance, disabled heights and sample/output extents\n";
+}
+}
+
+static void resizeAngles() {
+    CResizeAngle sweep;
+    const CResizeAngle::Size begin{100, 100}, goal{300, 200};
+    assert(sweep.update(45, true, begin, goal, begin) == 0);
+    const auto first = sweep.update(45, true, begin, goal, {150, 125});
+    assert(first > 0 && first < 45);
+    assert(sweep.update(45, true, begin, goal, {200, 150}) == 45);
+    assert(std::abs(sweep.update(45, true, begin, goal, {250, 175}) - first) < 1e-5);
+    assert(sweep.update(45, true, begin, goal, goal) == 0);
+    // Spring overshoot stays bounded, and a return before the goal follows it.
+    assert(sweep.update(45, true, begin, goal, {320, 210}) == 0);
+    assert(sweep.update(45, true, begin, goal, {280, 190}) > 0);
+    assert(sweep.update(45, false, begin, goal, goal) == 0);
+    assert(sweep.update(-45, true, begin, goal, {200, 150}) == -45);
+    const CResizeAngle::Size interrupted{200, 150}, redirected{80, 300};
+    assert(sweep.update(-45, true, interrupted, redirected, interrupted) == -45);
+    const auto retargeted = sweep.update(-45, true, interrupted, redirected, {170, 187.5});
+    assert(retargeted <= 0 && retargeted >= -45);
+    // Changing amplitude/sign during a resize must not jump at the edit.
+    assert(sweep.update(30, true, interrupted, redirected, {170, 187.5}) == retargeted);
+    assert(sweep.update(30, true, interrupted, redirected, redirected) == 0);
+    assert(sweep.update(30, true, goal, goal, goal) == 0);
+    assert(sweep.update(30, true, begin, goal, {NAN, 150}) == 0);
+    auto material = liquidControlDefaults(true);
+    material.display_angle_degrees = -500;
+    sanitizeMaterial(material);
+    assert(material.display_angle_degrees == -180);
+    material.display_angle_degrees = NAN;
+    sanitizeMaterial(material);
+    assert(material.display_angle_degrees == 0);
+    std::cout << "PASS: resize highlight sweep, signed angles, spring bounds, retarget continuity and finite defaults\n";
 }
 
 int main() {
     geometry();
+    materialFamilies();
     luaErrors();
+    resizeAngles();
 }
