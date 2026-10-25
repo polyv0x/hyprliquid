@@ -103,6 +103,7 @@ def main():
     parser.add_argument('--client-update-hz', type=float, default=40, help='Changing client repaint rate (default: 40 Hz)')
     parser.add_argument('--animate-top-layer', action='store_true', help='Repaint a top layer independently at 60 Hz during steady timing')
     parser.add_argument('--opaque-clients', action='store_true', help='Use fully opaque client surfaces to exercise occlusion')
+    parser.add_argument('--x11-clients', action='store_true', help='Use the disposable compositor’s Xwayland server for pattern clients')
     parser.add_argument('--warmup-seconds', type=float, default=1, help='Foreground repaint warmup before sampling')
     parser.add_argument('--sample-seconds', type=float, default=6, help='Duration of foreground repaint sampling')
     parser.add_argument('--native-blur', action='store_true', help='With --steady-only, disable Liquid and enable native blur (size 8, three passes)')
@@ -131,7 +132,8 @@ def main():
                             'warmup_seconds': args.warmup_seconds, 'sample_seconds': args.sample_seconds,
                             'native_blur': args.native_blur,
                             'client_update_interval_seconds': update_interval,
-                            'animate_top_layer': args.animate_top_layer, 'opaque_clients': args.opaque_clients},
+                            'animate_top_layer': args.animate_top_layer, 'opaque_clients': args.opaque_clients,
+                            'x11_clients': args.x11_clients},
                'builds': {key: {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
                           for key, path in arms.items()}, 'arms': {}, 'comparisons': []}
     (output / 'result.json').write_text(json.dumps(results, indent=2))
@@ -178,6 +180,22 @@ def main():
                 wait(lambda: len(json.loads(ctl('-j', 'monitors'))) == 1)
                 ctl('plugin', 'load', str(ROOT / 'build/capture-test.so'))
 
+                client_env = env.copy()
+                if args.x11_clients:
+                    def x11_environment():
+                        children = Path(f'/proc/{compositor.pid}/task/{compositor.pid}/children').read_text().split()
+                        for child in children:
+                            try: argv = Path(f'/proc/{child}/cmdline').read_bytes().decode().strip('\0').split('\0')
+                            except OSError: continue
+                            if not argv or Path(argv[0]).name != 'Xwayland': continue
+                            display = next((word for word in argv[1:] if word.startswith(':')), None)
+                            if display:
+                                result = {'DISPLAY': display}
+                                if '-auth' in argv: result['XAUTHORITY'] = argv[argv.index('-auth') + 1]
+                                return result
+                    client_env.pop('XAUTHORITY', None)
+                    client_env.update(wait(x11_environment))
+
                 controls = []
                 pattern = r'''
 import json, shutil, sys, time
@@ -206,7 +224,8 @@ while True:
                         clients.append(subprocess.Popen(['kitty', '--start-as=normal', '--class', f'vram-pane-{side}',
                             '-o', 'background_opacity=' + ('1' if args.opaque_clients else '0'), '-o', 'remember_window_size=no',
                             '-o', 'cursor_blink_interval=0', '-o', 'font_size=16',
-                            'python3', '-c', pattern, str(path)], env=env, stdout=log, stderr=log))
+                            '-o', 'linux_display_server=' + ('x11' if args.x11_clients else 'wayland'),
+                            'python3', '-c', pattern, str(path)], env=client_env, stdout=log, stderr=log))
                         wait(lambda: len(json.loads(ctl('-j', 'clients'))) == side + 1)
 
                 def capture(directory, name):
@@ -262,6 +281,7 @@ while True:
                     results['arms'][arm] = arm_result
                     has_buffers = 'buffers' in control('describe')['capabilities']
                     arm_result['geometry'] = json.loads(ctl('-j', 'clients'))
+                    assert all(w['xwayland'] == args.x11_clients for w in arm_result['geometry']), 'Client backend differs from requested workload'
                     geometry = sorted((w['class'], w['at'], w['size']) for w in arm_result['geometry'])
                     if args.steady_panes == 2:
                         assert geometry == [('vram-pane-0', [20, 20], [612, 760]),
@@ -347,9 +367,12 @@ while True:
                     cases.append(('combined-optics', {'base_preset': 'lens', 'overrides': {
                         'blur_sigma': 60, 'outer_refraction_amount': -120, 'inner_refraction_amount': 120,
                         'aberration_amount': 26, 'edge_bleed_amount': 70, 'edge_bleed_opacity': 1}}))
-                    for name, profile in cases:
+                    for index, (name, profile) in enumerate(cases):
                         control('apply', profile=profile)
                         time.sleep(.12)
+                        if args.x11_clients:
+                            set_pattern(controls[-1], {'color': colors[-1], 'phase': index % 2})
+                            time.sleep(.15)
                         arm_result['captures'][name] = capture(directory, name)
                     for opacity in (.92, 1):
                         ctl('eval', 'hl.config({ decoration = { active_opacity = ' + str(opacity) + ', inactive_opacity = ' + str(opacity) + ' } })')
@@ -362,6 +385,9 @@ while True:
                         ctl('eval', 'hl.monitor({ output = "HYPRLIQUID-TEST", mode = "1280x800@60", '
                             f'position = "auto", scale = {scale}, transform = {transform}' + ' })')
                         time.sleep(.6)
+                        if args.x11_clients:
+                            set_pattern(controls[-1], {'color': colors[-1], 'phase': transform % 2})
+                            time.sleep(.15)
                         arm_result['captures'][name] = capture(directory, name)
 
                     ctl('eval', 'hl.monitor({ output = "HYPRLIQUID-TEST", mode = "1280x800@60", position = "auto", '

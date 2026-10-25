@@ -244,7 +244,10 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
         // Reordering base glass below clients requires their main surfaces to
         // stay inside their panes. Subsurface trees keep native interleaving.
         const auto surface = window->resource();
-        if (!surface || !surface->m_subsurfaces.empty() || surface->m_current.size != window->getReportedSize())
+        // Native main-surface quads fill the pane even when buffer dimensions
+        // differ (notably scaled Xwayland). Small surfaces use different
+        // placement rules and retain native interleaving conservatively.
+        if (!surface || !surface->m_subsurfaces.empty() || !window->wlSurface() || window->wlSurface()->small())
             legacy = false;
         // Animations/snapshots and real underlays keep native painting order.
         if (window->positionAnimation()->isBeingAnimated() || window->sizeAnimation()->isBeingAnimated() ||
@@ -327,6 +330,8 @@ std::vector<uint64_t> inputKey(const SWindowScene& scene) {
         const auto window = ref.lock();
         number(window->effectiveAlpha());
         number(window->getRealBorderSize());
+        number(window->getReportedSize().x); number(window->getReportedSize().y);
+        number(window->m_X11SurfaceScaledBy);
         key.push_back(window->m_ruleApplicator->opaque().valueOrDefault());
         key.push_back(window->m_ruleApplicator->nearestNeighbor().valueOrDefault());
         key.push_back(window->m_ruleApplicator->noDim().valueOrDefault());
@@ -347,6 +352,7 @@ std::vector<uint64_t> inputKey(const SWindowScene& scene) {
         }
         const auto surface = window->wlSurface();
         number(surface->m_alphaModifier); number(surface->m_overallOpacity);
+        key.push_back(surface->m_fillIgnoreSmall);
         surface->m_visibleRegion.forEachRect([&](const auto& r) {
             number(r.x1); number(r.y1); number(r.x2); number(r.y2);
         });
@@ -354,6 +360,7 @@ std::vector<uint64_t> inputKey(const SWindowScene& scene) {
         const auto resource = window->resource();
         const auto& state = resource->m_current;
         key.push_back(state.transform); key.push_back(state.scale);
+        number(state.size.x); number(state.size.y);
         number(state.offset.x); number(state.offset.y);
         number(state.bufferSize.x); number(state.bufferSize.y);
         key.push_back(state.viewport.hasSource); key.push_back(state.viewport.hasDestination);

@@ -19,7 +19,7 @@ class CRenderBuffers {
   public:
     using Clock = std::chrono::steady_clock;
     static constexpr uint64_t RETAINED_BYTES = 128ULL * 1024 * 1024;
-    static constexpr size_t RETAINED_PAIRS = 8;
+    static constexpr size_t RETAINED_PAIRS = 16;
     static constexpr auto IDLE_TIMEOUT = std::chrono::seconds(5);
     static constexpr uint64_t SCRATCH_RETAINED_BYTES = 32ULL * 1024 * 1024;
     static constexpr size_t SCRATCH_RETAINED_SETS = 16;
