@@ -98,6 +98,18 @@ build/decoration-lifecycle-test.so: tests/decoration-lifecycle.cpp tests/capture
 build/layer-test: tests/layer.cpp | build
 	$(CXX) $(CXXFLAGS) $< -o $@ $$(pkg-config --cflags --libs gtk4 gtk4-layer-shell-0)
 
+build/xdg-shell-client.h: | build
+	wayland-scanner client-header $$(pkg-config --variable=pkgdatadir wayland-protocols)/stable/xdg-shell/xdg-shell.xml $@
+
+build/xdg-shell-client.c: | build
+	wayland-scanner private-code $$(pkg-config --variable=pkgdatadir wayland-protocols)/stable/xdg-shell/xdg-shell.xml $@
+
+build/xdg-shell-client.o: build/xdg-shell-client.c
+	$(CC) -c $< -o $@ $$(pkg-config --cflags wayland-client)
+
+build/subsurface-test: tests/subsurface.cpp build/xdg-shell-client.h build/xdg-shell-client.o
+	$(CXX) $(CXXFLAGS) -Ibuild $< build/xdg-shell-client.o -o $@ $$(pkg-config --cflags --libs wayland-client json-c)
+
 build/demo-scene: demo/render.cpp | build
 	$(CXX) $(CXXFLAGS) $< -o $@ $$(pkg-config --cflags --libs egl glesv2)
 

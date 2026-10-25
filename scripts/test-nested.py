@@ -24,6 +24,7 @@ from liquid_scene import verify_liquid
 from hover_angle import verify_hover_angle
 from gpu_cache import verify_gpu_cache
 from decoration_lifecycle import verify_decoration_lifecycle
+from surface_cache import verify_surface_cache
 
 
 def wait_for(predicate, process, seconds=20):
@@ -92,6 +93,10 @@ def main():
                 print('PASS: load and Lua configuration (including signed preset values)', flush=True)
                 if '--decoration-lifecycle-only' in sys.argv:
                     verify_decoration_lifecycle(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES, PLUGIN)
+                    return
+                if '--surface-cache-only' in sys.argv:
+                    verify_surface_cache(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES, PLUGIN,
+                                         os.environ.get('HYPRLIQUID_TEST_BASELINE'))
                     return
                 control = verify_control(ctl, config_path)
                 security_plugin = FIXTURES / 'security-test.so'

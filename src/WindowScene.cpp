@@ -59,6 +59,27 @@ CGlassDecoration* decorationFor(PHLWINDOW window) {
     return nullptr;
 }
 
+bool surfacesInsideWindow(PHLWINDOW window) {
+    const auto root = window->resource();
+    if (!root || !window->wlSurface() || window->wlSurface()->small())
+        return false;
+
+    const auto size = window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+    bool contained = true;
+    // Match the native main pass's traversal and minimum child quad size.
+    // A child outside the pane can cover another pane's base glass, so those
+    // trees must retain the original interleaved rendering order.
+    root->breadthfirst([&](SP<CWLSurfaceResource> surface, const Vector2D& offset, void*) {
+        const auto& state = surface->m_current;
+        if (surface == root || !state.texture || state.size.x < 1 || state.size.y < 1)
+            return;
+        contained &= offset.x >= 0 && offset.y >= 0 &&
+            offset.x + std::max(state.size.x, 2.0) <= size.x &&
+            offset.y + std::max(state.size.y, 2.0) <= size.y;
+    }, nullptr);
+    return contained;
+}
+
 class CWindowScenePassElement : public IPassElement {
   public:
     explicit CWindowScenePassElement(std::shared_ptr<SWindowScene> scene) : m_scene(std::move(scene)) {}
@@ -241,13 +262,12 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
         for (const auto& other : currentBoxes)
             if (!box->intersection(other).empty()) { local = false; disjoint = false; }
         currentBoxes.push_back(*box);
-        // Reordering base glass below clients requires their main surfaces to
-        // stay inside their panes. Subsurface trees keep native interleaving.
-        const auto surface = window->resource();
+        // Reordering base glass below clients requires every surface to stay
+        // inside its pane, including browser video/content subsurfaces.
         // Native main-surface quads fill the pane even when buffer dimensions
         // differ (notably scaled Xwayland). Small surfaces use different
         // placement rules and retain native interleaving conservatively.
-        if (!surface || !surface->m_subsurfaces.empty() || !window->wlSurface() || window->wlSurface()->small())
+        if (!surfacesInsideWindow(window))
             legacy = false;
         // Animations/snapshots and real underlays keep native painting order.
         if (window->positionAnimation()->isBeingAnimated() || window->sizeAnimation()->isBeingAnimated() ||
@@ -281,7 +301,7 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
                 decoration.get() != decorationFor(window)) scene->cacheInputs = false;
         }
     }
-    return hasGlass && (local || scene->windows.size() > 1) ? scene : nullptr;
+    return hasGlass && (local || scene->windows.size() > 1 || scene->cacheInputs) ? scene : nullptr;
 }
 
 std::vector<uint64_t> localKey(const SWindowScene& scene, PHLMONITOR monitor, PHLWORKSPACE workspace) {
@@ -350,25 +370,45 @@ std::vector<uint64_t> inputKey(const SWindowScene& scene) {
                 number(color.r); number(color.g); number(color.b); number(color.a);
             }
         }
-        const auto surface = window->wlSurface();
-        number(surface->m_alphaModifier); number(surface->m_overallOpacity);
-        key.push_back(surface->m_fillIgnoreSmall);
-        surface->m_visibleRegion.forEachRect([&](const auto& r) {
-            number(r.x1); number(r.y1); number(r.x2); number(r.y2);
-        });
-        key.push_back(UINT64_MAX);
-        const auto resource = window->resource();
-        const auto& state = resource->m_current;
-        key.push_back(state.transform); key.push_back(state.scale);
-        number(state.size.x); number(state.size.y);
-        number(state.offset.x); number(state.offset.y);
-        number(state.bufferSize.x); number(state.bufferSize.y);
-        key.push_back(state.viewport.hasSource); key.push_back(state.viewport.hasDestination);
-        number(state.viewport.source.x); number(state.viewport.source.y);
-        number(state.viewport.source.w); number(state.viewport.source.h);
-        number(state.viewport.destination.x); number(state.viewport.destination.y);
-        const auto texture = state.texture;
-        key.push_back(texture && texture->m_imageDescription ? texture->m_imageDescription->id() : 0);
+        // Encode the native drawing order and each surface's rendering state.
+        // Buffer identity is deliberately absent: pixel commits use damage,
+        // while movement, restacking and map/unmap must invalidate even when
+        // no buffer pixels were damaged.
+        const auto countIndex = key.size();
+        key.push_back(0);
+        window->resource()->breadthfirst([&](SP<CWLSurfaceResource> resource, const Vector2D& offset, void*) {
+            ++key[countIndex];
+            key.push_back(reinterpret_cast<uintptr_t>(resource.get()));
+            number(offset.x); number(offset.y);
+            key.push_back(resource->m_mapped);
+            const auto surface = Desktop::View::CWLSurface::fromResource(resource);
+            key.push_back(bool(surface));
+            if (surface) {
+                number(surface->m_alphaModifier); number(surface->m_overallOpacity);
+                key.push_back(surface->m_fillIgnoreSmall);
+                surface->m_visibleRegion.forEachRect([&](const auto& r) {
+                    number(r.x1); number(r.y1); number(r.x2); number(r.y2);
+                });
+                key.push_back(UINT64_MAX);
+            }
+            const auto& state = resource->m_current;
+            key.push_back(state.transform); key.push_back(state.scale);
+            number(state.size.x); number(state.size.y);
+            number(state.offset.x); number(state.offset.y);
+            number(state.bufferSize.x); number(state.bufferSize.y);
+            key.push_back(state.viewport.hasSource); key.push_back(state.viewport.hasDestination);
+            number(state.viewport.source.x); number(state.viewport.source.y);
+            number(state.viewport.source.w); number(state.viewport.source.h);
+            number(state.viewport.destination.x); number(state.viewport.destination.y);
+            state.opaque.forEachRect([&](const auto& r) {
+                number(r.x1); number(r.y1); number(r.x2); number(r.y2);
+            });
+            key.push_back(UINT64_MAX);
+            const auto texture = state.texture;
+            key.push_back(bool(texture));
+            key.push_back(texture && texture->m_opaque);
+            key.push_back(texture && texture->m_imageDescription ? texture->m_imageDescription->id() : 0);
+        }, nullptr);
     }
     return key;
 }
@@ -394,6 +434,29 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
     storage.monitor = monitor;
     storage.retired.reset();
     storage.frame = g_pGlobalState->renderBuffers.frame();
+    if (!scene->local && scene->windows.size() == 1 && scene->cacheInputs) {
+        // With no neighbours, cache the native decoration's input in place.
+        // Keeping its original pass preserves shadows/dimming below the glass
+        // and avoids allocating or drawing a monitor-sized auxiliary scene.
+        scene->backgroundKey = localKey(*scene, monitor, workspace);
+        scene->inputKey = inputKey(*scene);
+        scene->damage = std::move(storage.damage);
+        storage.damage.clear();
+        scene->ready = true;
+        if (storage.background || storage.image)
+            g_pGlobalState->renderBuffers.discardBackdrop(std::format("monitor:{}:base", monitor->m_id));
+        storage.background.reset();
+        storage.image.reset();
+        storage.cache.reset();
+        storage.key.clear();
+        storage.inputKey.clear();
+        storage.scene = scene;
+        const auto previousScene = queuedScene;
+        queuedScene = scene;
+        CScopeGuard restoreScene([&] { queuedScene = previousScene; });
+        original(renderer, monitor, workspace, now);
+        return;
+    }
     // Two workspaces can be queued in one frame during transitions. Never
     // overwrite an earlier queued scene's immutable background or neighbour map.
     if (!storage.scene.expired()) {
