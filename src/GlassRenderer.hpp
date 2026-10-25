@@ -4,6 +4,7 @@
 
 #include <array>
 #include <span>
+#include <optional>
 #include <GLES3/gl32.h>
 #include <hyprland/src/render/Framebuffer.hpp>
 #include <hyprutils/math/Box.hpp>
@@ -13,6 +14,12 @@
 // Shared GL rendering pipeline used by both window decorations and layer surfaces.
 // Callers own their sample framebuffers; these functions operate on passed-in state.
 namespace GlassRenderer {
+
+// Bounds and optional damage are in native framebuffer pixels. Copies keep the
+// exact native format, dimensions and already blended material bytes.
+void transferOutput(const SP<Render::IFramebuffer>& native, const SP<Render::IFramebuffer>& cached,
+                    const std::array<int, 4>& bounds, bool restore, const CRegion* damage = nullptr,
+                    std::optional<std::array<int, 2>> origin = std::nullopt);
 
 inline constexpr int SAMPLE_PADDING_PX = 60;
 

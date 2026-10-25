@@ -99,6 +99,7 @@ def main():
     parser.add_argument('--quick', action='store_true', help='Skip individual parameter-extreme cases')
     parser.add_argument('--steady-only', action='store_true', help='Measure the fixed warm scene without the visual/lifecycle matrix')
     parser.add_argument('--steady-preset', default='lens', help='Material for --steady-only (default: lens)')
+    parser.add_argument('--steady-mode', default='1280x800@60', help='Output mode for --steady-only (default: 1280x800@60)')
     parser.add_argument('--steady-panes', type=int, default=2, help='Pane count for --steady-only (default: 2)')
     parser.add_argument('--client-update-hz', type=float, default=40, help='Changing client repaint rate (default: 40 Hz)')
     parser.add_argument('--animate-top-layer', action='store_true', help='Repaint a top layer independently at 60 Hz during steady timing')
@@ -121,8 +122,8 @@ def main():
     update_interval = 1 / args.client_update_hz
     if args.warmup_seconds < 0 or args.sample_seconds < 3:
         parser.error('--warmup-seconds must be nonnegative and --sample-seconds at least 3')
-    if not args.steady_only and (args.steady_preset != 'lens' or args.steady_panes != 2):
-        parser.error('--steady-preset and --steady-panes require --steady-only')
+    if not args.steady_only and (args.steady_preset != 'lens' or args.steady_panes != 2 or args.steady_mode != '1280x800@60'):
+        parser.error('--steady-preset, --steady-panes and --steady-mode require --steady-only')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     arms = {key: getattr(args, key).resolve() for key in ('baseline', 'reference', 'candidate')}
@@ -270,7 +271,8 @@ while True:
                         'dwindle = { force_split = 2 }, '
                         'decoration = { active_opacity = 1, inactive_opacity = 1, dim_inactive = false, '
                         'shadow = { enabled = true } }, cursor = { no_warps = true, inactive_timeout = 0.1 } })')
-                    ctl('eval', 'hl.monitor({ output = "HYPRLIQUID-TEST", mode = "1280x800@60", position = "auto", scale = 1, transform = 0 })')
+                    mode = args.steady_mode if args.steady_only else '1280x800@60'
+                    ctl('eval', 'hl.monitor({ output = "HYPRLIQUID-TEST", mode = ' + json.dumps(mode) + ', position = "auto", scale = 1, transform = 0 })')
                     control('apply', profile={'base_preset': args.steady_preset, 'theme': 'dark'})
                     if args.native_blur:
                         control('apply', patch={'enabled': False})
@@ -283,7 +285,7 @@ while True:
                     arm_result['geometry'] = json.loads(ctl('-j', 'clients'))
                     assert all(w['xwayland'] == args.x11_clients for w in arm_result['geometry']), 'Client backend differs from requested workload'
                     geometry = sorted((w['class'], w['at'], w['size']) for w in arm_result['geometry'])
-                    if args.steady_panes == 2:
+                    if args.steady_panes == 2 and mode == '1280x800@60':
                         assert geometry == [('vram-pane-0', [20, 20], [612, 760]),
                                             ('vram-pane-1', [648, 20], [612, 760])], geometry
                     if reference_geometry is None:
@@ -498,7 +500,10 @@ while True:
                 for name, expected in baseline.items():
                     for arm in ('reference', 'candidate'):
                         actual = results['arms'][arm]['captures'][name]
-                        identical = expected == actual
+                        # Damage is telemetry, not image data: cache hits are
+                        # expected to reduce it while preserving every pixel.
+                        image = lambda capture: capture | {'metadata': {k: v for k, v in capture['metadata'].items() if k != 'damage'}}
+                        identical = image(expected) == image(actual)
                         results['comparisons'].append({'case': name, 'arm': arm, 'identical': identical})
                 (output / 'result.json').write_text(json.dumps(results, indent=2))
                 differences = [row for row in results['comparisons'] if not row['identical']]

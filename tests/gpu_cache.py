@@ -19,8 +19,8 @@ def verify_gpu_cache(ctl, env, log, clients, build, wait, fixtures, isolation_on
 
     def counters():
         fields = ('captures', 'blurs', 'material_draws', 'local_cache_reuses')
-        if legacy: fields += ('backdrop_cache_reuses', 'scene_base_cache_reuses', 'window_backdrop_reuses', 'partial_captures', 'partial_blurs')
-        return {w['owner']: {k: w[k] for k in fields}
+        if legacy: fields += ('backdrop_cache_reuses', 'scene_base_cache_reuses', 'window_backdrop_reuses', 'partial_captures', 'partial_blurs', 'material_cache_reuses')
+        return {w['owner']: {k: w.get(k, 0) for k in fields}
                 for w in control('buffers')['buffers']['windows'] if w['enabled']}
 
     def action(window, name, fields):
@@ -117,7 +117,7 @@ while True:
         if legacy:
             delta = {k: after[owner][k] - before[owner][k] for k in before[owner]}
             assert delta['scene_base_cache_reuses'] > 0, delta
-            assert delta['material_draws'] == delta['captures'] + delta['backdrop_cache_reuses'] + delta['window_backdrop_reuses'], delta
+            assert delta['material_draws'] + delta['material_cache_reuses'] == delta['captures'] + delta['backdrop_cache_reuses'] + delta['window_backdrop_reuses'], delta
             assert delta['captures'] == delta['blurs'], delta
             if owner == 'window:' + windows[1]['address']:
                 assert delta['captures'] == 0 and delta['window_backdrop_reuses'] > 0, delta
@@ -265,7 +265,8 @@ while True:
     assert steady_buffers['scratch_pool']['hits'] > warm_buffers['scratch_pool']['hits']
     evidence['scratch_warm'] = warm_buffers
     evidence['scratch_steady'] = steady_buffers
-    assert all(after[k]['material_draws'] > before[k]['material_draws'] for k in before)
+    assert all(after[k]['material_draws'] + after[k].get('material_cache_reuses', 0) >
+               before[k]['material_draws'] + before[k].get('material_cache_reuses', 0) for k in before)
     control('apply', patch={'reset_fields': ['outer_refraction_amount']})
     action(windows[0], 'move', 'x = 650, y = 100, relative = false')
     action(windows[0], 'alter_zorder', 'mode = "top"')
@@ -344,6 +345,8 @@ while True:
     evidence['retirement'] = {'start_frame': retirement_start, 'timeline': timeline, 'after': retired}
     (build / 'gpu-cache.json').write_text(json.dumps(evidence, indent=2))
     assert retired['scratch_pool']['bytes'] == 0
+    if 'material_cache' in retired:
+        assert retired['material_cache']['bytes'] == 0
     if 'backdrop_cache' in retired:
         assert retired['backdrop_cache']['bytes'] == 0
     assert not any(b['owner'] == f'monitor:{monitor_id}' for b in retired['buffers'])

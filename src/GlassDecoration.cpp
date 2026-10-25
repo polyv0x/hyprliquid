@@ -399,6 +399,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     }
     const bool partialUpdate = samples->contentValid && !inputDamage.empty();
     if (partialUpdate) samples->contentValid = false;
+    samples->outputValid &= samples->contentValid;
     Vector2D paddingRatio = samples->paddingRatio;
     if (!samples->contentValid) {
         if (!GlassRenderer::sampleBackground(samples->sharp, liquid ? source : backdrop, transformBox, paddingRatio,
@@ -489,12 +490,55 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
         }
     }
 
+    const auto outputGeometry = RenderSafety::sampleGeometry(transformBox.x, transformBox.y, transformBox.w, transformBox.h, 0);
+    std::array<int, 4> outputBounds{};
+    if (outputGeometry) {
+        const int x = std::clamp(outputGeometry->x0, 0, int(source->m_size.x));
+        const int y = std::clamp(outputGeometry->y0, 0, int(source->m_size.y));
+        outputBounds = {x, y, std::clamp(outputGeometry->owner[2], x, int(source->m_size.x)) - x,
+                             std::clamp(outputGeometry->owner[3], y, int(source->m_size.y)) - y};
+    }
+    const bool cacheOutput = cacheInputs && !separateNeighbors && outputBounds[2] > 0 && outputBounds[3] > 0 &&
+        transformBox.x == std::floor(transformBox.x) && transformBox.y == std::floor(transformBox.y) &&
+        transformBox.w == std::floor(transformBox.w) && transformBox.h == std::floor(transformBox.h) &&
+        CRenderBuffers::bytes(outputBounds[2], outputBounds[3], source->m_drmFormat) <= CRenderBuffers::OUTPUT_RETAINED_BYTES;
+    if (cacheOutput && samples->outputValid && samples->outputBounds == outputBounds) {
+        GlassRenderer::transferOutput(source, samples->output, outputBounds, true);
+        ++m_materialCacheReuses;
+        samples->sceneSerial = scene->inputSerial;
+        completed = true;
+        return;
+    }
     auto draw = [&](const GlassRenderer::SNeighborBackdrop* neighbors = nullptr) {
+        // Outside this frame's damage the destination need not contain a
+        // complete backdrop. Seed the whole retained output from the validated
+        // native input before blending, including transparent rounded corners.
+        if (cacheOutput)
+            GlassRenderer::transferOutput(source, samples->sharp, outputBounds, true, nullptr,
+                                          std::array{geometry->x0, geometry->y0});
+        // A scene rebuild can finish on an opaque client with blending off.
+        // Transparent corner fragments must leave the real destination intact
+        // before that completed image can be retained across future frames.
+        const bool blend = cacheOutput && glIsEnabled(GL_BLEND);
+        if (cacheOutput) g_pHyprOpenGL->setCapStatus(GL_BLEND, true);
         GlassRenderer::applyGlassEffect(samples->sharp, blurred, source,
                                          windowBox, transformBox, glassAlpha,
                                          cornerRadius, roundingPower, paddingRatio, material, nullptr, neighbors,
                                          liquid ? samples->halfSharp : nullptr, !sceneBase, visible ? &*visible : nullptr);
+        if (cacheOutput) g_pHyprOpenGL->setCapStatus(GL_BLEND, blend);
         ++m_materialDraws;
+        if (cacheOutput) {
+            // A pass can hold a read-only image queued before this rebuild.
+            // Replace storage instead of overwriting that retained snapshot.
+            if (samples->output && samples->output.strongRef() > 1) samples->output.reset();
+            if (g_pGlobalState->renderBuffers.prepare(samples->output, outputBounds[2], outputBounds[3], source->m_drmFormat,
+                                                     "window-material", cacheOwner)) {
+                samples->output->setImageDescription(source->imageDescription());
+                GlassRenderer::transferOutput(source, samples->output, outputBounds, false);
+                samples->outputBounds = outputBounds;
+                samples->outputValid = true;
+            }
+        }
         if (cacheInputs) samples->sceneSerial = scene->inputSerial;
         completed = true;
     };
@@ -557,6 +601,7 @@ json_object* CGlassDecoration::diagnostics() const {
     json_object_object_add(result, "partial_captures", json_object_new_uint64(m_partialCaptures));
     json_object_object_add(result, "partial_blurs", json_object_new_uint64(m_partialBlurs));
     json_object_object_add(result, "occluded_draws", json_object_new_uint64(m_occludedDraws));
+    json_object_object_add(result, "material_cache_reuses", json_object_new_uint64(m_materialCacheReuses));
     json_object_object_add(result, "animate_display_angle", json_object_new_boolean(runtimeAnimateDisplayAngle()));
     json_object_object_add(result, "animate_hover_angle", json_object_new_boolean(runtimeAnimateHoverAngle()));
     json_object_object_add(result, "rendered_display_angle_degrees", json_object_new_double(m_renderedDisplayAngle));

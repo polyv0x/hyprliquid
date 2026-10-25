@@ -57,6 +57,13 @@ class CCapture : public IPassElement {
         auto add = [&](const char* key, int64_t n) { json_object_object_add(metadata, key, json_object_new_int64(n)); };
         add("width", width); add("height", height); add("drm_format", fb->m_drmFormat);
         add("gl_type", type); add("gl_format", format); add("pixel_bytes", pixelBytes); add("gl_error", error);
+        auto* damage = json_object_new_array();
+        renderer->m_renderData.damage.forEachRect([&](const auto& r) {
+            auto* rect = json_object_new_array();
+            for (const auto v : {r.x1, r.y1, r.x2, r.y2}) json_object_array_add(rect, json_object_new_int(v));
+            json_object_array_add(damage, rect);
+        });
+        json_object_object_add(metadata, "damage", damage);
         const auto color = fb->imageDescription();
         json_object_object_add(metadata, "color_description", json_object_new_string(color ? std::format("{}", color->value()).c_str() : "none"));
         if (!error) {
@@ -92,11 +99,14 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
         [](eHyprCtlOutputFormat, std::string request) {
             const auto at = request.find(' ');
             if (at == std::string::npos) return std::string("missing absolute artifact path");
-            const std::filesystem::path path = request.substr(at + 1);
+            auto argument = request.substr(at + 1);
+            const bool nextFrame = argument.starts_with("next ");
+            if (nextFrame) argument.erase(0, 5);
+            const std::filesystem::path path = argument;
             std::error_code error;
             if (!path.is_absolute() || !std::filesystem::is_directory(path.parent_path(), error)) return std::string("invalid artifact path");
             pending = path;
-            for (const auto& monitor : State::monitorState()->monitors()) {
+            if (!nextFrame) for (const auto& monitor : State::monitorState()->monitors()) {
                 renderer->damageMonitor(monitor);
                 monitor->scheduleFrame();
             }

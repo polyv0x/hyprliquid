@@ -198,7 +198,7 @@ class CWindowScenePassElement : public IPassElement {
         return {};
     }
 
-    bool needsLiveBlur() override { return !reuse; }
+    bool needsLiveBlur() override { return !reuse && !reuseBackground; }
     bool needsPrecomputeBlur() override { return false; }
     bool disableSimplification() override { return !reuse; }
     std::optional<CBox> boundingBox() override {
@@ -519,12 +519,13 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
     if (!reuse && !capture->reuseScene) storage.cache->valid = false;
     storage.key = std::move(key);
     storage.inputKey = scene->inputKey;
+    const bool reuseBackground = capture->reuseBackground;
     renderer->addPassElement(std::move(capture));
 
-    // The auxiliary scene reads the wallpaper across the monitor. Repaint it
-    // completely on this already scheduled frame, without scheduling another
-    // frame or retaining last frame's windows in the backdrop.
-    if (!reuse) {
+    // A fresh auxiliary background reads wallpaper across the monitor. Repaint
+    // it completely on this already scheduled frame. A retained immutable
+    // background needs no extra desktop damage, even when clients are changing.
+    if (!reuse && !reuseBackground) {
         renderer->m_renderData.damage.add(CBox{{}, monitor->m_transformedSize});
         renderer->m_renderData.finalDamage.add(CBox{{}, monitor->m_transformedSize});
     }

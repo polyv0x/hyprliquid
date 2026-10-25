@@ -62,7 +62,7 @@ $(TARGET): $(OBJECTS) $(RUST_LIB) Makefile
 build/LiquidMaterialData.hpp: materials/liquid.json scripts/embed-material.py | build
 	python3 scripts/embed-material.py $@
 
-build/render-test: tests/render.cpp tests/liquid-render.hpp src/LiquidUniforms.hpp src/Material.hpp src/LiquidMaterial.hpp build/LiquidMaterialData.hpp src/MaterialParams.inc src/BuiltInPresets.hpp src/PixelTransfer.hpp src/RustCore.hpp build/RustCore.o $(RUST_LIB) | build
+build/render-test: tests/render.cpp tests/liquid-render.hpp tests/glass-exact.hpp src/GlassInterior.hpp src/LiquidUniforms.hpp src/Material.hpp src/LiquidMaterial.hpp build/LiquidMaterialData.hpp src/MaterialParams.inc src/BuiltInPresets.hpp src/PixelTransfer.hpp src/RustCore.hpp build/RustCore.o $(RUST_LIB) | build
 	$(CXX) $(CXXFLAGS) -Isrc -Ibuild $< $(RUST_LINK) -o $@ $$(pkg-config --cflags --libs egl glesv2)
 
 build/security-test: tests/security.cpp src/ResizeAngle.hpp src/PointerAngle.hpp src/RenderSafety.hpp src/Material.hpp src/LiquidMaterial.hpp src/BuiltInPresets.hpp build/LiquidMaterialData.hpp src/MaterialParams.inc src/LuaSafety.hpp src/RustCore.hpp build/RustCore.o $(RUST_LIB) | build

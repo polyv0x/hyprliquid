@@ -1,6 +1,7 @@
 #include "BuiltInPresets.hpp"
 #include "PixelTransfer.hpp"
 #include "LiquidUniforms.hpp"
+#include "GlassInterior.hpp"
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
@@ -64,9 +65,25 @@ struct Program {
 struct Target {
     GLuint texture, framebuffer;
     int width, height;
-    Target(int w, int h, const void* data = nullptr): width(w), height(h) {
+    Target(int w, int h, const void* data = nullptr, GLint format = GL_RGBA8): width(w), height(h) {
         glGenTextures(1, &texture); glBindTexture(GL_TEXTURE_2D, texture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+        const GLenum type = format == GL_RGBA16F ? GL_HALF_FLOAT : format == GL_RGB10_A2 ? GL_UNSIGNED_INT_2_10_10_10_REV : GL_UNSIGNED_BYTE;
+        glTexImage2D(GL_TEXTURE_2D, 0, format, w, h, 0, GL_RGBA, type, nullptr);
+        if (data && format == GL_RGBA16F) {
+            const auto* bytes = static_cast<const unsigned char*>(data);
+            std::vector<float> values(w * h * 4);
+            for (size_t i = 0; i < values.size(); ++i) values[i] = bytes[i] / 255.0f;
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_FLOAT, values.data());
+        } else if (data && format == GL_RGB10_A2) {
+            const auto* bytes = static_cast<const unsigned char*>(data);
+            std::vector<uint32_t> values(w * h);
+            for (size_t i = 0; i < values.size(); ++i)
+                values[i] = ((bytes[i * 4] * 1023 + 127) / 255) |
+                    (((bytes[i * 4 + 1] * 1023 + 127) / 255) << 10) |
+                    (((bytes[i * 4 + 2] * 1023 + 127) / 255) << 20) | (3u << 30);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, values.data());
+        } else if (data) glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, data);
+        require(glGetError() == GL_NO_ERROR, "Texture allocation/upload failed");
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -81,6 +98,18 @@ struct Target {
     std::vector<unsigned char> pixels() const {
         bind(); std::vector<unsigned char> p(width * height * 4);
         glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, p.data()); return p;
+    }
+    std::vector<unsigned char> nativePixels() const {
+        bind();
+        GLint format, type;
+        glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_FORMAT, &format);
+        glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_TYPE, &type);
+        const int bytes = type == GL_FLOAT || type == GL_UNSIGNED_INT || type == GL_INT ? 16 :
+                          type == GL_HALF_FLOAT || type == GL_UNSIGNED_SHORT || type == GL_SHORT ? 8 : 4;
+        std::vector<unsigned char> p(width * height * bytes);
+        glReadPixels(0, 0, width, height, format, type, p.data());
+        require(glGetError() == GL_NO_ERROR, "Native framebuffer read failed");
+        return p;
     }
 };
 static void quad() { glDrawArrays(GL_TRIANGLE_STRIP, 0, 4); }
@@ -577,7 +606,9 @@ static void sceneSampling() {
 
 #include "liquid-render.hpp"
 
-int main() try {
+#include "glass-exact.hpp"
+
+int main(int argc, char** argv) try {
     auto display = eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
     require(display != EGL_NO_DISPLAY && eglInitialize(display, nullptr, nullptr), "Cannot initialize surfaceless EGL");
     require(eglBindAPI(EGL_OPENGL_ES_API), "Cannot bind GLES");
@@ -596,6 +627,8 @@ int main() try {
     const float vertices[]{0,0, 1,0, 0,1, 1,1}; glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
     glDisable(GL_DITHER);
+    exactGlass(native);
+    if (argc == 2 && std::string(argv[1]) == "--exact-glass-only") return 0;
     pixelTransfers();
     sceneSampling();
     blurBrightness(nativeBlur);

@@ -22,6 +22,7 @@ struct SGlassUniforms {
     GLint blurTexture = -1;
     GLint pixelScale = -1;
     GLint fadeAlpha = -1;
+    GLint interiorCoverage = -1;
     SCleanSampleUniforms clean;
     GLint cleanBlurTexture = -1;
     GLint hasCleanBlur = -1;
@@ -67,6 +68,8 @@ class CShaderManager {
 
     SP<CShader>    glassShader = makeShared<CShader>();
     SGlassUniforms glassUniforms;
+    SP<CShader> interiorShader = makeShared<CShader>();
+    SGlassUniforms interiorUniforms;
     SP<CShader> liquidShader = makeShared<CShader>();
     SGlassUniforms liquidCommonUniforms;
     SLiquidUniforms liquidUniforms;

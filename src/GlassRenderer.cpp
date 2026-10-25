@@ -1,6 +1,7 @@
 #include "GlassRenderer.hpp"
 #include "Globals.hpp"
 #include "RenderSafety.hpp"
+#include "GlassInterior.hpp"
 
 #include <algorithm>
 #include <array>
@@ -24,6 +25,28 @@ static void bindTexture(const SP<Render::IFramebuffer>& framebuffer, GLenum unit
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+void transferOutput(const SP<Render::IFramebuffer>& native, const SP<Render::IFramebuffer>& cached,
+                    const std::array<int, 4>& bounds, bool restore, const CRegion* damage,
+                    std::optional<std::array<int, 2>> origin) {
+    const auto [x, y, width, height] = bounds;
+    const auto [ox, oy] = origin.value_or(std::array{x, y});
+    auto& pool = g_pGlobalState->renderBuffers;
+    pool.touch(native); pool.touch(cached);
+    g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbId(restore ? cached : native));
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbId(restore ? native : cached));
+    auto copy = [&](int x0, int y0, int x1, int y1) {
+        if (restore)
+            glBlitFramebuffer(x0 - ox, y0 - oy, x1 - ox, y1 - oy, x0, y0, x1, y1, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        else
+            glBlitFramebuffer(x0, y0, x1, y1, x0 - ox, y0 - oy, x1 - ox, y1 - oy, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    };
+    if (damage)
+        damage->copy().intersect(CBox(x, y, width, height)).forEachRect([&](const auto& r) { copy(r.x1, r.y1, r.x2, r.y2); });
+    else copy(x, y, x + width, y + height);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbId(native));
 }
 
 static void bindCleanBackdrop(const SCleanSampleUniforms& uniforms, const SNeighborBackdrop& clean, GLenum unit) {
@@ -505,14 +528,42 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
                          reinterpret_cast<const float*>(mask->regionRects.data()));
     }
     glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
-    if (visible) {
-        visible->copy().intersect(outputBox).forEachRect([&](const auto& r) {
+    CRegion output = visible ? visible->copy().intersect(outputBox) : CRegion(outputBox);
+    CRegion interior;
+    // Higher precision attachments retain the original arithmetic: software
+    // drivers can round endpoint mixes differently there. Native output caching
+    // still works for those formats because it copies the original result.
+    const bool rgba8 = targetFramebuffer->m_drmFormat == DRM_FORMAT_ARGB8888 || targetFramebuffer->m_drmFormat == DRM_FORMAT_XRGB8888 ||
+                       targetFramebuffer->m_drmFormat == DRM_FORMAT_ABGR8888 || targetFramebuffer->m_drmFormat == DRM_FORMAT_XBGR8888;
+    if (rgba8 && !mask && !neighbors) if (const auto inset = glassInteriorInset(material, cornerRadius,
+            g_pHyprRenderer->m_renderData.pMonitor->m_scale * material.effect_scale)) {
+        const double left = std::ceil(rawBox.x + *inset), top = std::ceil(rawBox.y + *inset);
+        const double right = std::floor(rawBox.x + rawBox.w - *inset), bottom = std::floor(rawBox.y + rawBox.h - *inset);
+        if (right > left && bottom > top) interior = CRegion(CBox{left, top, right - left, bottom - top}).intersect(output);
+    }
+    output.copy().subtract(interior).forEachRect([&](const auto& r) {
+        g_pHyprOpenGL->scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1));
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    });
+    if (!interior.empty()) {
+        // Keep the full quad/projection so interpolation has exactly the same
+        // texel coordinates. Only the integer scissor changes between draws.
+        auto center = g_pHyprOpenGL->useShader(manager.interiorShader);
+        const auto& u = manager.interiorUniforms;
+        center->setUniformMatrix3fv(SHADER_PROJ, 1, GL_FALSE, matrix.getMatrix());
+        center->setUniformInt(SHADER_TEX, 0);
+        glUniform1i(u.blurTexture, 1);
+        glUniform2f(u.uvPadding, paddingRatio.x, paddingRatio.y);
+        glUniform1f(u.fadeAlpha, std::clamp(alpha, 0.0f, 1.0f));
+        glUniform1f(u.interiorCoverage, 1);
+#define GLASS_PARAM(name, value, lo, hi) glUniform1f(u.name, material.name);
+#include "MaterialParams.inc"
+#undef GLASS_PARAM
+        glBindVertexArray(center->getUniformLocation(SHADER_SHADER_VAO));
+        interior.forEachRect([&](const auto& r) {
             g_pHyprOpenGL->scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1));
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         });
-    } else {
-        g_pHyprOpenGL->scissor(outputBox);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
     g_pHyprOpenGL->scissor(nullptr);
 }

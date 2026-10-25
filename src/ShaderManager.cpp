@@ -46,6 +46,7 @@ bool CShaderManager::compileGlassShader(SP<CShader>& glassShader, SGlassUniforms
     glassUniforms.blurTexture = glGetUniformLocation(program, "blur_texture");
     glassUniforms.pixelScale = glGetUniformLocation(program, "pixelScale");
     glassUniforms.fadeAlpha = glGetUniformLocation(program, "fadeAlpha");
+    glassUniforms.interiorCoverage = glGetUniformLocation(program, "interiorCoverage");
     glassUniforms.clean.locate(program);
     glassUniforms.cleanBlurTexture = glGetUniformLocation(program, "clean_blur_texture");
     glassUniforms.hasCleanBlur = glGetUniformLocation(program, "hasCleanBlur");
@@ -111,6 +112,7 @@ void CShaderManager::initializeIfNeeded() {
         return;
 
     if (!compileGlassShader(glassShader, glassUniforms, "glass.frag") ||
+        !compileGlassShader(interiorShader, interiorUniforms, "glass-interior.frag") ||
         !compileGlassShader(liquidShader, liquidCommonUniforms, "liquid.frag"))
         return;
 
@@ -152,6 +154,7 @@ int CShaderManager::bindUnderlayShapes(std::span<const std::array<float, 8>> sha
 
 void CShaderManager::destroy() noexcept {
     glassShader->destroy();
+    interiorShader->destroy();
     liquidShader->destroy();
     materialBackdropShader->destroy();
     blurShader->destroy();

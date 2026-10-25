@@ -79,6 +79,7 @@ CRenderBuffers::CLease CRenderBuffers::acquire(int width, int height, const SP<R
     } else ++m_hits;
     auto& samples = *slot;
     samples->contentValid = !owner.empty() && samples->contentValid && samples->cacheOwner == owner && samples->contentKey == contentKey;
+    samples->outputValid &= samples->contentValid;
     samples->key = key;
     samples->cacheOwner = owner;
     samples->contentKey = contentKey;
@@ -138,6 +139,22 @@ CRenderBuffers::CLease CRenderBuffers::acquireBackdrop(int width, int height, co
     samples->used = Clock::now();
     samples->sequence = ++m_sequence;
     return CLease(*this, samples);
+}
+
+std::shared_ptr<CRenderBuffers::SSamples> CRenderBuffers::retainOutput(const std::string& owner,
+        const std::vector<uint64_t>& contentKey, uint64_t serial, const SP<Render::IFramebuffer>& source) {
+    if (!source) return nullptr;
+    const auto color = source->imageDescription();
+    for (const auto& entry : m_pool) {
+        if (!entry->contentValid || !entry->outputValid || !entry->output ||
+            entry->cacheOwner != owner || entry->contentKey != contentKey || entry->sceneSerial != serial ||
+            entry->key.format != source->m_drmFormat || entry->key.color != (color ? color->id() : 0) ||
+            entry->key.context != eglGetCurrentContext() || entry->key.display != eglGetCurrentDisplay()) continue;
+        entry->used = Clock::now();
+        entry->sequence = ++m_sequence;
+        return entry;
+    }
+    return nullptr;
 }
 
 void CRenderBuffers::discardBackdrop(const std::string& owner) {
@@ -290,6 +307,22 @@ void CRenderBuffers::trim(bool expired) {
         m_pool.erase(oldest);
         ++m_evictions;
     }
+    // Finished materials have a separate budget; they must not evict the input
+    // pairs that make their own next frame reusable. Queued copies pin images.
+    while (true) {
+        uint64_t retained = 0;
+        auto oldest = m_pool.end();
+        for (auto it = m_pool.begin(); it != m_pool.end(); ++it) {
+            if (!(*it)->output) continue;
+            retained += size((*it)->output);
+            if ((*it)->output.strongRef() == 1 && it->use_count() == 1 &&
+                (oldest == m_pool.end() || (*it)->sequence < (*oldest)->sequence)) oldest = it;
+        }
+        if (retained <= OUTPUT_RETAINED_BYTES || oldest == m_pool.end()) break;
+        if (!restore) restore.emplace();
+        (*oldest)->output.reset();
+        (*oldest)->outputValid = false;
+    }
     // Exact dimensions, format, context and level count preserve every filter
     // tap and texel center. Only unleased sets may be evicted; an auxiliary or
     // nested blur cannot overwrite an invocation that still owns its scratch.
@@ -415,6 +448,16 @@ json_object* CRenderBuffers::diagnostics() const {
     number(pool, "retained_limit_pairs", RETAINED_PAIRS);
     number(pool, "idle_timeout_ms", std::chrono::duration_cast<std::chrono::milliseconds>(IDLE_TIMEOUT).count());
     json_object_object_add(result, "window_pool", pool);
+    auto* output = json_object_new_object();
+    uint64_t outputBytes = 0, outputCount = 0;
+    for (const auto& entry : m_pool) if (entry->output) {
+        outputBytes += size(entry->output);
+        ++outputCount;
+    }
+    number(output, "bytes", outputBytes);
+    number(output, "images", outputCount);
+    number(output, "retained_limit_bytes", OUTPUT_RETAINED_BYTES);
+    json_object_object_add(result, "material_cache", output);
     auto* scratch = json_object_new_object();
     uint64_t scratchBytes = 0, scratchLeased = 0;
     for (const auto& entry : m_scratchPool) {

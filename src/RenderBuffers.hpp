@@ -5,6 +5,7 @@
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
 #include <EGL/egl.h>
 #include <chrono>
+#include <array>
 #include <deque>
 #include <memory>
 #include <string>
@@ -25,6 +26,7 @@ class CRenderBuffers {
     static constexpr size_t SCRATCH_RETAINED_SETS = 16;
     static constexpr uint64_t BACKDROP_RETAINED_BYTES = 128ULL * 1024 * 1024;
     static constexpr size_t BACKDROP_RETAINED_PAIRS = 8;
+    static constexpr uint64_t OUTPUT_RETAINED_BYTES = 64ULL * 1024 * 1024;
 
     struct SKey {
         int width, height;
@@ -37,6 +39,11 @@ class CRenderBuffers {
     struct SSamples {
         SKey key;
         SP<Render::IFramebuffer> sharp, blurred, halfSharp;
+        // Native pixels copied after material rendering and blending. Replaying
+        // them must never introduce a texture filter or a second blend.
+        SP<Render::IFramebuffer> output;
+        std::array<int, 4> outputBounds{};
+        bool outputValid = false;
         Clock::time_point used;
         uint64_t sequence = 0;
         uint64_t id = 0;
@@ -84,6 +91,9 @@ class CRenderBuffers {
     ~CRenderBuffers();
     CLease acquire(int width, int height, const SP<Render::IFramebuffer>& source,
                    const std::string& owner = {}, const std::vector<uint64_t>& contentKey = {});
+    // Pin a validated finished image while its render-pass element is queued.
+    std::shared_ptr<SSamples> retainOutput(const std::string& owner, const std::vector<uint64_t>& contentKey,
+                                         uint64_t serial, const SP<Render::IFramebuffer>& source);
     CLease acquireBackdrop(int width, int height, const SP<Render::IFramebuffer>& source,
                            const std::string& owner, const std::vector<uint64_t>& contentKey, bool transientOnBypass = true);
     void discardBackdrop(const std::string& owner);

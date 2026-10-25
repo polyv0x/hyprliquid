@@ -68,6 +68,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
     uint64_t m_sceneBaseCacheReuses = 0;
     uint64_t m_windowBackdropReuses = 0;
     uint64_t m_partialCaptures = 0, m_partialBlurs = 0, m_occludedDraws = 0;
+    uint64_t m_materialCacheReuses = 0;
 
     void updateNoBlurProp(bool glassEnabled);
     void withdrawNoBlur();

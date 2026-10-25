@@ -5,6 +5,7 @@
 #include <hyprutils/math/Region.hpp>
 #include <hyprland/src/helpers/memory/Memory.hpp>
 #include "WindowScene.hpp"
+#include "RenderBuffers.hpp"
 
 class CGlassDecoration;
 
@@ -21,6 +22,7 @@ class CGlassPassElement : public IPassElement {
     ~CGlassPassElement() override = default;
 
     std::vector<UP<IPassElement>> draw() override;
+    void discard() override { m_cachedOutput.reset(); }
     [[nodiscard]] bool                needsLiveBlur() override;
     [[nodiscard]] bool                needsPrecomputeBlur() override;
     [[nodiscard]] std::optional<CBox> boundingBox() override;
@@ -31,4 +33,5 @@ class CGlassPassElement : public IPassElement {
 
   private:
     SGlassPassData m_data;
+    std::shared_ptr<CRenderBuffers::SSamples> m_cachedOutput;
 };

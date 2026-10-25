@@ -30,9 +30,11 @@ def verify_surface_cache(ctl, env, log, clients, build, wait, fixtures, plugin, 
     def action(window, name, values):
         ctl('dispatch', 'hl.dsp.window.' + name + '({ window = ' + json.dumps('address:' + window['address']) + ', ' + values + ' })')
 
-    def raw(name):
+    def raw(name, trigger=None):
         path = build / name
-        ctl('hyprliquid-test:capture', str(path))
+        ctl('hyprliquid-test:capture', ('next ' if trigger else '') + str(path))
+        if trigger:
+            trigger()
         wait(lambda: Path(str(path) + '.json').exists())
         metadata = json.loads(Path(str(path) + '.json').read_text())
         assert metadata['gl_error'] == 0, metadata
@@ -98,6 +100,14 @@ def verify_surface_cache(ctl, env, log, clients, build, wait, fixtures, plugin, 
             evidence['captures'][arm + '-' + name] = {'sha256': digest, 'metadata': metadata}
             print(f'PASS: {arm} {name} native pixels', flush=True)
 
+        def incremental(name, color):
+            partial, metadata = raw(arm + '-' + name + '-partial', lambda: write(paths[0], {
+                'child': {'patch': color, 'partial': True}}))
+            rebuilt, _ = raw(arm + '-' + name + '-full')
+            assert partial == rebuilt, f'Incremental output differs from a full repaint: {name}'
+            evidence['repaints'][arm + '-' + name] = metadata
+            check(name)
+
         spawn(0)
         check('single-full-child')
         before = counters()
@@ -109,8 +119,14 @@ def verify_surface_cache(ctl, env, log, clients, build, wait, fixtures, plugin, 
         if arm == 'candidate':
             assert after[owner]['captures'] == before[owner]['captures'], (before, after)
             assert after[owner]['window_backdrop_reuses'] > before[owner]['window_backdrop_reuses'], (before, after)
+            assert after[owner]['material_draws'] == before[owner]['material_draws'], (before, after)
+            assert after[owner]['material_cache_reuses'] > before[owner]['material_cache_reuses'], (before, after)
         evidence['repaints'][arm + '-single'] = {'before': before, 'after': after}
         check('single-child-damage')
+        # Capture the next real partial commit without damaging the monitor.
+        # A normal screenshot request forces a complete repaint and would hide
+        # stale pixels caused by narrowing the cached pass's damage footprint.
+        incremental('single-incremental', 0x3876a2)
         for bottom in (False, True):
             layer = subprocess.Popen([str(fixtures / 'layer-test'), '--animate', *(['--bottom'] if bottom else [])],
                                      env=env | {'GSK_RENDERER': 'cairo', 'GTK_A11Y': 'none'}, stdout=log, stderr=log)
@@ -149,6 +165,10 @@ def verify_surface_cache(ctl, env, log, clients, build, wait, fixtures, plugin, 
             assert after[owner]['scene_base_cache_reuses'] > before[owner]['scene_base_cache_reuses'], (before, after)
         evidence['repaints'][arm + '-two'] = {'before': before, 'after': after}
         check('two-child-damage')
+        incremental('two-incremental', 0xd97824)
+        for preset in ('soft-glass', 'clear-glass', 'frosted-glass-clear-edge', 'frosted-glass'):
+            control('apply', profile={'base_preset': preset, 'theme': 'dark'})
+            check('material-' + preset)
 
         cases = [
             ('partial-initial', {}),
@@ -181,6 +201,7 @@ def verify_surface_cache(ctl, env, log, clients, build, wait, fixtures, plugin, 
                 f'scale = {scale}, transform = {transform}' + ' })')
             time.sleep(.4)
             check(f'scale-{scale}-transform-{transform}')
+            incremental(f'scale-{scale}-transform-{transform}-incremental', 0x40b078 + int(scale * 16) + transform)
         for name, options in [('sdr-10bit', 'bitdepth = 10, cm = "srgb"'),
                               ('hdr-fp16', 'bitdepth = 10, cm = "hdr", supports_hdr = 1, supports_wide_color = 1')]:
             ctl('eval', 'hl.monitor({ output = "HYPRLIQUID-TEST", mode = "1280x800@60", scale = 1, transform = 0, ' + options + ' })')
@@ -188,6 +209,7 @@ def verify_surface_cache(ctl, env, log, clients, build, wait, fixtures, plugin, 
             check(name)
             metadata = evidence['captures'][arm + '-' + name]['metadata']
             assert metadata['pixel_bytes'] >= (8 if name == 'hdr-fp16' else 4), metadata
+            incremental(name + '-incremental', 0x6850b8 if name == 'hdr-fp16' else 0xb85068)
         for process in processes:
             process.terminate()
             process.wait(timeout=5)
