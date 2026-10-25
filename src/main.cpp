@@ -44,6 +44,7 @@ static void clearLayerGlassOnClose(PHLLS layerSurface) {
 }
 
 static void onNewWindow(PHLWINDOW window) {
+    std::erase_if(g_pGlobalState->decorations, [](const auto& decoration) { return !decoration; });
     if (std::ranges::any_of(window->m_windowDecorations,
                             [](const auto& decoration) { return decoration->getDisplayName() == "Hyprliquid"; }))
         return;
@@ -66,11 +67,10 @@ static void onNewWindow(PHLWINDOW window) {
         std::rotate(decorations.begin(), inserted, std::next(inserted));
 }
 
-static void onCloseWindow(PHLWINDOW window) {
-    std::erase_if(g_pGlobalState->decorations, [&window](const auto& decoration) {
-        auto* deco = decoration.get();
-        return !deco || deco->getOwner() == window;
-    });
+static void onCloseWindow(PHLWINDOW) {
+    // Unmapping need not destroy the window or its decorations. Keep their weak
+    // handles until destruction so unloading can also clean up unmapped owners.
+    std::erase_if(g_pGlobalState->decorations, [](const auto& decoration) { return !decoration; });
 }
 
 static CGlassDecoration* glassDecorationFor(const PHLWINDOW& window) {
@@ -618,8 +618,17 @@ APICALL EXPORT void PLUGIN_EXIT() {
     WindowScene::destroy();
 
     for (auto& decoration : g_pGlobalState->decorations) {
-        if (auto* deco = decoration.get())
+        if (auto* deco = decoration.get()) {
+            const auto window = deco->getOwner();
             HyprlandAPI::removeWindowDecoration(PHANDLE, deco);
+            // Hyprland defers removal while the owner is hidden or unmapped.
+            // Its queued deleter must run before this library is unloaded.
+            if (window && decoration) {
+                g_pDecorationPositioner->uncacheDecoration(deco);
+                std::erase(window->m_decosToRemove, deco);
+                std::erase_if(window->m_windowDecorations, [deco](const auto& item) { return item.get() == deco; });
+            }
+        }
     }
     g_pGlobalState->decorations.clear();
 

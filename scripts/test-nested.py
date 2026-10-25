@@ -23,6 +23,7 @@ from window_scene import verify_window_scene
 from liquid_scene import verify_liquid
 from hover_angle import verify_hover_angle
 from gpu_cache import verify_gpu_cache
+from decoration_lifecycle import verify_decoration_lifecycle
 
 
 def wait_for(predicate, process, seconds=20):
@@ -89,6 +90,9 @@ def main():
                 shadow = json.loads(ctl('-j', 'getoption', 'decoration:shadow:enabled'))
                 assert shadow.get('bool', shadow.get('int')) == 1, shadow
                 print('PASS: load and Lua configuration (including signed preset values)', flush=True)
+                if '--decoration-lifecycle-only' in sys.argv:
+                    verify_decoration_lifecycle(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES, PLUGIN)
+                    return
                 control = verify_control(ctl, config_path)
                 security_plugin = FIXTURES / 'security-test.so'
                 # The fault-injection fixture links the current checkout's library.
@@ -313,6 +317,8 @@ def main():
                 else:
                     print('SKIP: window/screenshot exercise requires kitty and grim', flush=True)
 
+                if (FIXTURES / 'decoration-lifecycle-test.so').exists():
+                    verify_decoration_lifecycle(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES, PLUGIN)
                 epoch = control('state')['state']['epoch']
                 for _ in range(2):
                     assert ctl('plugin', 'unload', str(PLUGIN)) == 'ok'

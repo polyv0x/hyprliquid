@@ -92,6 +92,9 @@ build/capture-test.so: tests/capture.cpp tests/capture.exports src/PixelTransfer
 build/security-test.so: tests/security-render.cpp $(TARGET) | build
 	$(CXX) $(CPPFLAGS) -Ibuild $(CXXFLAGS) -shared $< -L. -l:$(TARGET) -Wl,-rpath,'$$ORIGIN/..' $(LDLIBS) -o $@
 
+build/decoration-lifecycle-test.so: tests/decoration-lifecycle.cpp tests/capture.exports | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared $< -Wl,--version-script=tests/capture.exports $(LDLIBS) -o $@
+
 build/layer-test: tests/layer.cpp | build
 	$(CXX) $(CXXFLAGS) $< -o $@ $$(pkg-config --cflags --libs gtk4 gtk4-layer-shell-0)
 
