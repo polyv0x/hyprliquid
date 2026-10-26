@@ -223,6 +223,57 @@ Reproduce with `python3 scripts/test-nested.py --damage-flicker-only` after
 building the plugin, `build/capture-test.so`, `build/layer-test` and
 `build/subsurface-test`. The fixture must only run in a disposable compositor.
 
+## Partial fill after moving a float to another output
+
+The user observed a persistent partial fill on DP-1 after dragging a floating
+browser upward to DP-2. A live capture showed glass only in an upper-left
+rectangle, even after a screenshot repaint. Its extent matched the terminal's
+2174-by-1314 half-resolution blur image. DP-1 was using 4K, scale 1.25 and
+10-bit SDR; DP-2 used scale 1 and HDR/FP16.
+
+Our regional capture/blur paths called raw `glScissor`, while Hyprland caches
+its last scissor rectangle. If the next native or material draw requested the
+same rectangle used before that offscreen work, Hyprland skipped the GL call
+and retained the scratch buffer's smaller clip. A material cache could then
+retain the partial fill indefinitely. The auxiliary scene's raw scissor
+restoration could also leave this cache inconsistent.
+
+All production scissor changes now use Hyprland's `scissor` helper. Offscreen
+and saved GL rectangles pass `transform=false`, preserving their buffer-local
+coordinates while keeping the native cache synchronized. The security fixture
+now primes a native rectangle, runs partial capture/reduction/blur, and checks
+that requesting the same native rectangle restores the correct GL clip.
+
+Evidence in `build/partial-fill-20261026/`:
+
+- `before-*.json` and `dp-1.png`: live diagnostics and the partial fill.
+- `scissor-before.log`: the previous build fails the deterministic regression
+  with `partial blur left native scissor cache stale: 90,68,31,33`.
+- `scissor-fixed.log`: state preservation and 315 partial/full filter comparisons
+  pass across ordinary, clean-neighbor and Liquid inputs, five blur sigmas,
+  seven damage patterns, and 8-bit/10-bit/FP16 attachments.
+- `move-final.log`: three moves to an upper, differently scaled output leave
+  DP-1 byte-identical to its original complete pane. The headless output falls
+  back to SDR despite the requested HDR mode; actual descriptions are saved.
+  Movement alone also passed on the old build, so the deterministic scissor
+  test supplies the regression proof for the state-dependent fault.
+- `regional.log` and `flicker.log`: all 96 existing regional comparisons and
+  31 split/single-window replay steps pass, including output rotation.
+- `candidate.so`, `candidate-source.tar.gz`, `live-install.json`, and
+  `live-mapping.txt`: installed in PID 2371538, preserving the current profile,
+  open windows and normal `debug:damage_tracking=2`. `live-rollback.so` retains
+  the preceding build. No desktop configuration files were changed.
+- `dp-1-after.png`: visual verification that the live terminal is completely
+  filled again. `git diff --check` passes; timings were not remeasured.
+
+Installed SHA-256: `be1242a07491d610ce3e4ed15735c1c1e4352d89a6837f882bf61c815e754da2`.
+
+The isolated `--monitor-transition-only` suite uses monitor-selected raw
+captures, which remain test-only. For a staged plugin, build its matching
+`build/security-test.so` with the same Makefile `TARGET` and set
+`HYPRLIQUID_TEST_SECURITY_PLUGIN=build/security-test.so` alongside
+`HYPRLIQUID_TEST_PLUGIN` when running `--security-only`.
+
 ## Historical artifacts
 
 - `make -j4 test`: passed, including 540 exact Glass and 288 exact Liquid shader comparisons across 8-bit, 10-bit, and FP16.

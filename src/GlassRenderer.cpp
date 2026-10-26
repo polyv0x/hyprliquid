@@ -94,7 +94,7 @@ bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IF
         g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, true);
         damage->copy().intersect(CBox{0, 0, width, height}).forEachRect([&](const auto& r) {
             updateBox = CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
-            glScissor(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
+            g_pHyprOpenGL->scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1), false);
             draw();
         });
         g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
@@ -204,7 +204,7 @@ bool prepareMaterialBackdrop(SP<Render::IFramebuffer> sample, SP<Render::IFrameb
         glBindFramebuffer(GL_FRAMEBUFFER, fbId(caller));
         g_pHyprOpenGL->setViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
         g_pHyprOpenGL->setCapStatus(GL_BLEND, blend);
-        glScissor(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]);
+        g_pHyprOpenGL->scissor(CBox(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]), false);
         g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, scissor);
         glActiveTexture(GL_TEXTURE0);
     });
@@ -243,7 +243,7 @@ bool prepareMaterialBackdrop(SP<Render::IFramebuffer> sample, SP<Render::IFrameb
         const auto region = DamageRegion::map(*damage, sample->m_size, halfSharp->m_size);
         g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, true);
         region.forEachRect([&](const auto& r) {
-            glScissor(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
+            g_pHyprOpenGL->scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1), false);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         });
     } else glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -415,7 +415,11 @@ bool blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFram
             else glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         };
         if (partial) step.region.forEachRect([&](const auto& r) {
-            glScissor(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
+            // Keep Hyprland's cached rectangle synchronized with GL. A native
+            // draw can reuse its previous scissor immediately after this blur;
+            // raw glScissor would silently leave it clipped to a scratch image.
+            // These coordinates belong to the offscreen buffer, not the output.
+            g_pHyprOpenGL->scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1), false);
             draw();
         });
         else draw();
