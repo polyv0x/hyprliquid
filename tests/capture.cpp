@@ -10,6 +10,7 @@
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <json-c/json.h>
 #include <chrono>
+#include <algorithm>
 #include <deque>
 #include <fstream>
 #include <filesystem>
@@ -24,6 +25,7 @@ Render::IHyprRenderer* renderer = nullptr;
 SP<SHyprCtlCommand> captureCommand, timingCommand, snapshotCommand;
 Hyprutils::Signal::CHyprSignalListener listener;
 std::string pending;
+std::string pendingMonitor;
 std::deque<double> times;
 std::chrono::steady_clock::time_point begun;
 uint64_t frames = 0;
@@ -134,11 +136,23 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
             auto argument = request.substr(at + 1);
             const bool nextFrame = argument.starts_with("next ");
             if (nextFrame) argument.erase(0, 5);
+            std::string monitorName;
+            if (argument.starts_with("monitor ")) {
+                const auto end = argument.find(' ', 8);
+                if (end == std::string::npos) return std::string("missing monitor and artifact path");
+                monitorName = argument.substr(8, end - 8);
+                argument.erase(0, end + 1);
+                if (std::ranges::none_of(State::monitorState()->monitors(), [&](const auto& monitor) {
+                        return monitor->m_name == monitorName;
+                    })) return std::string("missing monitor");
+            }
             const std::filesystem::path path = argument;
             std::error_code error;
             if (!path.is_absolute() || !std::filesystem::is_directory(path.parent_path(), error)) return std::string("invalid artifact path");
             pending = path;
+            pendingMonitor = std::move(monitorName);
             if (!nextFrame) for (const auto& monitor : State::monitorState()->monitors()) {
+                if (!pendingMonitor.empty() && monitor->m_name != pendingMonitor) continue;
                 renderer->damageMonitor(monitor);
                 monitor->scheduleFrame();
             }
@@ -166,8 +180,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
             times.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begun).count());
             if (times.size() > 1024) times.pop_front();
         }
-        if (stage == RENDER_LAST_MOMENT && !pending.empty()) {
+        if (stage == RENDER_LAST_MOMENT && !pending.empty() &&
+            (pendingMonitor.empty() || renderer->m_renderData.pMonitor->m_name == pendingMonitor)) {
             renderer->addPassElement(makeUnique<CCapture>(std::exchange(pending, {})));
+            pendingMonitor.clear();
         }
     });
     return {"hyprliquid-test-capture", "Internal framebuffer comparison fixture", "hyprliquid", "1"};
@@ -178,7 +194,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     HyprlandAPI::unregisterHyprCtlCommand(handle, captureCommand);
     HyprlandAPI::unregisterHyprCtlCommand(handle, timingCommand);
     HyprlandAPI::unregisterHyprCtlCommand(handle, snapshotCommand);
-    captureCommand.reset(); timingCommand.reset(); pending.clear(); times.clear();
+    captureCommand.reset(); timingCommand.reset(); pending.clear(); pendingMonitor.clear(); times.clear();
     snapshotCommand.reset();
     renderer = nullptr;
 }

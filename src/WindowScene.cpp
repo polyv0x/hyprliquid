@@ -112,7 +112,7 @@ class CWindowScenePassElement : public IPassElement {
             monitor->m_blurFBShouldRender = blur;
             renderer.bindFB(source);
             renderer.setViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-            glScissor(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]);
+            g_pHyprOpenGL->scissor(CBox(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]), false);
             g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, scissor);
         });
 

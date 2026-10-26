@@ -61,8 +61,8 @@ void verifyBlurRegions(const SP<Render::IFramebuffer>& caller) {
     glGetFloatv(GL_COLOR_CLEAR_VALUE, clear);
     Hyprutils::Utils::CScopeGuard restore([&] {
         Render::GL::g_pHyprOpenGL->setCapStatus(GL_BLEND, blend);
+        Render::GL::g_pHyprOpenGL->scissor(CBox(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]), false);
         Render::GL::g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, scissor);
-        glScissor(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]);
         glClearColor(clear[0], clear[1], clear[2], clear[3]);
     });
     Render::GL::g_pHyprOpenGL->setCapStatus(GL_BLEND, false);
@@ -71,10 +71,23 @@ void verifyBlurRegions(const SP<Render::IFramebuffer>& caller) {
         Render::GL::g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, true);
         glClearColor(r, g, b, 1);
         region.forEachRect([&](const auto& box) {
-            glScissor(box.x1, box.y1, box.x2 - box.x1, box.y2 - box.y1);
+            Render::GL::g_pHyprOpenGL->scissor(CBox(box.x1, box.y1, box.x2 - box.x1, box.y2 - box.y1), false);
             glClear(GL_COLOR_BUFFER_BIT);
         });
         Render::GL::g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
+    };
+    const CBox nativeScissor(13, 17, 607, 439);
+    const auto checkNativeScissor = [&](const char* operation) {
+        // Native drawing can request the same rectangle it used before our
+        // offscreen work. Hyprland must not skip this update using stale state.
+        Render::GL::g_pHyprOpenGL->scissor(nativeScissor, false);
+        GLint actual[4];
+        glGetIntegerv(GL_SCISSOR_BOX, actual);
+        if (actual[0] != nativeScissor.x || actual[1] != nativeScissor.y ||
+            actual[2] != nativeScissor.w || actual[3] != nativeScissor.h)
+            throw std::runtime_error(std::format("{} left native scissor cache stale: {},{},{},{}", operation,
+                                                actual[0], actual[1], actual[2], actual[3]));
+        Render::GL::g_pHyprOpenGL->scissor(nullptr);
     };
     for (const auto format : {DRM_FORMAT_ARGB8888, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ABGR16161616F}) {
         constexpr int width = 641, height = 481;
@@ -103,14 +116,24 @@ void verifyBlurRegions(const SP<Render::IFramebuffer>& caller) {
                 CRegion(CBox{width - 1, height - 1, 1, 1}), CRegion(CBox{319, 0, 1, height}),
                 CRegion(CBox{4, 112, 23, 13}).add(CBox{width - 41, height - 30, 19, 17}), fragmented, CRegion{}};
             for (size_t index = 0; index < changes.size(); ++index) {
+                SP<Render::IFramebuffer> captured;
+                Vector2D padding;
+                Render::GL::g_pHyprOpenGL->scissor(nativeScissor, false);
+                require(GlassRenderer::sampleBackground(captured, input, CBox{0, 0, width, height}, padding,
+                                                       0, nullptr, nullptr, 1, &changes[index]), "partial capture failed");
+                checkNativeScissor("partial capture");
                 const auto previous = rawPixels(retained);
                 paint(input, changes[index], 0.93f - index * 0.1f, index * 0.12f, 0.17f);
                 // The next pane can overwrite every shared intermediate. A
                 // partial repair must reconstruct all of its own dependencies.
                 require(GlassRenderer::blurBackground(poison, discarded, sigma, caller), "scratch poison blur failed");
+                Render::GL::g_pHyprOpenGL->scissor(nativeScissor, false);
                 require(reduce(half, &changes[index]) && reduce(fullHalf), "partial material reduction failed");
+                checkNativeScissor("material reduction");
                 if (mode == 2) require(rawPixels(half) == rawPixels(fullHalf), "partial material reduction differs");
+                Render::GL::g_pHyprOpenGL->scissor(nativeScissor, false);
                 require(GlassRenderer::blurBackground(input, retained, sigma, caller, clean, half, &changes[index]), "partial blur failed");
+                checkNativeScissor("partial blur");
                 require(GlassRenderer::blurBackground(input, reference, sigma, caller, clean, fullHalf), "reference blur failed");
                 if (rawPixels(retained) != rawPixels(reference))
                     throw std::runtime_error(std::format("partial blur differs: format {}, mode {}, sigma {}, region {}", format, mode, sigma, index));
