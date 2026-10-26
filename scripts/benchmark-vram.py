@@ -100,7 +100,15 @@ def main():
     parser.add_argument('--steady-only', action='store_true', help='Measure the fixed warm scene without the visual/lifecycle matrix')
     parser.add_argument('--steady-preset', default='lens', help='Material for --steady-only (default: lens)')
     parser.add_argument('--steady-mode', default='1280x800@60', help='Output mode for --steady-only (default: 1280x800@60)')
+    parser.add_argument('--steady-bitdepth', type=int, choices=(8, 10), default=8, help='Output bit depth for --steady-only')
     parser.add_argument('--steady-panes', type=int, default=2, help='Pane count for --steady-only (default: 2)')
+    parser.add_argument('--steady-overlap', action='store_true', help='Stack two floating panes and animate the background pane')
+    parser.add_argument('--steady-video-stack', action='store_true', help='Transparent tiles below an opaque animated float and a transparent receiving float (at least three panes)')
+    parser.add_argument('--steady-video-edge', action='store_true', help='With --steady-video-stack, place a smaller video beside a tall receiving pane')
+    parser.add_argument('--steady-scale', type=float, default=1, help='Output scale for the steady workload')
+    parser.add_argument('--steady-fp16', action='store_true', help='Use an FP16 internal framebuffer for steady pixel comparisons')
+    parser.add_argument('--steady-transform', type=int, choices=range(8), default=0, help='Output transform for steady pixel comparisons')
+    parser.add_argument('--verify-steady-pixels', action='store_true', help='Compare backdrop phases and cache rebuilds, and compare arms unless --only-arm is set')
     parser.add_argument('--client-update-hz', type=float, default=40, help='Changing client repaint rate (default: 40 Hz)')
     parser.add_argument('--animate-top-layer', action='store_true', help='Repaint a top layer independently at 60 Hz during steady timing')
     parser.add_argument('--opaque-clients', action='store_true', help='Use fully opaque client surfaces to exercise occlusion')
@@ -108,6 +116,7 @@ def main():
     parser.add_argument('--warmup-seconds', type=float, default=1, help='Foreground repaint warmup before sampling')
     parser.add_argument('--sample-seconds', type=float, default=6, help='Duration of foreground repaint sampling')
     parser.add_argument('--native-blur', action='store_true', help='With --steady-only, disable Liquid and enable native blur (size 8, three passes)')
+    parser.add_argument('--native-unloaded', action='store_true', help='With --native-blur, also unload the plugin for a native-only reference')
     parser.add_argument('--only-arm', choices=('baseline', 'reference', 'candidate'),
                         help='With --steady-only, measure one build in a fresh compositor for comparable DRM residency')
     args = parser.parse_args()
@@ -115,6 +124,20 @@ def main():
         parser.error('--only-arm requires --steady-only')
     if args.native_blur and not args.steady_only:
         parser.error('--native-blur requires --steady-only')
+    if args.native_unloaded and not args.native_blur:
+        parser.error('--native-unloaded requires --native-blur')
+    if args.steady_overlap and (not args.steady_only or args.steady_panes != 2):
+        parser.error('--steady-overlap requires --steady-only and two panes')
+    if args.steady_video_stack and (not args.steady_only or args.steady_panes < 3 or args.steady_overlap):
+        parser.error('--steady-video-stack requires --steady-only and at least three panes without --steady-overlap')
+    if args.steady_video_edge and not args.steady_video_stack:
+        parser.error('--steady-video-edge requires --steady-video-stack')
+    if not 0.5 <= args.steady_scale <= 3 or ((args.steady_scale != 1 or args.steady_fp16) and not args.steady_only):
+        parser.error('--steady-scale must be between 0.5 and 3; scale/FP16 overrides require --steady-only')
+    if args.verify_steady_pixels and (not args.steady_only or args.native_blur):
+        parser.error('--verify-steady-pixels requires --steady-only without --native-blur')
+    if args.steady_transform and not args.steady_only:
+        parser.error('--steady-transform requires --steady-only')
     if args.steady_panes < 1:
         parser.error('--steady-panes must be positive')
     if not 1 <= args.client_update_hz <= 240:
@@ -122,18 +145,21 @@ def main():
     update_interval = 1 / args.client_update_hz
     if args.warmup_seconds < 0 or args.sample_seconds < 3:
         parser.error('--warmup-seconds must be nonnegative and --sample-seconds at least 3')
-    if not args.steady_only and (args.steady_preset != 'lens' or args.steady_panes != 2 or args.steady_mode != '1280x800@60'):
-        parser.error('--steady-preset, --steady-panes and --steady-mode require --steady-only')
+    if not args.steady_only and (args.steady_preset != 'lens' or args.steady_panes != 2 or args.steady_mode != '1280x800@60' or args.steady_bitdepth != 8):
+        parser.error('--steady-preset, --steady-panes, --steady-mode and --steady-bitdepth require --steady-only')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     arms = {key: getattr(args, key).resolve() for key in ('baseline', 'reference', 'candidate')}
     if args.only_arm: arms = {args.only_arm: arms[args.only_arm]}
     results = {'versions': subprocess.check_output(['Hyprland', '--version'], text=True),
-               'workload': {'preset': args.steady_preset, 'panes': args.steady_panes,
+               'workload': {'preset': args.steady_preset, 'panes': args.steady_panes, 'bitdepth': args.steady_bitdepth,
                             'warmup_seconds': args.warmup_seconds, 'sample_seconds': args.sample_seconds,
                             'native_blur': args.native_blur,
+                            'native_unloaded': args.native_unloaded,
                             'client_update_interval_seconds': update_interval,
                             'animate_top_layer': args.animate_top_layer, 'opaque_clients': args.opaque_clients,
+                            'overlap': args.steady_overlap, 'transform': args.steady_transform, 'video_edge': args.steady_video_edge,
+                            'video_stack': args.steady_video_stack, 'scale': args.steady_scale, 'fp16': args.steady_fp16,
                             'x11_clients': args.x11_clients},
                'builds': {key: {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
                           for key, path in arms.items()}, 'arms': {}, 'comparisons': []}
@@ -173,6 +199,10 @@ def main():
                     response = json.loads(ctl('hyprliquid:control', json.dumps({'op': op, **values})))
                     assert response['ok'], response
                     return response
+
+                def action(window, name, fields):
+                    ctl('dispatch', 'hl.dsp.window.' + name + '({ window = ' +
+                        json.dumps('address:' + window['address']) + ', ' + fields + ' })')
 
                 parents = wait(lambda: json.loads(ctl('-j', 'monitors')))
                 assert ctl('output', 'create', 'headless', 'HYPRLIQUID-TEST') == 'ok'
@@ -223,7 +253,7 @@ while True:
                         set_pattern(path, {'color': color, 'phase': side % 2})
                         if len(controls) <= side: controls.append(path)
                         clients.append(subprocess.Popen(['kitty', '--start-as=normal', '--class', f'vram-pane-{side}',
-                            '-o', 'background_opacity=' + ('1' if args.opaque_clients else '0'), '-o', 'remember_window_size=no',
+                            '-o', 'background_opacity=' + ('1' if args.opaque_clients or (args.steady_video_stack and side == args.steady_panes - 2) else '0'), '-o', 'remember_window_size=no',
                             '-o', 'cursor_blink_interval=0', '-o', 'font_size=16',
                             '-o', 'linux_display_server=' + ('x11' if args.x11_clients else 'wayland'),
                             'python3', '-c', pattern, str(path)], env=client_env, stdout=log, stderr=log))
@@ -272,20 +302,39 @@ while True:
                         'decoration = { active_opacity = 1, inactive_opacity = 1, dim_inactive = false, '
                         'shadow = { enabled = true } }, cursor = { no_warps = true, inactive_timeout = 0.1 } })')
                     mode = args.steady_mode if args.steady_only else '1280x800@60'
-                    ctl('eval', 'hl.monitor({ output = "HYPRLIQUID-TEST", mode = ' + json.dumps(mode) + ', position = "auto", scale = 1, transform = 0 })')
+                    ctl('eval', 'hl.monitor({ output = "HYPRLIQUID-TEST", mode = ' + json.dumps(mode) +
+                        ', position = "auto", scale = ' + str(args.steady_scale) + ', transform = ' + str(args.steady_transform) + ', bitdepth = ' + str(args.steady_bitdepth) + ' })')
+                    if args.steady_fp16:
+                        ctl('eval', 'hl.config({ render = { use_fp16 = 1 } })')
                     control('apply', profile={'base_preset': args.steady_preset, 'theme': 'dark'})
                     if args.native_blur:
                         control('apply', patch={'enabled': False})
                         ctl('eval', 'hl.config({ decoration = { blur = { enabled = true, size = 8, passes = 3, new_optimizations = true } } })')
+                        if args.native_unloaded:
+                            ctl('plugin', 'unload', str(plugin))
+                            previous = None
                     spawn_panes()
+                    if args.steady_overlap or args.steady_video_stack:
+                        windows = sorted(json.loads(ctl('-j', 'clients')), key=lambda w: int(w['class'].rsplit('-', 1)[1]))
+                        output_monitor = json.loads(ctl('-j', 'monitors'))[0]
+                        width, height = output_monitor['width'] / args.steady_scale, output_monitor['height'] / args.steady_scale
+                        if args.steady_transform % 2:
+                            width, height = height, width
+                        positions = ((.51, .3, .22, .22), (.13, .15, .37, .7)) if args.steady_video_edge else (
+                            (.19, .18, .62, .66), (.27, .27, .5, .48))
+                        for window, (x, y, w, h) in zip(windows[-2:], positions):
+                            action(window, 'float', 'action = "enable"')
+                            action(window, 'resize', f'x = {int(width*w)}, y = {int(height*h)}, relative = false')
+                            action(window, 'move', f'x = {int(width*x)}, y = {int(height*y)}, relative = false')
+                        action(windows[-1], 'alter_zorder', 'mode = "top"')
                     time.sleep(.6)
                     arm_result = {'captures': {}, 'settings': {}, 'steady_drm': [], 'timing': {}}
                     results['arms'][arm] = arm_result
-                    has_buffers = 'buffers' in control('describe')['capabilities']
+                    has_buffers = not args.native_unloaded and 'buffers' in control('describe')['capabilities']
                     arm_result['geometry'] = json.loads(ctl('-j', 'clients'))
                     assert all(w['xwayland'] == args.x11_clients for w in arm_result['geometry']), 'Client backend differs from requested workload'
                     geometry = sorted((w['class'], w['at'], w['size']) for w in arm_result['geometry'])
-                    if args.steady_panes == 2 and mode == '1280x800@60':
+                    if args.steady_panes == 2 and mode == '1280x800@60' and not args.steady_overlap and args.steady_scale == 1 and args.steady_transform == 0:
                         assert geometry == [('vram-pane-0', [20, 20], [612, 760]),
                                             ('vram-pane-1', [648, 20], [612, 760])], geometry
                     if reference_geometry is None:
@@ -298,10 +347,11 @@ while True:
                         clients.append(top_layer)
                         wait(lambda: 'hyprliquid-vram-test' in ctl('-j', 'layers'))
                     # Real foreground damage with fixed geometry/materials.
+                    changing = len(controls) - 2 if args.steady_video_stack else 0 if args.steady_overlap else len(controls) - 1
                     warm_until = time.monotonic() + args.warmup_seconds
                     iteration = 0
                     while time.monotonic() < warm_until:
-                        set_pattern(controls[-1], {'color': colors[-1], 'phase': iteration % 2})
+                        set_pattern(controls[changing], {'color': colors[changing], 'phase': iteration % 2})
                         iteration += 1
                         time.sleep(update_interval)
                     if has_buffers: arm_result['warm'] = control('buffers')['buffers']
@@ -316,7 +366,7 @@ while True:
                     sample_until = time.monotonic() + args.sample_seconds
                     next_sample = time.monotonic()
                     while time.monotonic() < sample_until:
-                        set_pattern(controls[-1], {'color': colors[-1], 'phase': iteration % 2})
+                        set_pattern(controls[changing], {'color': colors[changing], 'phase': iteration % 2})
                         iteration += 1
                         if time.monotonic() >= next_sample:
                             snapshot = drm(compositor.pid)
@@ -343,6 +393,48 @@ while True:
                         top_layer.wait(timeout=5)
                         wait(lambda: 'hyprliquid-vram-test' not in ctl('-j', 'layers'))
                     if args.steady_only:
+                        if args.verify_steady_pixels:
+                            for phase in (0, 1):
+                                set_pattern(controls[changing], {'color': colors[changing], 'phase': phase})
+                                time.sleep(.3)
+                                for state in ('cached', 'rebuilt'):
+                                    if state == 'rebuilt':
+                                        control('apply', patch={})
+                                        time.sleep(.3)
+                                    name = f'steady-phase-{phase}-{state}'
+                                    arm_result['captures'][name] = capture(directory, name)
+                                assert arm_result['captures'][f'steady-phase-{phase}-cached']['sha256'] == arm_result['captures'][f'steady-phase-{phase}-rebuilt']['sha256'], 'Cached backdrop differs from rebuild'
+                            if args.steady_video_stack:
+                                def stack_capture(name):
+                                    time.sleep(.3)
+                                    arm_result['captures'][name] = capture(directory, name)
+                                for opacity in (.73, 1):
+                                    ctl('eval', 'hl.config({ decoration = { active_opacity = ' + str(opacity) + ', inactive_opacity = ' + str(opacity) + ' } })')
+                                    stack_capture('stack-opacity-' + str(opacity))
+                                for contribution in (0, 1):
+                                    control('apply', patch={'overrides': {'neighbor_contribution': contribution}})
+                                    stack_capture('stack-contribution-' + str(contribution))
+                                bottom = subprocess.Popen([str(ROOT / 'build/layer-test'), '--bottom'],
+                                    env=env | {'GSK_RENDERER': 'cairo', 'GTK_A11Y': 'none'}, stdout=log, stderr=log)
+                                clients.append(bottom)
+                                wait(lambda: 'hyprliquid-vram-test' in ctl('-j', 'layers'))
+                                stack_capture('stack-wallpaper-changed')
+                                bottom.terminate(); bottom.wait(timeout=5)
+                                wait(lambda: 'hyprliquid-vram-test' not in ctl('-j', 'layers'))
+                                stack_capture('stack-wallpaper-restored')
+                                # Crossing the tile boundary creates a real
+                                # neighbor dependency, even with fixed content.
+                                action(windows[-2], 'move', 'x = -40, y = 100, relative = false')
+                                for phase in (0, 1):
+                                    set_pattern(controls[changing], {'color': colors[changing], 'phase': phase})
+                                    stack_capture('stack-crossing-' + str(phase))
+                                for tile in range(len(controls) - 2):
+                                    set_pattern(controls[tile], {'color': colors[tile], 'phase': 1 - tile % 2})
+                                    name = 'stack-tile-' + str(tile)
+                                    stack_capture(name + '-cached')
+                                    control('apply', patch={})
+                                    stack_capture(name + '-rebuilt')
+                                    assert arm_result['captures'][name + '-cached']['sha256'] == arm_result['captures'][name + '-rebuilt']['sha256'], 'Tiled backdrop differs from rebuild'
                         (output / 'result.json').write_text(json.dumps(results, indent=2))
                         print(f'Measured {arm}: CPU {arm_result["timing"]["distribution"]}', flush=True)
                         continue
@@ -424,10 +516,6 @@ while True:
 
                     windows = sorted(json.loads(ctl('-j', 'clients')), key=lambda w: w['class'])
 
-                    def action(window, name, fields):
-                        ctl('dispatch', 'hl.dsp.window.' + name + '({ window = ' +
-                            json.dumps('address:' + window['address']) + ', ' + fields + ' })')
-
                     def focus(window):
                         ctl('dispatch', 'hl.dsp.focus({ window = ' + json.dumps('address:' + window['address']) + ' })')
 
@@ -491,7 +579,9 @@ while True:
                     print(f'Captured {arm}: {len(arm_result["captures"])} cases; '
                           f'CPU {arm_result["timing"]["distribution"]}', flush=True)
 
-                if args.steady_only:
+                if args.steady_only and (not args.verify_steady_pixels or args.only_arm):
+                    if args.verify_steady_pixels:
+                        print('PASS: steady cached/rebuilt native framebuffer comparisons', flush=True)
                     ctl('dispatch', 'hl.dsp.exit()')
                     compositor.wait(timeout=10)
                     return
@@ -502,13 +592,18 @@ while True:
                         actual = results['arms'][arm]['captures'][name]
                         # Damage is telemetry, not image data: cache hits are
                         # expected to reduce it while preserving every pixel.
-                        image = lambda capture: capture | {'metadata': {k: v for k, v in capture['metadata'].items() if k != 'damage'}}
+                        image = lambda capture: capture | {'metadata': {k: v for k, v in capture['metadata'].items() if k not in ('damage', 'native_damage')}}
                         identical = image(expected) == image(actual)
                         results['comparisons'].append({'case': name, 'arm': arm, 'identical': identical})
                 (output / 'result.json').write_text(json.dumps(results, indent=2))
                 differences = [row for row in results['comparisons'] if not row['identical']]
                 assert not differences, differences
                 print(f'PASS: {len(results["comparisons"])} byte-identical internal framebuffer comparisons', flush=True)
+
+                if args.steady_only:
+                    ctl('dispatch', 'hl.dsp.exit()')
+                    compositor.wait(timeout=10)
+                    return
 
                 # Lifecycle tests deliberately run after the comparison arms so
                 # resize history cannot contaminate their steady-state totals.

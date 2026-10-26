@@ -1,3 +1,4 @@
+#include "DamageRegion.hpp"
 #include "GlassRenderer.hpp"
 #include "Globals.hpp"
 #include "RenderSafety.hpp"
@@ -193,7 +194,7 @@ bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IF
 }
 
 bool prepareMaterialBackdrop(SP<Render::IFramebuffer> sample, SP<Render::IFramebuffer>& halfSharp,
-                             SP<Render::IFramebuffer> caller, const SNeighborBackdrop* composition, float contribution) {
+                             SP<Render::IFramebuffer> caller, const SNeighborBackdrop* composition, float contribution, const CRegion* damage) {
     if (!caller || !sample || !sample->isAllocated() || sample == halfSharp ||
         !RenderSafety::dimension(sample->m_size.x) || !RenderSafety::dimension(sample->m_size.y)) return false;
     GLint viewport[4]; glGetIntegerv(GL_VIEWPORT, viewport);
@@ -209,6 +210,8 @@ bool prepareMaterialBackdrop(SP<Render::IFramebuffer> sample, SP<Render::IFrameb
     });
     const int width = (static_cast<int>(sample->m_size.x) + 1) / 2;
     const int height = (static_cast<int>(sample->m_size.y) + 1) / 2;
+    const bool retained = halfSharp && halfSharp->isAllocated() && halfSharp->m_size == Vector2D(width, height) &&
+        halfSharp->m_drmFormat == sample->m_drmFormat;
     if (!g_pGlobalState->renderBuffers.prepare(halfSharp, width, height, sample->m_drmFormat, "material-backdrop")) return false;
     halfSharp->setImageDescription(sample->imageDescription());
     auto& manager = g_pGlobalState->shaderManager;
@@ -236,7 +239,14 @@ bool prepareMaterialBackdrop(SP<Render::IFramebuffer> sample, SP<Render::IFrameb
     g_pHyprOpenGL->setCapStatus(GL_BLEND, false);
     g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
     glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    if (damage && retained) {
+        const auto region = DamageRegion::map(*damage, sample->m_size, halfSharp->m_size);
+        g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, true);
+        region.forEachRect([&](const auto& r) {
+            glScissor(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        });
+    } else glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
     return true;
 }
@@ -269,6 +279,8 @@ bool blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFram
     auto allocate = [&](SP<Render::IFramebuffer>& framebuffer, int w, int h, const char* role) {
         return g_pGlobalState->renderBuffers.prepare(framebuffer, w, h, sampleFramebuffer->m_drmFormat, role);
     };
+    const bool retained = blurredFramebuffer && blurredFramebuffer->isAllocated() &&
+        blurredFramebuffer->m_size == Vector2D(width, height) && blurredFramebuffer->m_drmFormat == sampleFramebuffer->m_drmFormat;
     if (!allocate(blurredFramebuffer, width, height, "blurred"))
         return false;
 
@@ -301,7 +313,7 @@ bool blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFram
     if (!allocate(temporary, width, height, "blur-temp"))
         return false;
 
-    bool partial = damage && !clean && !materialBackdrop;
+    bool partial = damage;
     if (partial) {
         uint64_t needed = CRenderBuffers::bytes(blurredFramebuffer->m_size.x, blurredFramebuffer->m_size.y, sampleFramebuffer->m_drmFormat) +
             CRenderBuffers::bytes(width, height, sampleFramebuffer->m_drmFormat);
@@ -360,23 +372,12 @@ bool blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFram
             const auto to = backwards ? step.input->m_size : step.target->m_size;
             const double haloX = step.mode == 0 ? std::abs(step.x) * step.input->m_size.x * 6 + 2 : 2;
             const double haloY = step.mode == 0 ? std::abs(step.y) * step.input->m_size.y * 6 + 2 : 2;
-            CRegion mapped;
-            region.forEachRect([&](const auto& r) {
-                const auto low = [&](double p, double scale, double halo) {
-                    return std::floor(backwards ? p * scale - halo : (p - halo) * scale);
-                };
-                const auto high = [&](double p, double scale, double halo) {
-                    return std::ceil(backwards ? p * scale + halo : (p + halo) * scale);
-                };
-                const double x0 = std::clamp(low(r.x1, to.x / from.x, haloX), 0.0, to.x);
-                const double y0 = std::clamp(low(r.y1, to.y / from.y, haloY), 0.0, to.y);
-                const double x1 = std::clamp(high(r.x2, to.x / from.x, haloX), 0.0, to.x);
-                const double y1 = std::clamp(high(r.y2, to.y / from.y, haloY), 0.0, to.y);
-                if (x1 > x0 && y1 > y0) mapped.add(CBox(x0, y0, x1 - x0, y1 - y0));
-            });
-            return mapped;
+            return DamageRegion::map(region, from, to, haloX, haloY, backwards);
         };
-        auto affected = damage->copy();
+        auto affected = retained ? damage->copy() : CRegion(CBox{{}, sampleFramebuffer->m_size});
+        // Damage always uses full-resolution crop coordinates. Liquid reduces
+        // that crop before entering the blur pyramid, including scene selection.
+        if (materialBackdrop) affected = DamageRegion::map(affected, sampleFramebuffer->m_size, materialBackdrop->m_size);
         for (size_t i = 0; i < count; ++i) affected = map(affected, steps[i], false);
         for (size_t i = count; i-- > 0;) {
             steps[i].region = affected.copy();
@@ -437,7 +438,8 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
     auto& manager = g_pGlobalState->shaderManager;
     const bool liquid = material.family == EMaterialFamily::LIQUID;
     if (liquid && !materialBackdrop) return;
-    const auto& uniforms = liquid ? manager.liquidCommonUniforms : manager.glassUniforms;
+    const bool shapedLayer = liquid && mask && mask->shapeCount > 0;
+    const auto& uniforms = shapedLayer ? manager.liquidLayerCommonUniforms : liquid ? manager.liquidCommonUniforms : manager.glassUniforms;
     const float extent = liquid && !mask && renderShadow ? std::ceil(materialOutputExtent(material) *
         g_pHyprRenderer->m_renderData.pMonitor->m_scale * material.effect_scale) : 0.0f;
     CBox outputBox = rawBox;
@@ -472,7 +474,7 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
     }
     glActiveTexture(GL_TEXTURE0);
 
-    auto shader = g_pHyprOpenGL->useShader(liquid ? manager.liquidShader : manager.glassShader);
+    auto shader = g_pHyprOpenGL->useShader(shapedLayer ? manager.liquidLayerShader : liquid ? manager.liquidShader : manager.glassShader);
     shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_FALSE, matrix.getMatrix());
     shader->setUniformInt(SHADER_TEX, 0);
     shader->setUniformFloat2(SHADER_FULL_SIZE, transformedBox.width, transformedBox.height);
@@ -494,7 +496,7 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
 #include "MaterialParams.inc"
 #undef GLASS_PARAM
     if (liquid) {
-        const auto& u = manager.liquidUniforms;
+        const auto& u = shapedLayer ? manager.liquidLayerUniforms : manager.liquidUniforms;
         // Output rotation/reflection is a coordinate transform, separate from
         // material display angle. Convert through the
         // compositor's own transform, with y-up material vectors on both sides.
@@ -506,6 +508,7 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
         glUniform1i(u.backdrop, 6); glUniform1i(u.cleanBackdrop, 7);
         glUniform2f(u.outputExtent, extent, extent);
         glUniform1i(u.renderShadow, !mask && renderShadow);
+        glUniform1i(u.transparentTarget, !mask && g_pHyprRenderer->m_bRenderingSnapshot);
     }
 
     // Window falloff also applies without a neighbor scene, so the transition
@@ -526,6 +529,11 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
         if (mask->regionRectCount > 0)
             glUniform4fv(uniforms.regionRects, mask->regionRectCount,
                          reinterpret_cast<const float*>(mask->regionRects.data()));
+        if (shapedLayer) {
+            glUniform1i(uniforms.layerShapeCount, mask->shapeCount);
+            glUniform4fv(uniforms.layerShapeBounds, mask->shapeCount, reinterpret_cast<const float*>(mask->shapeBounds.data()));
+            glUniform1fv(uniforms.layerShapeRadii, mask->shapeCount, mask->shapeRadii.data());
+        }
     }
     glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
     CRegion output = visible ? visible->copy().intersect(outputBox) : CRegion(outputBox);

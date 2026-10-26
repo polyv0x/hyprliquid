@@ -64,9 +64,13 @@ void paint(Surface& surface, int w, int h, json_object* state) {
     const int alpha = std::clamp(integer(state, "alpha", 210), 0, 255);
     const int phase = integer(state, "phase", 0);
     const int patch = integer(state, "patch", -1);
+    const int patchX = std::clamp(integer(state, "patch_x", 0), 0, bw - 1);
+    const int patchY = std::clamp(integer(state, "patch_y", 0), 0, bh - 1);
+    const int patchW = std::clamp(integer(state, "patch_w", bw / 4), 1, bw - patchX);
+    const int patchH = std::clamp(integer(state, "patch_h", bh / 4), 1, bh - patchY);
     auto* output = static_cast<uint32_t*>(pixels);
     for (int y = 0; y < bh; ++y) for (int x = 0; x < bw; ++x) {
-        const int rgb = patch >= 0 && x < bw / 4 && y < bh / 4 ? patch : color;
+        const int rgb = patch >= 0 && x >= patchX && x < patchX + patchW && y >= patchY && y < patchY + patchH ? patch : color;
         const int a = ((y / (24 * scale) + phase) % 2) ? alpha : alpha / 4;
         output[y * bw + x] = (a << 24) | (((rgb >> 16) & 255) * a / 255 << 16) |
             (((rgb >> 8) & 255) * a / 255 << 8) | ((rgb & 255) * a / 255);
@@ -80,7 +84,7 @@ void paint(Surface& surface, int w, int h, json_object* state) {
     wl_surface_set_buffer_transform(surface.surface, transform);
     wl_surface_attach(surface.surface, buffer, 0, 0);
     const bool partial = integer(state, "partial", 0) && surface.oldWidth == w && surface.oldHeight == h;
-    wl_surface_damage_buffer(surface.surface, 0, 0, partial ? bw / 4 : bw, partial ? bh / 4 : bh);
+    wl_surface_damage_buffer(surface.surface, partial ? patchX : 0, partial ? patchY : 0, partial ? patchW : bw, partial ? patchH : bh);
 }
 
 bool update(Surface& surface, json_object* state, int defaultWidth, int defaultHeight, bool defaultMapped) {
@@ -100,7 +104,8 @@ bool update(Surface& surface, json_object* state, int defaultWidth, int defaultH
     }
     const std::vector<int> bufferKey = {w, h, integer(state, "mapped", defaultMapped), integer(state, "scale", 1),
         integer(state, "transform", 0), integer(state, "color", 0x2050b0), integer(state, "alpha", 210),
-        integer(state, "phase", 0), integer(state, "patch", -1)};
+        integer(state, "phase", 0), integer(state, "patch", -1), integer(state, "patch_x", 0), integer(state, "patch_y", 0),
+        integer(state, "patch_w", -1), integer(state, "patch_h", -1)};
     // Position/stacking-only commits deliberately contain no buffer damage.
     if (bufferKey != surface.bufferKey) {
         if (bufferKey[2]) paint(surface, w, h, state);

@@ -28,5 +28,8 @@ inline constexpr bool liquidParameter(std::string_view name) {
 }
 
 inline constexpr bool materialParameter(EMaterialFamily family, std::string_view name) {
-    return family == EMaterialFamily::LIQUID ? liquidParameter(name) : name != "display_angle_degrees";
+    // Keep stored model fields and preset defaults compatible, but advertise
+    // only rendered controls. Native Hyprland decorations own window shadows.
+    return family == EMaterialFamily::LIQUID ?
+        liquidParameter(name) && name != "shadow_amount" && name != "shadow_offset" : name != "display_angle_degrees";
 }

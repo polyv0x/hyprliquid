@@ -15,6 +15,7 @@
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/managers/SessionLockManager.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
+#include <hyprland/src/plugins/PluginSystem.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/helpers/Color.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
@@ -606,6 +607,12 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 APICALL EXPORT void PLUGIN_EXIT() {
     if (!g_pGlobalState)
         return;
+
+    // We destroy every owned decoration below, including hidden/unmapped
+    // owners. Do not let Hyprland replay raw entries after those objects die;
+    // old registrations can already alias a native border or shadow.
+    if (g_pPluginSystem) if (auto* plugin = g_pPluginSystem->getPluginByHandle(PHANDLE))
+        plugin->m_registeredDecorations.clear();
 
     unregisterRuntimeControl();
 

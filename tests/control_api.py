@@ -69,7 +69,7 @@ def verify_control(ctl, config_path):
               'blur_sigma', 'blur_alpha0', 'blur_alpha3', 'blur_dist3',
               'inner_refraction_amount', 'inner_refraction_inv_height', 'outer_refraction_amount', 'outer_refraction_inv_height',
               'refraction_threshold0', 'refraction_threshold1', 'refraction_opacity',
-              'face_opacity', 'rim_width', 'rim_opacity', 'display_angle_degrees', 'shadow_amount', 'shadow_offset'}
+              'face_opacity', 'rim_width', 'rim_opacity', 'display_angle_degrees'}
     assert 'material_models' in description['capabilities']
     for parameter in description['parameters']:
         assert ('liquid' in parameter['models']) == (parameter['name'] in shared)
@@ -88,7 +88,8 @@ def verify_control(ctl, config_path):
                                            'display_angle_degrees', 'shadow_owner', 'output_extent', 'assumptions'}
         assert state['model_data']['parameters'] == fixture['variants'][environment]
         assert state['model_data']['effective_parameters'] == fixture['variants'][environment]
-        assert state['model_data']['shadow_owner'] == 'material'
+        assert state['model_data']['shadow_owner'] == 'native'
+        assert state['model_data']['output_extent'] == 0
         assert state['material']['neighbor_falloff'] == 0
         # The renamed preset differs only in blur; the medium variant preserves
         # the complete original material in both themes.
@@ -164,7 +165,7 @@ def verify_control(ctl, config_path):
     assert request('apply', profile={})['state']['animate_hover_angle'] is False
     reset_state = request('reset')['state']
     assert reset_state == baseline | {'revision': reset_state['revision']}
-    print('PASS: Liquid base/effective variants, 21 applicable controls, angle animation toggle, exact reset and atomic rejection', flush=True)
+    print('PASS: Liquid base/effective variants, 19 applicable controls, angle animation toggle, exact reset and atomic rejection', flush=True)
 
     # An explicitly customized old name remains selectable under its own id.
     assert 'frosted-full' in {p['id'] for p in description['presets']}

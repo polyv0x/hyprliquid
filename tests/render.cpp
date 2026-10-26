@@ -203,10 +203,10 @@ static void save(const std::string& name, const Target& target) {
 static std::string outlineOptics(std::string source) {
     // Keep the original optical path as a comparison, without changing the
     // frozen reference fixtures or adding a test switch to the shipped shader.
-    const std::string call = "vec2 opticalN = optical_normal(p, depth, n);";
+    const std::string call = "optical_normal(p, depth, n)";
     const auto at = source.find(call);
     require(at != std::string::npos, "Missing optical normal call");
-    source.replace(at, call.size(), "vec2 opticalN = n;");
+    source.replace(at, call.size(), "n");
     return source;
 }
 
@@ -605,6 +605,7 @@ static void sceneSampling() {
 }
 
 #include "liquid-render.hpp"
+#include "liquid-exact.hpp"
 
 #include "glass-exact.hpp"
 
@@ -627,8 +628,11 @@ int main(int argc, char** argv) try {
     const float vertices[]{0,0, 1,0, 0,1, 1,1}; glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
     glDisable(GL_DITHER);
+    if (argc == 2 && std::string(argv[1]) == "--exact-liquid-only") { exactLiquid(); return 0; }
     exactGlass(native);
     if (argc == 2 && std::string(argv[1]) == "--exact-glass-only") return 0;
+    exactLiquid();
+    if (argc == 2 && std::string(argv[1]) == "--liquid-only") { liquidRendering(nativeBlur); return 0; }
     pixelTransfers();
     sceneSampling();
     blurBrightness(nativeBlur);

@@ -89,23 +89,26 @@ CRenderBuffers::CLease CRenderBuffers::acquire(int width, int height, const SP<R
 }
 
 CRenderBuffers::CLease CRenderBuffers::acquireBackdrop(int width, int height, const SP<Render::IFramebuffer>& source,
-                                                     const std::string& owner, const std::vector<uint64_t>& contentKey, bool transientOnBypass) {
+                                                     const std::string& owner, const std::vector<uint64_t>& contentKey,
+                                                     bool transientOnBypass, bool materialBackdrop) {
     const auto color = source->imageDescription();
     const SKey key{width, height, source->m_drmFormat, color ? color->id() : 0,
                    eglGetCurrentDisplay(), eglGetCurrentContext()};
-    // Reserve both sharp and half-size blurred storage, even at zero sigma.
+    // Reserve sharp, half-size blur and Liquid's half-size material input,
+    // even before allocation and at zero sigma.
     // Admission never evicts the scratch samples needed by the live path.
-    const auto reservation = [](const SKey& key) {
+    const auto reservation = [](const SKey& key, bool materialBackdrop) {
         const auto sharp = bytes(key.width, key.height, key.format);
-        const auto blurred = bytes(key.width / 2 + key.width % 2, key.height / 2 + key.height % 2, key.format);
-        if (!sharp || !blurred || sharp > BACKDROP_RETAINED_BYTES || blurred > BACKDROP_RETAINED_BYTES - sharp)
+        const auto half = bytes(key.width / 2 + key.width % 2, key.height / 2 + key.height % 2, key.format);
+        const auto halfCount = materialBackdrop ? 2 : 1;
+        if (!sharp || !half || sharp > BACKDROP_RETAINED_BYTES || half > (BACKDROP_RETAINED_BYTES - sharp) / halfCount)
             return BACKDROP_RETAINED_BYTES + 1;
-        return sharp + blurred;
+        return sharp + half * halfCount;
     };
     auto slot = std::ranges::find_if(m_backdropCache, [&](const auto& entry) { return entry->cacheOwner == owner; });
-    uint64_t reserved = reservation(key);
+    uint64_t reserved = reservation(key, materialBackdrop);
     for (auto it = m_backdropCache.begin(); it != m_backdropCache.end(); ++it)
-        if (it != slot) reserved += reservation((*it)->key);
+        if (it != slot) reserved += reservation((*it)->key, (*it)->reserveMaterialBackdrop);
     if (reserved > BACKDROP_RETAINED_BYTES ||
         (slot == m_backdropCache.end() && m_backdropCache.size() >= BACKDROP_RETAINED_PAIRS) ||
         (slot != m_backdropCache.end() && (slot->use_count() != 1 || (*slot)->key.context != key.context ||
@@ -123,17 +126,24 @@ CRenderBuffers::CLease CRenderBuffers::acquireBackdrop(int width, int height, co
         slot = std::prev(m_backdropCache.end());
     }
     auto& samples = *slot;
-    const bool hit = samples->contentValid && samples->key == key && samples->contentKey == contentKey;
+    const bool hit = samples->contentValid && samples->key == key && samples->contentKey == contentKey &&
+        samples->reserveMaterialBackdrop == materialBackdrop;
     if (samples->key != key) {
         // Zero sigma does not resize the blur target. Drop storage from an old
         // size/format so it cannot exceed the new pair's admission reservation.
         SBindings restore;
         samples->sharp.reset();
         samples->blurred.reset();
+        samples->halfSharp.reset();
+    }
+    if (!materialBackdrop && samples->halfSharp) {
+        SBindings restore;
+        samples->halfSharp.reset();
     }
     if (hit) ++m_backdropHits;
     else ++m_backdropMisses;
     samples->contentValid = hit;
+    samples->reserveMaterialBackdrop = materialBackdrop;
     samples->key = key;
     samples->contentKey = contentKey;
     samples->used = Clock::now();
@@ -146,7 +156,7 @@ std::shared_ptr<CRenderBuffers::SSamples> CRenderBuffers::retainOutput(const std
     if (!source) return nullptr;
     const auto color = source->imageDescription();
     for (const auto& entry : m_pool) {
-        if (!entry->contentValid || !entry->outputValid || !entry->output ||
+        if (!entry->outputValid || !entry->output ||
             entry->cacheOwner != owner || entry->contentKey != contentKey || entry->sceneSerial != serial ||
             entry->key.format != source->m_drmFormat || entry->key.color != (color ? color->id() : 0) ||
             entry->key.context != eglGetCurrentContext() || entry->key.display != eglGetCurrentDisplay()) continue;
@@ -155,6 +165,20 @@ std::shared_ptr<CRenderBuffers::SSamples> CRenderBuffers::retainOutput(const std
         return entry;
     }
     return nullptr;
+}
+
+bool CRenderBuffers::canRetainOutput(int width, int height, DRMFormat format, const SP<Render::IFramebuffer>& current) const {
+    uint64_t retained = bytes(width, height, format);
+    if (!retained || retained > OUTPUT_RETAINED_BYTES) return false;
+    for (const auto& entry : m_pool) {
+        if (entry->output == current) continue;
+        const auto allocated = size(entry->output);
+        if (allocated > OUTPUT_RETAINED_BYTES - retained) return false;
+        retained += allocated;
+    }
+    // Falling back to an ordinary draw avoids cycling the same set of output
+    // allocations when a large stack exceeds the finished-material budget.
+    return true;
 }
 
 void CRenderBuffers::discardBackdrop(const std::string& owner) {
@@ -296,14 +320,31 @@ void CRenderBuffers::trim(bool expired) {
         uint64_t retained = 0;
         size_t count = 0;
         auto oldest = m_pool.end();
+        auto oldestInput = m_pool.end();
         for (auto it = m_pool.begin(); it != m_pool.end(); ++it) {
             if (it->use_count() != 1) continue;
+            if (!size(**it) && (*it)->outputValid && (*it)->output) continue;
             retained += size(**it);
             ++count;
             if (oldest == m_pool.end() || (*it)->sequence < (*oldest)->sequence) oldest = it;
+            if (size(**it) && (oldestInput == m_pool.end() || (*it)->sequence < (*oldestInput)->sequence)) oldestInput = it;
         }
         if (count <= 1 || (count <= RETAINED_PAIRS && retained <= RETAINED_BYTES)) break;
         if (!restore) restore.emplace();
+        // Output-only entries consume the separate material budget. Evicting
+        // one cannot relieve input-byte pressure, and would force a full blur
+        // rebuild for an otherwise unchanged pane on another monitor.
+        if (oldestInput != m_pool.end()) {
+            oldest = oldestInput;
+            if ((*oldest)->outputValid && (*oldest)->output) {
+                (*oldest)->sharp.reset();
+                (*oldest)->blurred.reset();
+                (*oldest)->halfSharp.reset();
+                (*oldest)->contentValid = false;
+                ++m_evictions;
+                continue;
+            }
+        }
         m_pool.erase(oldest);
         ++m_evictions;
     }
@@ -424,9 +465,12 @@ json_object* CRenderBuffers::diagnostics() const {
         number(item, "last_used_frame", record.frame);
         json_object_array_add(buffers, item);
     }
+    uint64_t inputCount = 0, outputOnlyCount = 0;
     for (const auto& samples : m_pool) {
         pooled += size(*samples);
         if (samples.use_count() > 1) leased += size(*samples);
+        if (!size(*samples) && samples->outputValid && samples->output) ++outputOnlyCount;
+        else ++inputCount;
     }
     json_object_object_add(result, "buffers", buffers);
     number(result, "retained_bytes", retained);
@@ -438,7 +482,8 @@ json_object* CRenderBuffers::diagnostics() const {
     number(result, "reallocations", m_reallocations);
     number(result, "allocation_failures", m_failures);
     auto* pool = json_object_new_object();
-    number(pool, "pairs", m_pool.size());
+    number(pool, "pairs", inputCount);
+    number(pool, "output_only_entries", outputOnlyCount);
     number(pool, "bytes", pooled);
     number(pool, "leased_bytes", leased);
     number(pool, "hits", m_hits);

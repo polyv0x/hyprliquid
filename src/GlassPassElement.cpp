@@ -5,17 +5,43 @@
 
 CGlassPassElement::CGlassPassElement(const SGlassPassData& data)
     : m_data(data) {
-    if (!data.decoration || data.sceneBase || !data.scene || !data.scene->cacheInputs || data.scene->failed)
+    if (!data.decoration || data.sceneBase || !data.scene || data.scene->failed)
         return;
     const auto window = data.decoration->getOwner();
     const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
     if (!window || !monitor) return;
-    // A foreground commit does not alter its own glass. Changes to any other
-    // pane take the regular path, which tracks the full refractive footprint.
-    for (const auto& change : data.scene->damage) if (change.window != window) return;
+    const bool independent = data.scene->independentWindow == window;
+    if ((data.scene->regional && !independent) || (!data.scene->cacheInputs && !independent)) return;
     m_cachedOutput = g_pGlobalState->renderBuffers.retainOutput(
         std::format("monitor:{}:window:{}", monitor->m_id, reinterpret_cast<uintptr_t>(window.get())),
         data.scene->inputKey, data.scene->previousInputSerial, g_pHyprRenderer->m_renderData.currentFB);
+    if (!m_cachedOutput) {
+        // Live-blur damage expansion follows the native blur radius, not our
+        // complete input crop. A cache miss (including a subsurface layout
+        // change or eviction) must repaint that crop before retaining it.
+        if (auto box = WindowGeometry::computeWindowBox(window, monitor)) {
+            box->expand(data.decoration->samplingPadding(monitor));
+            g_pHyprRenderer->m_renderData.damage.add(*box);
+            g_pHyprRenderer->m_renderData.finalDamage.add(*box);
+        }
+        return;
+    }
+    // A foreground commit does not alter its own glass. Neighbor changes take
+    // the regular partial-input path. Pin its previous inputs through the
+    // auxiliary draw, then release immediately before acquiring them again.
+    if (!independent) for (const auto& change : data.scene->damage) if (change.window != window) {
+        m_pendingInput = std::move(m_cachedOutput);
+        break;
+    }
+}
+
+void CGlassPassElement::discard() {
+    // Culling a valid finished image (for example on a bar-only frame) does
+    // not invalidate it. Advance its serial so the next small client update
+    // can still reuse it instead of rebuilding from a partial framebuffer.
+    if (m_cachedOutput) m_cachedOutput->sceneSerial = m_data.scene->inputSerial;
+    m_cachedOutput.reset();
+    m_pendingInput.reset();
 }
 
 std::vector<UP<IPassElement>> CGlassPassElement::draw() {
@@ -36,6 +62,7 @@ std::vector<UP<IPassElement>> CGlassPassElement::draw() {
         m_cachedOutput.reset();
         return {};
     }
+    m_pendingInput.reset();
     if (m_data.decoration.valid())
         m_data.decoration->renderPass(g_pHyprRenderer->m_renderData.pMonitor.lock(), m_data.alpha,
                                      m_data.scene, m_data.sceneBase);
@@ -56,7 +83,9 @@ std::optional<CBox> CGlassPassElement::boundingBox() {
     if (!box)
         return std::nullopt;
 
-    if (m_cachedOutput) return box->scale(1.0 / monitor->m_scale);
+    if (m_cachedOutput) {
+        return box->scale(1.0 / monitor->m_scale);
+    }
 
     // Expand by our sampling padding so the render pass damages the full
     // area we read from. Without this, wallpaper outside the window box
@@ -75,7 +104,8 @@ bool CGlassPassElement::needsLiveBlur() {
     // in the padded sampling region, causing blinking artifacts.
     // A pinned finished image has no live input dependency and needs only its
     // output damage. Pinning prevents pool eviction after this decision.
-    return !m_cachedOutput && m_data.decoration.valid() && m_data.decoration->getOwner();
+    return !(m_data.sceneBase && m_data.scene && m_data.scene->repair) &&
+        !m_cachedOutput && m_data.decoration.valid() && m_data.decoration->getOwner();
 }
 
 bool CGlassPassElement::needsPrecomputeBlur() {

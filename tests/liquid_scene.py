@@ -126,7 +126,7 @@ while True:
              'inner_refraction_amount': -20, 'inner_refraction_inv_height': 0.2,
              'outer_refraction_amount': 45, 'refraction_threshold0': 8, 'refraction_threshold1': 40,
              'refraction_opacity': 0, 'face_opacity': 0, 'rim_width': 5, 'rim_opacity': 0,
-             'shadow_amount': 0.6, 'shadow_offset': -20, 'display_angle_degrees': 45}
+             'display_angle_degrees': 45}
     for name, value in edits.items():
         control('apply', patch={'overrides': {name: value}})
         changed = capture('liquid-control-' + name)
@@ -134,7 +134,7 @@ while True:
         control('apply', patch={'reset_fields': [name]})
         restored = capture('liquid-control-reset')
         assert max_delta(baseline, restored) == 0, f'Liquid reset changed preset pixels: {name}'
-    print('PASS: Liquid live blur/refraction/face/highlight/shadow edits and pixel-identical preset resets', flush=True)
+    print('PASS: Liquid live blur/refraction/face/highlight edits and pixel-identical preset resets', flush=True)
 
     # With the toggle on, a nonzero target leaves idle pixels unchanged. The
     # angle follows native resize easing, then returns exactly to the baseline.
@@ -225,17 +225,17 @@ while True:
                     assert max_delta(reference, current) <= 1, 'Liquid body/shadow exposed wallpaper through underlay'
         diagnostic = control('buffers')['buffers']
         assert any(b['role'] == 'window-clean-material-backdrop' for b in diagnostic['buffers'])
-        assert all(w['owns_shadow'] for w in diagnostic['windows'] if w['enabled'])
+        assert all(not w['owns_shadow'] for w in diagnostic['windows'] if w['enabled'])
     print('PASS: Liquid body and local shadows preserve opaque underlays at partial/zero contribution', flush=True)
 
     ctl('eval', 'hl.monitor({ output = ' + json.dumps(monitor) + ', mode = "1280x800@60", position = "auto", scale = 1, transform = 0 })')
     time.sleep(0.5)
-    # Native shadow enablement must have no visible effect on Liquid windows.
+    # Liquid uses the same native shadow controls as the other presets.
     control('apply', profile={'base_preset': 'frosted-liquid-medium', 'theme': 'light'})
     before = capture('liquid-shadow-native-on')
     ctl('eval', 'hl.config({ decoration = { shadow = { enabled = false } } })')
     after = capture('liquid-shadow-native-off')
-    assert max_delta(before.crop((0, 80, 1280, 800)), after.crop((0, 80, 1280, 800))) == 0, 'Double native/material shadow'
+    assert max_delta(before.crop((0, 80, 1280, 800)), after.crop((0, 80, 1280, 800))) > 0, 'Liquid suppressed the native shadow'
     ctl('eval', 'hl.config({ decoration = { shadow = { enabled = true } } })')
     # Compare bounds cleanup against a full repaint, before and after close.
     action(receiver, 'move', 'x = 700, y = 400, relative = false')
@@ -268,7 +268,7 @@ while True:
         capture('liquid-audit-' + preset)
         data = control('buffers')['buffers']
         assert data['allocation_failures'] == 0 and data['window_pool']['leased_bytes'] == 0
-        assert all(w['owns_shadow'] == (preset == 'frosted-liquid-medium') for w in data['windows'] if w['enabled'])
+        assert all(not w['owns_shadow'] for w in data['windows'] if w['enabled'])
         metrics[preset] = {'last_frame_bytes': data['last_frame_bytes'], 'retained_bytes': data['retained_bytes'],
                            'cpu_frame_ms_median_recent': statistics.median(data['cpu_frame_ms'][-4:]),
                            'buffers': data['buffers']}

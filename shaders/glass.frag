@@ -157,9 +157,16 @@ void main() {
     float cov = clamp(0.5 - (d + coverage_offset) / coverage_width, 0.0, 1.0);
     if (cov <= 0.0) { fragColor = surfacePixel; return; }
 
-    vec2 n = sdf_normal(p);
     float depth = max(-d, 0.0);
-    vec2 opticalN = optical_normal(p, depth, n);
+    // The normal affects only refraction, edge bleed and the rim. Keep their
+    // full support, but avoid eight extra SDF evaluations in the flat center.
+    float normalLimit = max(max(1.0 / outer_refraction_inv_height, 1.0 / inner_refraction_inv_height),
+                            max(1.0 / edge_bleed_inv_height, rim_width)) + 1.0;
+    vec2 n = vec2(0.0), opticalN = vec2(0.0);
+    if (depth <= normalLimit) {
+        n = sdf_normal(p);
+        opticalN = optical_normal(p, depth, n);
+    }
     vec3 bg = texture(tex, backdropUV(uv)).rgb;
     float h_outer = clamp(1.0 - depth * outer_refraction_inv_height, 0.0, 1.0);
     float h_inner = clamp(1.0 - depth * inner_refraction_inv_height, 0.0, 1.0);

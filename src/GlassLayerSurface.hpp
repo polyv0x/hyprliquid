@@ -1,5 +1,7 @@
 #pragma once
 
+#include "LayerShape.hpp"
+
 struct json_object;
 
 #include "GlassRenderer.hpp"
@@ -51,6 +53,9 @@ class CGlassLayerSurface {
     float        m_cachedBlurSigma = -1.0f;
     int          m_cachedPadding = -1;
     EMaterialFamily m_cachedFamily = EMaterialFamily::LEGACY;
+    std::vector<LayerShape::Rect> m_shapeRegion;
+    std::vector<LayerShape::RoundedRect> m_shapes;
+    int m_renderedShapeCount = 0;
     std::chrono::steady_clock::time_point m_lastDirtyMark{};
 
     void damageSampleRegion();

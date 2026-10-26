@@ -1,4 +1,5 @@
 #include "GlassDecoration.hpp"
+#include "DamageRegion.hpp"
 #include "BuiltInPresets.hpp"
 #include "GlassPassElement.hpp"
 #include "GlassRenderer.hpp"
@@ -13,6 +14,7 @@
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/desktop/rule/windowRule/WindowRuleApplicator.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
+#include <hyprland/src/plugins/PluginSystem.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprutils/math/Misc.hpp>
@@ -23,27 +25,13 @@ CGlassDecoration::CGlassDecoration(PHLWINDOW window)
 }
 
 CGlassDecoration::~CGlassDecoration() {
+    // Hyprland's registry stores raw pointers and does not retire them when
+    // a window dies. An allocator can later reuse this address for a native
+    // decoration, which its plugin-unload sweep would then remove by mistake.
+    if (g_pPluginSystem) if (auto* plugin = g_pPluginSystem->getPluginByHandle(PHANDLE))
+        std::erase(plugin->m_registeredDecorations, static_cast<IHyprWindowDecoration*>(this));
     damageEntire();
-    updateShadowProp(false);
     withdrawNoBlur();
-}
-
-void CGlassDecoration::updateShadowProp(bool enabled) {
-    const auto window = m_window.lock();
-    if (!window || !window->m_ruleApplicator) return;
-    auto& prop = window->m_ruleApplicator->noShadow();
-    constexpr auto priority = Desktop::Types::PRIORITY_SET_PROP;
-    if (enabled && (!m_noShadowApplied || !prop.valueOrDefault())) {
-        // Preserve a pre-existing user setprop instead of clearing it on exit.
-        m_savedNoShadow = prop.hasValue() && prop.getPriority() == priority ? std::optional<bool>(prop.value()) : std::nullopt;
-        prop.set(true, priority);
-        m_noShadowApplied = true;
-    } else if (!enabled && m_noShadowApplied) {
-        if (prop.hasValue() && prop.getPriority() == priority && prop.value())
-            prop.matchOptional(m_savedNoShadow, priority);
-        m_savedNoShadow.reset();
-        m_noShadowApplied = false;
-    }
 }
 
 // Glass replaces Hyprland's blur for this window. Mark glassed windows with
@@ -166,13 +154,7 @@ SDecorationPositioningInfo CGlassDecoration::getPositioningInfo() {
     info.priority       = 10000;
     info.policy         = DECORATION_POSITION_ABSOLUTE;
     info.desiredExtents = {{0, 0}, {0, 0}};
-    if (g_pGlobalState && resolveEnabled()) {
-        const auto material = resolveMaterial({resolvePresetName(), resolveThemeIsDark(), g_pGlobalState->config,
-                                               g_pGlobalState->customPresets, runtimeOverrides()});
-        const float extent = materialOutputExtent(material) * material.effect_scale;
-        info.desiredExtents = {{extent, extent}, {extent, extent}};
-        info.edges = DECORATION_EDGE_TOP | DECORATION_EDGE_BOTTOM | DECORATION_EDGE_LEFT | DECORATION_EDGE_RIGHT;
-    }
+    // Native decorations own the drop shadow for every material family.
     return info;
 }
 
@@ -206,13 +188,6 @@ void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
         damageEntire();
         if (owner) if (const auto mon = owner->m_monitor.lock())
             g_pGlobalState->bumpSceneGeneration(mon);
-    }
-    updateShadowProp(enabled && material.family == EMaterialFamily::LIQUID);
-    const float extent = enabled ? materialOutputExtent(material) * material.effect_scale : 0.0f;
-    if (extent != m_outputExtent) {
-        m_outputExtent = extent;
-        g_pDecorationPositioner->repositionDeco(this);
-        damageEntire();
     }
     if (!enabled)
         return;
@@ -275,19 +250,59 @@ void CGlassDecoration::appendCacheKey(std::vector<uint64_t>& key) const {
     key.push_back(std::bit_cast<uint32_t>(m_renderedDisplayAngle));
 }
 
+CGlassDecoration::SRegionalInputCost CGlassDecoration::regionalInputCost(PHLMONITOR monitor, DRMFormat format) const {
+    auto box = WindowGeometry::computeWindowBox(m_window.lock(), monitor);
+    if (!box) return {CRenderBuffers::RETAINED_BYTES + 1, CRenderBuffers::RETAINED_PAIRS + 1};
+    box->transform(Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform)),
+                   monitor->m_transformedSize.x, monitor->m_transformedSize.y);
+    const auto material = resolveMaterial({resolvePresetName(), resolveThemeIsDark(), g_pGlobalState->config,
+                                          g_pGlobalState->customPresets, runtimeOverrides()});
+    const auto geometry = RenderSafety::sampleGeometry(box->x, box->y, box->w, box->h,
+        materialPadding(material, monitor->m_scale * material.effect_scale));
+    if (!geometry) return {CRenderBuffers::RETAINED_BYTES + 1, CRenderBuffers::RETAINED_PAIRS + 1};
+    const auto full = CRenderBuffers::bytes(geometry->width, geometry->height, format);
+    const auto half = CRenderBuffers::bytes((geometry->width + 1) / 2, (geometry->height + 1) / 2, format);
+    const bool liquid = material.family == EMaterialFamily::LIQUID;
+    // Retained input, half-size blur/material, and Liquid's live destination.
+    // Reserve a clean input too when reduced neighbor contribution may need it.
+    const bool clean = material.neighbor_contribution < 1.0f;
+    return {full * (liquid ? 2 : 1) + half * (1 + int(liquid)) * (clean ? 2 : 1),
+            size_t(1 + int(liquid) + int(clean))};
+}
+
+CRegion CGlassDecoration::affectedDamage(PHLMONITOR monitor, const CRegion& input) const {
+    const auto box = WindowGeometry::computeWindowBox(m_window.lock(), monitor);
+    if (!box) return {};
+    const auto material = resolveMaterial({resolvePresetName(), resolveThemeIsDark(), g_pGlobalState->config,
+                                          g_pGlobalState->customPresets, runtimeOverrides()});
+    const float scale = monitor->m_scale * material.effect_scale;
+    auto output = *box;
+    const int padding = materialPadding(material, scale);
+    const auto geometry = RenderSafety::sampleGeometry(box->x, box->y, box->w, box->h, padding);
+    if (!geometry) return CRegion(output);
+    double rays = std::max(std::abs(material.outer_refraction_amount), std::abs(material.inner_refraction_amount)) + material.aberration_amount;
+    if (material.edge_bleed_opacity > 0) rays = std::max(rays, double(material.edge_bleed_amount));
+    const bool liquid = material.family == EMaterialFamily::LIQUID;
+    if (liquid) {
+        const auto effective = effectiveLiquidMaterial(material);
+        rays = std::max(std::abs(effective.refraction.innerAmount), std::abs(effective.refraction.outerAmount));
+    }
+    const double support = DamageRegion::blurSupport(geometry->width, geometry->height, materialBlurSigma(material) * scale, liquid);
+    const double samplingScale = std::max((geometry->width - 2.0 * padding) / box->w, (geometry->height - 2.0 * padding) / box->h);
+    return DamageRegion::bounded(input.copy().expand(std::ceil(rays * scale * samplingScale + support + 4)), output);
+}
+
 void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
                                  const std::shared_ptr<SWindowScene>& scene, bool sceneBase) {
     bool completed = false;
     Hyprutils::Utils::CScopeGuard result([&] {
-        if (scene && (scene->local || scene->cacheBase || scene->cacheInputs) && !completed) scene->failed = true;
+        if (scene && (scene->local || scene->cacheBase || scene->cacheTiledBase || scene->cacheInputs || scene->independentWindow || scene->regional) && !completed) scene->failed = true;
     });
     auto& shaderManager = g_pGlobalState->shaderManager;
     shaderManager.initializeIfNeeded();
 
-    if (!shaderManager.isInitialized()) {
-        updateShadowProp(false);
+    if (!shaderManager.isInitialized())
         return;
-    }
 
     const auto window = m_window.lock();
     if (!window)
@@ -319,6 +334,14 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     const bool liquid = material.family == EMaterialFamily::LIQUID;
     const float effectScale = monitor->m_scale * material.effect_scale;
     const float blurSigma = materialBlurSigma(material);
+    float monitorScale  = monitor->m_scale;
+
+    // Hyprland renders internal-fullscreen windows unrounded (dontRound), we need to
+    // match, or the glass would show rounded gaps at the screen corners
+    const bool fsUnrounded = Fullscreen::controller()->getFullscreenModes(window).internal == Fullscreen::FSMODE_FULLSCREEN;
+    float cornerRadius  = fsUnrounded ? 0.0f : window->rounding() * monitorScale;
+    float roundingPower = window->roundingPower();
+
     // Base glass sees only the background; the final pass sees the completed
     // neighbouring panes outside its bounds and the true backdrop inside.
     const auto backdrop = sceneBase && scene ? scene->background : source;
@@ -326,7 +349,6 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     std::vector<GlassRenderer::SUnderlayShape> underlayShapes;
     if (scene && (scene->local || neighbours) && (liquid || material.neighbor_contribution < 1.0f)) {
         CBox receivingBox = transformBox;
-        receivingBox.expand(materialOutputExtent(material) * effectScale);
         // The scene is ordered in native painting order. Only windows already
         // painted beneath this receiver can form its actual backdrop.
         bool beneath = true;
@@ -371,43 +393,78 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     // auxiliary scene and snapshots consume their samples completely here.
     // All blits/draws use the same GL context and are ordered before the next
     // lease can overwrite them; no CPU/GPU wait or cross-context reuse is needed.
-    const bool cacheBackground = sceneBase && !liquid && scene && scene->cacheBackground && !scene->cacheBase;
-    const bool cacheInputs = !sceneBase && !liquid && scene && scene->cacheInputs && scene->ready && !scene->failed;
+    const bool cacheBackground = sceneBase && scene && scene->cacheBackground && !scene->cacheBase &&
+        !(scene->cacheTiledBase && !window->m_isFloating);
+    const bool independent = scene && scene->independentWindow == window;
+    const bool regional = !independent && !sceneBase && scene && scene->regionalInputs && scene->ready && !scene->failed;
+    const bool cacheInputs = !sceneBase && scene && ((!liquid && scene->cacheInputs) || independent || regional) && scene->ready && !scene->failed;
+    const SWindowScene::SReceiverDamage* receiver = nullptr;
+    if (regional) for (const auto& damage : scene->receivers) if (damage.window == window) { receiver = &damage; break; }
+    const bool broadUpdate = receiver && DamageRegion::area(receiver->output.copy().intersect(windowBox)) >= windowBox.w * windowBox.h * 0.65;
     const auto cacheOwner = std::format("monitor:{}:window:{}", monitor->m_id, reinterpret_cast<uintptr_t>(window.get()));
     auto samples = cacheBackground ? g_pGlobalState->renderBuffers.acquireBackdrop(width, height, backdrop,
-        cacheOwner, scene->backgroundKey) : g_pGlobalState->renderBuffers.acquire(width, height, backdrop,
+        cacheOwner, scene->backgroundKey, true, liquid) : g_pGlobalState->renderBuffers.acquire(width, height, backdrop,
             cacheInputs ? cacheOwner : std::string{}, cacheInputs ? scene->inputKey : std::vector<uint64_t>{});
     // Damage belongs to this scene update. A pane that missed the preceding
     // update (for example during a popup or fallback) must rebuild its input.
     if (cacheInputs && samples->sceneSerial != scene->previousInputSerial) samples->contentValid = false;
+    // Rebuilding most of a pane costs less than region bookkeeping, a second
+    // destination crop and finished-image transfers. Keep its exact-size
+    // storage, but use the original full pipeline on those frames.
+    if (broadUpdate) samples->contentValid = false;
     CRegion inputDamage;
-    if (cacheInputs && samples->contentValid) {
-        for (const auto& change : scene->damage) {
-            if (change.window == window) continue;
-            change.region.forEachRect([&](const auto& r) {
-                CBox box(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
-                box.transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y);
-                box = box.intersection(CBox{{}, source->m_size});
-                if (box.empty()) return;
-                const double left = std::clamp(box.x <= 0 ? 0 : box.x - geometry->x0, 0.0, double(width));
-                const double top = std::clamp(box.y <= 0 ? 0 : box.y - geometry->y0, 0.0, double(height));
-                const double right = std::clamp(box.x + box.w >= source->m_size.x ? width : box.x + box.w - geometry->x0, 0.0, double(width));
-                const double bottom = std::clamp(box.y + box.h >= source->m_size.y ? height : box.y + box.h - geometry->y0, 0.0, double(height));
-                if (right > left && bottom > top) inputDamage.add(CBox{left, top, right - left, bottom - top});
-            });
-        }
+    const auto mapDamage = [&](const CRegion& damage) {
+        CRegion mapped;
+        damage.forEachRect([&](const auto& r) {
+            CBox box(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
+            box.transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y);
+            box = box.intersection(CBox{{}, source->m_size});
+            if (box.empty()) return;
+            const double left = std::clamp(box.x <= 0 ? 0 : box.x - geometry->x0, 0.0, double(width));
+            const double top = std::clamp(box.y <= 0 ? 0 : box.y - geometry->y0, 0.0, double(height));
+            const double right = std::clamp(box.x + box.w >= source->m_size.x ? width : box.x + box.w - geometry->x0, 0.0, double(width));
+            const double bottom = std::clamp(box.y + box.h >= source->m_size.y ? height : box.y + box.h - geometry->y0, 0.0, double(height));
+            if (right > left && bottom > top) mapped.add(CBox{left, top, right - left, bottom - top});
+        });
+        return mapped;
+    };
+    if (cacheInputs && samples->contentValid && (!independent || regional)) {
+        if (receiver) inputDamage = mapDamage(receiver->input);
+        else for (const auto& change : scene->damage) if (change.window != window) inputDamage.add(mapDamage(change.region));
+        inputDamage = DamageRegion::bounded(std::move(inputDamage), CBox(0, 0, width, height));
     }
-    const bool partialUpdate = samples->contentValid && !inputDamage.empty();
+    const bool retainedInput = samples->contentValid;
+    auto captureDamage = inputDamage.copy();
+    if (regional && retainedInput) {
+        auto valid = mapDamage(g_pHyprRenderer->m_renderData.damage);
+        if (!liquid) {
+            // Outside the owner Glass copies the complete auxiliary scene,
+            // independently of the native target's current damage.
+            const CBox ownerBox(transformBox.x - geometry->x0, transformBox.y - geometry->y0, transformBox.w, transformBox.h);
+            valid.add(CRegion(CBox(0, 0, width, height)).subtract(CRegion(ownerBox)));
+        }
+        // Propagation/merging deliberately overestimates changed inputs. The
+        // native framebuffer is undefined outside its damage; keep those
+        // unchanged retained texels instead of capturing temporary zeroes.
+        captureDamage.intersect(valid);
+    }
+    const bool partialUpdate = retainedInput && !inputDamage.empty();
+    CBox cachedBox = transformBox;
+    if (regional && liquid) cachedBox.expand(-std::ceil(cornerRadius + 2));
+    samples->outputValid &= samples->contentValid && (regional || !partialUpdate);
     if (partialUpdate) samples->contentValid = false;
-    samples->outputValid &= samples->contentValid;
     Vector2D paddingRatio = samples->paddingRatio;
-    if (!samples->contentValid) {
+    // Liquid's auxiliary material input is wallpaper-only, but its exact sharp
+    // crop still contains the clients already painted below this window. Keep
+    // that crop current while retaining the independent half-size input/blur.
+    if (!samples->contentValid || (cacheBackground && liquid)) {
         if (!GlassRenderer::sampleBackground(samples->sharp, liquid ? source : backdrop, transformBox, paddingRatio,
                                           padding, liquid ? nullptr : neighbours, scene ? scene->background : nullptr,
                                           separateNeighbors ? 1.0f : material.neighbor_contribution,
-                                          partialUpdate ? &inputDamage : nullptr))
+                                          partialUpdate ? &captureDamage : nullptr))
             return;
         ++m_captures;
+        if (cacheBackground && liquid && samples->contentValid) ++m_backdropCacheReuses;
         if (partialUpdate) ++m_partialCaptures;
         samples->sharp->setImageDescription(backdrop->imageDescription());
     } else if (cacheInputs) ++m_windowBackdropReuses;
@@ -417,7 +474,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
         nullptr, neighbours};
     if (scene && scene->local) {
         // No neighboring client color enters the half-size reduction or blur.
-        // The exact destination crop still supplies local shadow attenuation.
+        // The exact destination crop still supplies native boundary pixels.
         composition.scene = scene->background;
     }
     if (sceneBase && scene) {
@@ -426,8 +483,9 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
         composition.scene = scene->background;
         composition.ownerBounds = {0, 0, 0, 0};
     }
-    if (liquid && !GlassRenderer::prepareMaterialBackdrop(samples->sharp, samples->halfSharp, source, &composition,
-                                                          separateNeighbors ? 1.0f : material.neighbor_contribution)) return;
+    if (liquid && !samples->contentValid && !GlassRenderer::prepareMaterialBackdrop(samples->sharp, samples->halfSharp, source, &composition,
+                                                          separateNeighbors ? 1.0f : material.neighbor_contribution,
+                                                          partialUpdate ? &captureDamage : nullptr)) return;
     // A zero-blur consumer passes a null result to the glass shader, but must
     // not discard storage that another matching window can use next.
     auto blurred = samples->blurred;
@@ -436,9 +494,9 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     } else {
         // Warm the retained-output scratch path on the first capture too,
         // avoiding a new allocation when the first small update arrives.
-        if (cacheInputs && !partialUpdate) inputDamage = CRegion(CBox{0, 0, width, height});
+        if (cacheInputs && !partialUpdate && !broadUpdate) inputDamage = CRegion(CBox(0, 0, width, height));
         if (!GlassRenderer::blurBackground(samples->sharp, blurred, blurSigma * effectScale, source, nullptr,
-                                       liquid ? samples->halfSharp : nullptr, cacheInputs ? &inputDamage : nullptr))
+                                       liquid ? samples->halfSharp : nullptr, cacheInputs && !broadUpdate ? &inputDamage : nullptr))
             return;
         if (blurred) {
             ++m_blurs;
@@ -450,18 +508,40 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
         samples->hasBlur = bool(blurred);
         samples->contentValid = !samples->cacheOwner.empty();
     }
+    if (cacheInputs && !retainedInput) {
+        auto valid = g_pHyprRenderer->m_renderData.damage.copy().transform(transform,
+            monitor->m_transformedSize.x, monitor->m_transformedSize.y);
+        const auto& bounds = geometry->owner;
+        auto required = CRegion(CBox(bounds[0], bounds[1], bounds[2] - bounds[0], bounds[3] - bounds[1]))
+            .intersect(CBox{{}, source->m_size});
+        // Eviction may remove a pane's input after this frame was queued. Its
+        // regular draw remains valid, but only a completely reconstructed
+        // owner can seed a reusable material input or finished image.
+        if (!required.subtract(valid).empty()) samples->contentValid = false;
+    }
+    // Liquid's antialiased boundary reads this pass's exact native
+    // destination, including preserved pixels outside native damage. Keep that
+    // live image separate from the retained logical backdrop used by material
+    // reduction: refreshing a boundary must not poison the next partial blur.
+    auto destination = regional && liquid && !broadUpdate ? g_pGlobalState->renderBuffers.acquire(width, height, source) :
+        CRenderBuffers::CLease(g_pGlobalState->renderBuffers, nullptr);
+    auto sharp = samples->sharp;
+    if (destination) {
+        // This unnamed entry may previously have served a full material draw.
+        // Its old filters are not used by the live destination and would keep
+        // a second set of half-size images pinned for every exact crop size.
+        destination->blurred.reset();
+        destination->halfSharp.reset();
+        Vector2D ignoredPadding;
+        if (!GlassRenderer::sampleBackground(destination->sharp, source, transformBox, ignoredPadding, padding)) return;
+        sharp = destination->sharp;
+        sharp->setImageDescription(source->imageDescription());
+        g_pGlobalState->renderBuffers.identify(sharp, "window-destination", std::format("pool:{}", destination->id));
+    }
     const auto owner = std::format("pool:{}", samples->id);
     g_pGlobalState->renderBuffers.identify(samples->sharp, cacheBackground ? "window-base-sharp" : "window-sharp", owner);
     g_pGlobalState->renderBuffers.identify(samples->blurred, cacheBackground ? "window-base-blurred" : "window-blurred", owner);
     if (liquid) g_pGlobalState->renderBuffers.identify(samples->halfSharp, "window-material-backdrop", owner);
-
-    float monitorScale  = monitor->m_scale;
-
-    // Hyprland renders internal-fullscreen windows unrounded (dontRound), we need to
-    // match, or the glass would show rounded gaps at the screen corners
-    const bool fsUnrounded = Fullscreen::controller()->getFullscreenModes(window).internal == Fullscreen::FSMODE_FULLSCREEN;
-    float cornerRadius  = fsUnrounded ? 0.0f : window->rounding() * monitorScale;
-    float roundingPower = window->roundingPower();
 
     // The render alpha Hyprland hands decorations is activeInactive * fade.
     // Glass must follow fades (open/close, fullscreen, workspace moves) but
@@ -490,7 +570,8 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
         }
     }
 
-    const auto outputGeometry = RenderSafety::sampleGeometry(transformBox.x, transformBox.y, transformBox.w, transformBox.h, 0);
+    CBox outputBox = regional && liquid ? cachedBox : transformBox;
+    const auto outputGeometry = RenderSafety::sampleGeometry(outputBox.x, outputBox.y, outputBox.w, outputBox.h, 0);
     std::array<int, 4> outputBounds{};
     if (outputGeometry) {
         const int x = std::clamp(outputGeometry->x0, 0, int(source->m_size.x));
@@ -498,11 +579,26 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
         outputBounds = {x, y, std::clamp(outputGeometry->owner[2], x, int(source->m_size.x)) - x,
                              std::clamp(outputGeometry->owner[3], y, int(source->m_size.y)) - y};
     }
-    const bool cacheOutput = cacheInputs && !separateNeighbors && outputBounds[2] > 0 && outputBounds[3] > 0 &&
+    const bool cacheOutput = cacheInputs && !broadUpdate && samples->contentValid && (!separateNeighbors || regional) && outputBounds[2] > 0 && outputBounds[3] > 0 &&
         transformBox.x == std::floor(transformBox.x) && transformBox.y == std::floor(transformBox.y) &&
         transformBox.w == std::floor(transformBox.w) && transformBox.h == std::floor(transformBox.h) &&
-        CRenderBuffers::bytes(outputBounds[2], outputBounds[3], source->m_drmFormat) <= CRenderBuffers::OUTPUT_RETAINED_BYTES;
-    if (cacheOutput && samples->outputValid && samples->outputBounds == outputBounds) {
+        g_pGlobalState->renderBuffers.canRetainOutput(outputBounds[2], outputBounds[3], source->m_drmFormat, samples->output);
+    const bool retainedOutput = cacheOutput && samples->outputValid && samples->outputBounds == outputBounds;
+    std::optional<CRegion> outputDamage;
+    if (regional && retainedOutput && receiver) outputDamage = receiver->output.copy();
+    if (sceneBase && scene && scene->repair) outputDamage = scene->repair->copy();
+    if (outputDamage) {
+        auto drawDamage = outputDamage->copy();
+        if (regional && liquid) {
+            auto liveBox = windowBox;
+            auto body = windowBox;
+            body.expand(-std::ceil(cornerRadius + 2));
+            drawDamage.add(CRegion(liveBox).subtract(CRegion(body)));
+        }
+        if (visible) visible->intersect(drawDamage);
+        else visible = std::move(drawDamage);
+    }
+    if (retainedOutput && (!regional || (!liquid && outputDamage && outputDamage->empty()))) {
         GlassRenderer::transferOutput(source, samples->output, outputBounds, true);
         ++m_materialCacheReuses;
         samples->sceneSerial = scene->inputSerial;
@@ -513,20 +609,26 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
         // Outside this frame's damage the destination need not contain a
         // complete backdrop. Seed the whole retained output from the validated
         // native input before blending, including transparent rounded corners.
+        std::optional<CRegion> nativeDamage;
+        if (regional && outputDamage) nativeDamage = outputDamage->copy().transform(transform,
+            monitor->m_transformedSize.x, monitor->m_transformedSize.y);
         if (cacheOutput)
-            GlassRenderer::transferOutput(source, samples->sharp, outputBounds, true, nullptr,
+            GlassRenderer::transferOutput(source, samples->sharp, outputBounds, true, nativeDamage ? &*nativeDamage : nullptr,
                                           std::array{geometry->x0, geometry->y0});
         // A scene rebuild can finish on an opaque client with blending off.
         // Transparent corner fragments must leave the real destination intact
         // before that completed image can be retained across future frames.
         const bool blend = cacheOutput && glIsEnabled(GL_BLEND);
         if (cacheOutput) g_pHyprOpenGL->setCapStatus(GL_BLEND, true);
-        GlassRenderer::applyGlassEffect(samples->sharp, blurred, source,
+        // Hyprland owns the drop shadow in both families. The material stays
+        // inside its window, including when rendered into a closing snapshot.
+        GlassRenderer::applyGlassEffect(sharp, blurred, source,
                                          windowBox, transformBox, glassAlpha,
                                          cornerRadius, roundingPower, paddingRatio, material, nullptr, neighbors,
-                                         liquid ? samples->halfSharp : nullptr, !sceneBase, visible ? &*visible : nullptr);
+                                         liquid ? samples->halfSharp : nullptr, false, visible ? &*visible : nullptr);
         if (cacheOutput) g_pHyprOpenGL->setCapStatus(GL_BLEND, blend);
         ++m_materialDraws;
+        if (outputDamage) ++m_partialMaterials;
         if (cacheOutput) {
             // A pass can hold a read-only image queued before this rebuild.
             // Replace storage instead of overwriting that retained snapshot.
@@ -534,9 +636,22 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
             if (g_pGlobalState->renderBuffers.prepare(samples->output, outputBounds[2], outputBounds[3], source->m_drmFormat,
                                                      "window-material", cacheOwner)) {
                 samples->output->setImageDescription(source->imageDescription());
-                GlassRenderer::transferOutput(source, samples->output, outputBounds, false);
+                // Retain the result only after native blending. Glass output
+                // stays inside its owner (whose crop is the true backdrop);
+                // Liquid's sharp crop also retains the true exterior backdrop.
+                GlassRenderer::transferOutput(source, samples->output, outputBounds, false, nativeDamage ? &*nativeDamage : nullptr);
+                if (nativeDamage) GlassRenderer::transferOutput(source, samples->output, outputBounds, true);
                 samples->outputBounds = outputBounds;
                 samples->outputValid = true;
+                if (independent && !regional) {
+                    // Only the finished native pixels are needed while this
+                    // backdrop is unchanged. Keeping another full-size input
+                    // pair evicts the live video/foreground pairs on 4K stacks.
+                    g_pGlobalState->renderBuffers.release(samples->sharp);
+                    g_pGlobalState->renderBuffers.release(samples->blurred);
+                    g_pGlobalState->renderBuffers.release(samples->halfSharp);
+                    samples->contentValid = false;
+                }
             }
         }
         if (cacheInputs) samples->sceneSerial = scene->inputSerial;
@@ -552,22 +667,32 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
         }
         // Liquid still needs its clean half-sharp input at zero blur. Legacy
         // materials only need the clean blur, reconstructed on first reduction.
-        auto clean = g_pGlobalState->renderBuffers.acquire((width + 1) / 2, (height + 1) / 2, backdrop);
+        auto clean = g_pGlobalState->renderBuffers.acquire(regional ? width : (width + 1) / 2, regional ? height : (height + 1) / 2, backdrop,
+            regional ? cacheOwner + ":clean" : std::string{}, regional ? scene->inputKey : std::vector<uint64_t>{});
+        if (regional && (!retainedInput || clean->sceneSerial != scene->previousInputSerial)) clean->contentValid = false;
+        const bool repairClean = clean->contentValid && partialUpdate;
         auto cleanBlurred = clean->sharp;
+        if (!clean->contentValid || partialUpdate) {
+            const CRegion full(CBox(0, 0, width, height));
+            const CRegion* damage = regional && !broadUpdate ? (repairClean ? &inputDamage : &full) : nullptr;
+            if (liquid && !GlassRenderer::prepareMaterialBackdrop(samples->sharp, clean->halfSharp, source, &composition, 0.0f,
+                                                                  repairClean ? &inputDamage : nullptr)) return;
+            if (!GlassRenderer::blurBackground(samples->sharp, cleanBlurred, blurSigma * effectScale, source,
+                                               liquid ? nullptr : &neighbors, liquid ? clean->halfSharp : nullptr, damage)) return;
+            clean->sharp = cleanBlurred;
+            clean->hasBlur = bool(cleanBlurred);
+            clean->contentValid = regional && samples->contentValid;
+        } else if (!clean->hasBlur) cleanBlurred.reset();
         if (liquid) {
-            if (!GlassRenderer::prepareMaterialBackdrop(samples->sharp, clean->halfSharp, source, &composition, 0.0f)) return;
             neighbors.halfSharp = clean->halfSharp;
             g_pGlobalState->renderBuffers.identify(clean->halfSharp, "window-clean-material-backdrop", std::format("pool:{}", clean->id));
         }
-        if (!GlassRenderer::blurBackground(samples->sharp, cleanBlurred, blurSigma * effectScale, source,
-                                           liquid ? nullptr : &neighbors, liquid ? clean->halfSharp : nullptr))
-            return;
         if (cleanBlurred) {
-            clean->sharp = cleanBlurred;
             cleanBlurred->setImageDescription(backdrop->imageDescription());
             g_pGlobalState->renderBuffers.identify(cleanBlurred, "window-clean-blurred", std::format("pool:{}", clean->id));
             neighbors.blurred = cleanBlurred;
         }
+        if (regional) clean->sceneSerial = scene->inputSerial;
         draw(&neighbors);
         return;
     }
@@ -590,7 +715,7 @@ json_object* CGlassDecoration::diagnostics() const {
 #undef GLASS_PARAM
     json_object_object_add(result, "material", values);
     addMaterialInfo(result, material);
-    json_object_object_add(result, "owns_shadow", json_object_new_boolean(m_noShadowApplied));
+    json_object_object_add(result, "owns_shadow", json_object_new_boolean(false));
     json_object_object_add(result, "material_draws", json_object_new_uint64(m_materialDraws));
     json_object_object_add(result, "captures", json_object_new_uint64(m_captures));
     json_object_object_add(result, "blurs", json_object_new_uint64(m_blurs));
@@ -602,6 +727,7 @@ json_object* CGlassDecoration::diagnostics() const {
     json_object_object_add(result, "partial_blurs", json_object_new_uint64(m_partialBlurs));
     json_object_object_add(result, "occluded_draws", json_object_new_uint64(m_occludedDraws));
     json_object_object_add(result, "material_cache_reuses", json_object_new_uint64(m_materialCacheReuses));
+    json_object_object_add(result, "partial_materials", json_object_new_uint64(m_partialMaterials));
     json_object_object_add(result, "animate_display_angle", json_object_new_boolean(runtimeAnimateDisplayAngle()));
     json_object_object_add(result, "animate_hover_angle", json_object_new_boolean(runtimeAnimateHoverAngle()));
     json_object_object_add(result, "rendered_display_angle_degrees", json_object_new_double(m_renderedDisplayAngle));

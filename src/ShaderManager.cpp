@@ -63,6 +63,9 @@ bool CShaderManager::compileGlassShader(SP<CShader>& glassShader, SGlassUniforms
     glassUniforms.regionRects         = glGetUniformLocation(program, "regionRects[0]");
     if (glassUniforms.regionRects == -1)
         glassUniforms.regionRects = glGetUniformLocation(program, "regionRects");
+    glassUniforms.layerShapeCount = glGetUniformLocation(program, "layerShapeCount");
+    glassUniforms.layerShapeBounds = glGetUniformLocation(program, "layerShapeBounds[0]");
+    glassUniforms.layerShapeRadii = glGetUniformLocation(program, "layerShapeRadii[0]");
 
     return true;
 }
@@ -113,7 +116,8 @@ void CShaderManager::initializeIfNeeded() {
 
     if (!compileGlassShader(glassShader, glassUniforms, "glass.frag") ||
         !compileGlassShader(interiorShader, interiorUniforms, "glass-interior.frag") ||
-        !compileGlassShader(liquidShader, liquidCommonUniforms, "liquid.frag"))
+        !compileGlassShader(liquidShader, liquidCommonUniforms, "liquid.frag") ||
+        !compileGlassShader(liquidLayerShader, liquidLayerCommonUniforms, "liquid-layer.frag"))
         return;
 
     if (!compileBlurShader())
@@ -124,6 +128,7 @@ void CShaderManager::initializeIfNeeded() {
         return;
 
     liquidUniforms.locate(liquidShader->program());
+    liquidLayerUniforms.locate(liquidLayerShader->program());
     m_initialized = true;
 }
 
@@ -156,6 +161,7 @@ void CShaderManager::destroy() noexcept {
     glassShader->destroy();
     interiorShader->destroy();
     liquidShader->destroy();
+    liquidLayerShader->destroy();
     materialBackdropShader->destroy();
     blurShader->destroy();
     sceneSampleShader->destroy();

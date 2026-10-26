@@ -42,6 +42,9 @@ class CGlassDecoration : public IHyprWindowDecoration {
     WP<CGlassDecoration> m_self;
 
     [[nodiscard]] int samplingPadding(PHLMONITOR monitor) const;
+    [[nodiscard]] CRegion affectedDamage(PHLMONITOR monitor, const CRegion& input) const;
+    struct SRegionalInputCost { uint64_t bytes; size_t pairs; };
+    [[nodiscard]] SRegionalInputCost regionalInputCost(PHLMONITOR monitor, DRMFormat format) const;
 
   private:
     PHLWINDOWREF m_window;
@@ -59,9 +62,6 @@ class CGlassDecoration : public IHyprWindowDecoration {
     // snapshot taken before plugin decorations render — without noblur the
     // glass is invisible on static windows (#46).
     bool m_noBlurApplied = false;
-    bool m_noShadowApplied = false;
-    std::optional<bool> m_savedNoShadow;
-    float m_outputExtent = 0.0f;
     std::optional<CBox> m_lastDamageBox;
     uint64_t m_materialDraws = 0, m_captures = 0, m_blurs = 0, m_cacheReuses = 0;
     uint64_t m_backdropCacheReuses = 0;
@@ -69,10 +69,10 @@ class CGlassDecoration : public IHyprWindowDecoration {
     uint64_t m_windowBackdropReuses = 0;
     uint64_t m_partialCaptures = 0, m_partialBlurs = 0, m_occludedDraws = 0;
     uint64_t m_materialCacheReuses = 0;
+    uint64_t m_partialMaterials = 0;
 
     void updateNoBlurProp(bool glassEnabled);
     void withdrawNoBlur();
-    void updateShadowProp(bool enabled);
 
     [[nodiscard]] bool        resolveEnabled() const;
     [[nodiscard]] bool        resolveThemeIsDark() const;
