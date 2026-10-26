@@ -1,13 +1,16 @@
 // Deterministic translucent layer-shell surface for the disposable compositor.
 #include <gtk/gtk.h>
 #include <gtk4-layer-shell.h>
+#include <glib-unix.h>
+#include <csignal>
 #include <string_view>
 
 int main(int argc, char** argv) {
-    bool animate = false, bottom = false;
+    bool animate = false, bottom = false, bar = false;
     for (int i = 1; i < argc; ++i) {
         animate |= std::string_view(argv[i]) == "--animate";
         bottom |= std::string_view(argv[i]) == "--bottom";
+        bar |= std::string_view(argv[i]) == "--bar";
     }
     gtk_init();
     auto* window = GTK_WINDOW(gtk_window_new());
@@ -17,17 +20,27 @@ int main(int argc, char** argv) {
     gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_TOP, true);
     gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_LEFT, true);
     gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_RIGHT, true);
-    gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_TOP, 80);
-    gtk_layer_set_exclusive_zone(window, 0);
-    gtk_window_set_default_size(window, 600, 120);
+    gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_TOP, bar ? 0 : 80);
+    gtk_layer_set_exclusive_zone(window, bar ? 32 : 0);
+    gtk_window_set_default_size(window, 600, bar ? 32 : 120);
     auto* css = gtk_css_provider_new();
     gtk_css_provider_load_from_string(css, "window { background: transparent; }");
     gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     auto* area = gtk_drawing_area_new();
     unsigned phase = 0;
-    gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(area), 120);
-    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(area), [](GtkDrawingArea*, cairo_t* cr, int width, int, gpointer state) {
+    gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(area), bar ? 32 : 120);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(area), [](GtkDrawingArea*, cairo_t* cr, int width, int height, gpointer state) {
         const auto phase = *static_cast<unsigned*>(state);
+        if (height <= 32) {
+            cairo_set_source_rgba(cr, .08, .18, phase % 2 ? .35 : .25, .5);
+            cairo_paint(cr);
+            for (int x = 16; x < width - 16; x += 96) {
+                cairo_set_source_rgba(cr, .9, .9, .9, 1);
+                cairo_rectangle(cr, x, 12, 48, 8);
+                cairo_fill(cr);
+            }
+            return;
+        }
         for (int x = 16; x < width - 16; x += 96) {
             cairo_set_source_rgba(cr, .2, .4, phase % 2 ? .2 : .8, .3);
             cairo_rectangle(cr, x, 12, 72, 96);
@@ -38,6 +51,12 @@ int main(int argc, char** argv) {
         }
     }, &phase, nullptr);
     struct SAnimation { GtkWidget* area; unsigned* phase; } animation{area, &phase};
+    if (bar) g_unix_signal_add(SIGUSR1, [](gpointer data) -> gboolean {
+        auto& animation = *static_cast<SAnimation*>(data);
+        ++*animation.phase;
+        gtk_widget_queue_draw(animation.area);
+        return G_SOURCE_CONTINUE;
+    }, &animation);
     if (animate) g_timeout_add(16, [](gpointer data) -> gboolean {
         auto& animation = *static_cast<SAnimation*>(data);
         ++*animation.phase;

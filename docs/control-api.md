@@ -73,13 +73,17 @@ the entire request.
 hyprctl hyprliquid:control '{"op":"apply","profile":{"base_preset":"frosted-liquid","theme":"dark","overrides":{"glass_opacity":0.9}}}'
 ```
 
-Liquid supports 21 of the 34 scalar controls: all blur/refraction controls,
-face opacity, highlight width/strength/angle, shadow opacity/offset, and the four
+Liquid supports 19 of the 34 scalar controls: all blur/refraction controls,
+face opacity, highlight width/strength/angle, and the four
 overall/neighbor controls. See the [material contract](guide.md#liquid-material)
 for their mappings and preset defaults. `neighbor_falloff` defaults to zero.
 `blur_sigma` defaults to 19 for `frosted-liquid` and 6 for
 `frosted-liquid-medium`; all their other resolved values are identical.
 The hidden `liquid-medium` alias resolves to `frosted-liquid`.
+Window shadows use Hyprland's native `decoration.shadow` settings;
+`model_data.shadow_owner` is `native` for windows and `surface` for layers,
+and `output_extent` is zero. Stored material shadow fields remain available
+for profile compatibility but are absent from Liquid's applicable controls.
 Descriptor defaults remain generic.
 `light` selects the `default` material environment; `dark` selects `dark`.
 
@@ -173,11 +177,28 @@ driver alignment, metadata and compression.
 Liquid adds `window-material-backdrop`, `window-clean-material-backdrop` (only
 when protecting underlays at reduced contribution), and `layer-material-backdrop`.
 These are retained half-resolution unblurred inputs. Pool bytes, eviction, and
-idle cleanup include them; no extra full-resolution per-window copy is retained.
-The historical `pairs` counter counts pool entries even when they include this
-third texture. Window diagnostics also expose `owns_shadow`.
+idle cleanup include them. Window diagnostics retain `owns_shadow` for
+compatibility; it is false because native decorations own window shadows.
+Finished-output-only entries may have no input textures after eviction;
+`material_cache` accounts for their retained native pixels separately.
+`window_pool.pairs` counts input entries against its limit;
+`window_pool.output_only_entries` reports entries that only retain finished pixels.
+The `backdrop_cache` admission limit is 160 MiB, including Liquid's half-size
+material input. An independent bottom tile reports `material_cache_reuses`
+while contained floating clients repaint above it.
+`partial_materials` counts material draws restricted by propagated damage,
+including auxiliary repairs. These use the existing `partial_captures` and
+`partial_blurs` counters for their input work. `auxiliary-repair` is a pooled
+native-sized scratch image with the input pool's lifetime; `window-destination`
+is a shared temporary Liquid crop for antialiased boundaries,
+separate from each pane's retained material input. Finished
+Liquid body pixels remain in `material_cache`; boundaries are rendered live.
+Layer diagnostics expose `rounded_regions`, the smooth cards recognized from
+their protocol region on the last composite. Each entry is `[x, y, width,
+height, radius]` in surface-local logical coordinates. An empty array means
+the layer uses its existing alpha/protocol mask with rectangular geometry.
 
-The pool retains at most eight idle pairs or 128 MiB, with one oversized-pair
+The input pool retains at most 32 idle pairs or 256 MiB, with one oversized-pair
 exception to avoid allocating on every draw of a large HDR window. Active leases
 are excluded from those idle limits. Unused pairs expire after five seconds;
 unused scenes retire after two. A one-second cleanup timer can add up to one

@@ -19,12 +19,15 @@ struct json_object;
 class CRenderBuffers {
   public:
     using Clock = std::chrono::steady_clock;
-    static constexpr uint64_t RETAINED_BYTES = 128ULL * 1024 * 1024;
-    static constexpr size_t RETAINED_PAIRS = 16;
+    // Mixed 4K tiling/floating layouts need more exact-size inputs than a
+    // single stack. Keep their working set warm instead of cycling allocations.
+    static constexpr uint64_t RETAINED_BYTES = 256ULL * 1024 * 1024;
+    static constexpr size_t RETAINED_PAIRS = 32;
     static constexpr auto IDLE_TIMEOUT = std::chrono::seconds(5);
     static constexpr uint64_t SCRATCH_RETAINED_BYTES = 32ULL * 1024 * 1024;
     static constexpr size_t SCRATCH_RETAINED_SETS = 16;
-    static constexpr uint64_t BACKDROP_RETAINED_BYTES = 128ULL * 1024 * 1024;
+    // Three 4K/125% Liquid panes also retain their half-size material inputs.
+    static constexpr uint64_t BACKDROP_RETAINED_BYTES = 160ULL * 1024 * 1024;
     static constexpr size_t BACKDROP_RETAINED_PAIRS = 8;
     static constexpr uint64_t OUTPUT_RETAINED_BYTES = 64ULL * 1024 * 1024;
 
@@ -52,6 +55,7 @@ class CRenderBuffers {
         std::vector<uint64_t> contentKey;
         Vector2D paddingRatio;
         bool contentValid = false, hasBlur = false;
+        bool reserveMaterialBackdrop = false;
     };
     class CLease {
       public:
@@ -94,8 +98,10 @@ class CRenderBuffers {
     // Pin a validated finished image while its render-pass element is queued.
     std::shared_ptr<SSamples> retainOutput(const std::string& owner, const std::vector<uint64_t>& contentKey,
                                          uint64_t serial, const SP<Render::IFramebuffer>& source);
+    bool canRetainOutput(int width, int height, DRMFormat format, const SP<Render::IFramebuffer>& current) const;
     CLease acquireBackdrop(int width, int height, const SP<Render::IFramebuffer>& source,
-                           const std::string& owner, const std::vector<uint64_t>& contentKey, bool transientOnBypass = true);
+                           const std::string& owner, const std::vector<uint64_t>& contentKey,
+                           bool transientOnBypass = true, bool materialBackdrop = false);
     void discardBackdrop(const std::string& owner);
     CBlurLease acquireBlur(int width, int height, size_t levels, const SP<Render::IFramebuffer>& source);
     bool prepare(SP<Render::IFramebuffer>& fb, int width, int height, DRMFormat format,

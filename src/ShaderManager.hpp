@@ -39,6 +39,9 @@ struct SGlassUniforms {
     GLint maskMode = -1;
     GLint regionRectCount = -1;
     GLint regionRects = -1;
+    GLint layerShapeCount = -1;
+    GLint layerShapeBounds = -1;
+    GLint layerShapeRadii = -1;
 };
 
 struct SBlurUniforms {
@@ -73,6 +76,9 @@ class CShaderManager {
     SP<CShader> liquidShader = makeShared<CShader>();
     SGlassUniforms liquidCommonUniforms;
     SLiquidUniforms liquidUniforms;
+    SP<CShader> liquidLayerShader = makeShared<CShader>();
+    SGlassUniforms liquidLayerCommonUniforms;
+    SLiquidUniforms liquidLayerUniforms;
 
     SP<CShader>    blurShader = makeShared<CShader>();
     SBlurUniforms  blurUniforms;

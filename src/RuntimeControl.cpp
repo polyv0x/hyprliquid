@@ -143,7 +143,7 @@ void describe(json_object* result) {
     put(item, "max", json_object_new_double(hi)); \
     auto* models = json_object_new_array(); \
     if (materialParameter(EMaterialFamily::LEGACY, #name)) json_object_array_add(models, string("legacy")); \
-    if (liquidParameter(#name)) json_object_array_add(models, string("liquid")); \
+    if (materialParameter(EMaterialFamily::LIQUID, #name)) json_object_array_add(models, string("liquid")); \
     put(item, "models", models); \
     json_object_array_add(parameters, item); \
 }

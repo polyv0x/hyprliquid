@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PluginConfig.hpp"
+#include "LayerShape.hpp"
 
 #include <array>
 #include <span>
@@ -42,10 +43,13 @@ struct SMaskInfo {
     Vector2D uvScale;
     float    alphaThreshold = 0.001f;
 
-    // 0 = alpha-threshold mask, 1 = ext-background-effect-v1 protocol region
+    // 0 = alpha threshold, 1 = protocol strips, 2 = recovered rounded cards
     int                                        maskMode        = 0;
     std::array<SRegionRect, MAX_REGION_RECTS>  regionRects{};
     int                                        regionRectCount = 0;
+    std::array<SRegionRect, LayerShape::MAX_SHAPES> shapeBounds{};
+    std::array<float, LayerShape::MAX_SHAPES> shapeRadii{};
+    int shapeCount = 0;
 };
 
 // Windows beneath the receiver are part of its real backdrop, not an extra
@@ -75,7 +79,8 @@ bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IF
                     SP<Render::IFramebuffer> materialBackdrop = nullptr, const CRegion* damage = nullptr);
 
 [[nodiscard]] bool prepareMaterialBackdrop(SP<Render::IFramebuffer> sample, SP<Render::IFramebuffer>& halfSharp,
-                    SP<Render::IFramebuffer> caller, const SNeighborBackdrop* composition = nullptr, float contribution = 1.0f);
+                    SP<Render::IFramebuffer> caller, const SNeighborBackdrop* composition = nullptr, float contribution = 1.0f,
+                    const CRegion* damage = nullptr);
 
 // When mask is non-null (layers only), the shader composites the surface content
 // over the glass effect in a single pass. When mask is null (windows), the shader

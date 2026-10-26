@@ -1,5 +1,6 @@
 // Test-only fault injection, loaded only by scripts/test-nested.py.
 #include "../src/GlassRenderer.hpp"
+#include "../src/DamageRegion.hpp"
 #include "../src/Globals.hpp"
 #include "../src/PixelTransfer.hpp"
 #include "../src/RenderBuffers.hpp"
@@ -81,25 +82,48 @@ void verifyBlurRegions(const SP<Render::IFramebuffer>& caller) {
         require(buffers.prepare(input, width, height, format, "test-input"), "region input allocation failed");
         require(buffers.prepare(poison, width, height, format, "test-poison"), "region poison allocation failed");
         paint(poison, CRegion(CBox{0, 0, width, height}), 0.13f, 0.79f, 0.27f);
-        for (const float sigma : {0.5f, 3.0f, 7.0f, 19.8f, 60.0f}) {
+        for (int mode = 0; mode < 3; ++mode) for (const float sigma : {0.5f, 3.0f, 7.0f, 19.8f, 60.0f}) {
+            SP<Render::IFramebuffer> half, fullHalf;
+            GlassRenderer::SNeighborBackdrop composition{poison, nullptr, {0, 0}, {100, 80, 500, 400}, {}, nullptr, input};
+            const auto* clean = mode == 1 ? &composition : nullptr;
+            const auto reduce = [&](SP<Render::IFramebuffer>& target, const CRegion* damage = nullptr) {
+                return mode != 2 || GlassRenderer::prepareMaterialBackdrop(input, target, caller, &composition, 0.37f, damage);
+            };
             for (int y = 0; y < height; y += 23)
                 for (int x = 0; x < width; x += 29)
                     paint(input, CRegion(CBox(x, y, std::min(29, width - x), std::min(23, height - y))),
                         float((x * 13 + y * 7) % 251) / 200, float((x + y * 17) % 233) / 255, float((x * 3 + y) % 199) / 231);
-            require(GlassRenderer::blurBackground(input, retained, sigma, caller), "initial region blur failed");
-            const std::array<CRegion, 5> changes{
+            require(reduce(half), "initial material reduction failed");
+            require(GlassRenderer::blurBackground(input, retained, sigma, caller, clean, half), "initial region blur failed");
+            CRegion fragmented;
+            for (int y = 0; y < 5; ++y) for (int x = 0; x < 8; ++x)
+                fragmented.add(CBox(15 + x * 75, 13 + y * 90, 1, 1));
+            const std::array<CRegion, 7> changes{
                 CRegion(CBox{207, 163, 7, 11}), CRegion(CBox{0, 0, 1, 1}),
                 CRegion(CBox{width - 1, height - 1, 1, 1}), CRegion(CBox{319, 0, 1, height}),
-                CRegion(CBox{4, 112, 23, 13}).add(CBox{width - 41, height - 30, 19, 17})};
+                CRegion(CBox{4, 112, 23, 13}).add(CBox{width - 41, height - 30, 19, 17}), fragmented, CRegion{}};
             for (size_t index = 0; index < changes.size(); ++index) {
+                const auto previous = rawPixels(retained);
                 paint(input, changes[index], 0.93f - index * 0.1f, index * 0.12f, 0.17f);
                 // The next pane can overwrite every shared intermediate. A
                 // partial repair must reconstruct all of its own dependencies.
                 require(GlassRenderer::blurBackground(poison, discarded, sigma, caller), "scratch poison blur failed");
-                require(GlassRenderer::blurBackground(input, retained, sigma, caller, nullptr, nullptr, &changes[index]), "partial blur failed");
-                require(GlassRenderer::blurBackground(input, reference, sigma, caller), "reference blur failed");
+                require(reduce(half, &changes[index]) && reduce(fullHalf), "partial material reduction failed");
+                if (mode == 2) require(rawPixels(half) == rawPixels(fullHalf), "partial material reduction differs");
+                require(GlassRenderer::blurBackground(input, retained, sigma, caller, clean, half, &changes[index]), "partial blur failed");
+                require(GlassRenderer::blurBackground(input, reference, sigma, caller, clean, fullHalf), "reference blur failed");
                 if (rawPixels(retained) != rawPixels(reference))
-                    throw std::runtime_error(std::format("partial blur differs: format {}, sigma {}, region {}", format, sigma, index));
+                    throw std::runtime_error(std::format("partial blur differs: format {}, mode {}, sigma {}, region {}", format, mode, sigma, index));
+                const auto pixels = rawPixels(reference);
+                const int w = reference->m_size.x, h = reference->m_size.y;
+                const size_t pixelBytes = pixels.size() / (w * h);
+                const double support = DamageRegion::blurSupport(width, height, sigma, mode == 2) + 4;
+                const auto affected = DamageRegion::map(changes[index], input->m_size, reference->m_size, support, support);
+                for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+                    const size_t offset = (y * w + x) * pixelBytes;
+                    if (!std::equal(pixels.begin() + offset, pixels.begin() + offset + pixelBytes, previous.begin() + offset))
+                        require(affected.containsPoint({double(x), double(y)}), "blur escaped its material damage bound");
+                }
             }
         }
     }
@@ -152,6 +176,15 @@ class CSecurityPass : public IPassElement {
             glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &restored);
             require(restored == GLint(dynamic_cast<Render::GL::CGLFramebuffer*>(source.get())->getFBID()), "failed blur did not restore target");
             require(CRenderBuffers::bytes(INT_MAX, INT_MAX, DRM_FORMAT_ARGB8888) == uint64_t(INT_MAX) * INT_MAX * 4, "byte accounting overflowed");
+            {
+                CRenderBuffers reservations;
+                auto first = reservations.acquireBackdrop(4096, 4096, source, "liquid-first", {1}, false, true);
+                require(bool(first), "rejected a Liquid backdrop within budget");
+                // Neither lease has allocated textures yet. Admission must
+                // already reserve both half-size images, including nested work.
+                auto second = reservations.acquireBackdrop(4096, 3072, source, "liquid-second", {1}, false, true);
+                require(!second, "unallocated Liquid material input escaped the backdrop budget");
+            }
             {
                 auto cached = buffers.acquireBackdrop(20, 20, source, "receiver", {1});
                 require(!cached->contentValid, "new backdrop was already valid");

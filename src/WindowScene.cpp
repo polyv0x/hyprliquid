@@ -1,3 +1,4 @@
+#include "DamageRegion.hpp"
 #include "WindowScene.hpp"
 #include "GlassDecoration.hpp"
 #include "Globals.hpp"
@@ -86,7 +87,7 @@ class CWindowScenePassElement : public IPassElement {
     Render::CRenderPass pass;
     Render::CRenderPass basePass;
     bool reuse = false;
-    bool reuseBackground = false, reuseScene = false;
+    bool reuseBackground = false, reuseScene = false, repairScene = false;
 
     std::vector<UP<IPassElement>> draw() override {
         auto& renderer = *g_pHyprRenderer;
@@ -115,13 +116,18 @@ class CWindowScenePassElement : public IPassElement {
             g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, scissor);
         });
 
-        const auto copy = [&](const SP<Render::IFramebuffer>& from, const SP<Render::IFramebuffer>& to) {
+        const auto copy = [&](const SP<Render::IFramebuffer>& from, const SP<Render::IFramebuffer>& to, const CRegion* region = nullptr) {
             g_pGlobalState->renderBuffers.touch(from);
             g_pGlobalState->renderBuffers.touch(to);
             g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
             glBindFramebuffer(GL_READ_FRAMEBUFFER, fbId(from));
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbId(to));
-            glBlitFramebuffer(0, 0, source->m_size.x, source->m_size.y,
+            if (region) {
+                const auto transform = Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform));
+                region->copy().transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y).forEachRect([&](const auto& r) {
+                    glBlitFramebuffer(r.x1, r.y1, r.x2, r.y2, r.x1, r.y1, r.x2, r.y2, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+                });
+            } else glBlitFramebuffer(0, 0, source->m_size.x, source->m_size.y,
                               0, 0, source->m_size.x, source->m_size.y, GL_COLOR_BUFFER_BIT, GL_NEAREST);
         };
         if (!reuse) for (auto* framebuffer : {&m_scene->background, &m_scene->image}) {
@@ -137,8 +143,24 @@ class CWindowScenePassElement : public IPassElement {
             renderer.m_bBlockSurfaceFeedback = true;
             renderer.m_bRenderingSnapshot = true;
             renderer.m_renderData.noSimplify = true;
+            // Work in a native-sized scratch image, then commit only the
+            // affected core. The extra border rebuilds all undisplaced Liquid
+            // lookups without reading the retained scene's later clients as an
+            // earlier pane's backdrop. No changed filter phase or blend order.
+            auto work = m_scene->regional ? g_pGlobalState->renderBuffers.acquire(source->m_size.x, source->m_size.y, source) :
+                CRenderBuffers::CLease(g_pGlobalState->renderBuffers, nullptr);
+            auto image = m_scene->image;
+            std::optional<CRegion> repair;
+            const bool workspaceReady = m_scene->regional && g_pGlobalState->renderBuffers.prepare(work->sharp,
+                source->m_size.x, source->m_size.y, source->m_drmFormat, "auxiliary-repair", std::format("monitor:{}", monitor->m_id));
+            if (repairScene && workspaceReady) {
+                image = work->sharp;
+                image->setImageDescription(source->imageDescription());
+                repair = DamageRegion::bounded(m_scene->auxiliaryDamage.copy().expand(4 * m_scene->windows.size() + 4),
+                                                CBox{{}, monitor->m_transformedSize});
+            }
             bool baseCopied = false;
-            if (m_scene->cacheBase) {
+            if (m_scene->cacheBase || m_scene->cacheTiledBase) {
                 auto cached = g_pGlobalState->renderBuffers.acquireBackdrop(source->m_size.x, source->m_size.y, source,
                     std::format("monitor:{}:base", monitor->m_id), m_scene->backgroundKey, false);
                 if (cached) {
@@ -152,25 +174,32 @@ class CWindowScenePassElement : public IPassElement {
                             basePass.render(CRegion(CBox{{}, monitor->m_transformedSize}));
                             cached->contentValid = !m_scene->failed;
                         } else for (const auto& ref : m_scene->windows)
-                            if (auto* decoration = decorationFor(ref.lock())) decoration->reusedSceneBase();
-                        copy(cached->sharp, m_scene->image);
+                            if (!m_scene->cacheTiledBase || !ref->m_isFloating)
+                                if (auto* decoration = decorationFor(ref.lock())) decoration->reusedSceneBase();
+                        copy(cached->sharp, image, repair ? &*repair : nullptr);
                         baseCopied = true;
                     }
                 }
             }
             if (!baseCopied) {
-                copy(m_scene->background, m_scene->image);
-                if (m_scene->cacheBase) {
+                copy(m_scene->background, image, repair ? &*repair : nullptr);
+                if (m_scene->cacheBase || m_scene->cacheTiledBase) {
                     // If the shared image cannot fit, retain the smaller
                     // per-window input caches used by the fallback path.
-                    m_scene->cacheBase = false;
-                    CScopeGuard restoreBase([&] { m_scene->cacheBase = true; });
-                    renderer.bindFB(m_scene->image);
-                    basePass.render(CRegion(CBox{{}, monitor->m_transformedSize}));
+                    const bool allBase = m_scene->cacheBase, tiledBase = m_scene->cacheTiledBase;
+                    m_scene->cacheBase = m_scene->cacheTiledBase = false;
+                    CScopeGuard restoreBase([&] { m_scene->cacheBase = allBase; m_scene->cacheTiledBase = tiledBase; });
+                    renderer.bindFB(image);
+                    m_scene->repair = repair;
+                    basePass.render(repair ? *repair : CRegion(CBox{{}, monitor->m_transformedSize}));
+                    m_scene->repair.reset();
                 }
             }
-            renderer.bindFB(m_scene->image);
-            pass.render(CRegion(CBox{{}, monitor->m_transformedSize}));
+            renderer.bindFB(image);
+            m_scene->repair = repair;
+            pass.render(repair ? *repair : CRegion(CBox{{}, monitor->m_transformedSize}));
+            m_scene->repair.reset();
+            if (repair) copy(image, m_scene->image, &m_scene->auxiliaryDamage);
             if (m_scene->cache) m_scene->cache->valid = !m_scene->failed;
         }
         m_scene->ready = true;
@@ -225,7 +254,7 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
     bool local = !workspace->m_isSpecialWorkspace && !monitor->m_activeSpecialWorkspace &&
         !workspace->m_renderOffset->isBeingAnimated() && workspace->m_alpha->value() == 1.0f;
     bool cacheBackground = local;
-    bool disjoint = true, legacy = true;
+    bool disjoint = true, legacy = true, containedSurfaces = true, allGlass = true;
     std::vector<CBox> currentBoxes;
     for (const auto& window : Desktop::windowState()->windows()) {
         if (!window->m_isMapped || window->isHidden() || !renderer->shouldRenderWindow(window, monitor))
@@ -267,8 +296,10 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
         // Native main-surface quads fill the pane even when buffer dimensions
         // differ (notably scaled Xwayland). Small surfaces use different
         // placement rules and retain native interleaving conservatively.
-        if (!surfacesInsideWindow(window))
+        if (!surfacesInsideWindow(window)) {
             legacy = false;
+            containedSurfaces = false;
+        }
         // Animations/snapshots and real underlays keep native painting order.
         if (window->positionAnimation()->isBeingAnimated() || window->sizeAnimation()->isBeingAnimated() ||
             window->alphaTotalWithout(Desktop::View::WINDOW_ALPHA_ACTIVE) != 1.0f) {
@@ -279,7 +310,7 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
             hasGlass = true;
             if (decoration->needsNeighborScene()) local = false;
             if (decoration->usesLiquidGlass()) legacy = false;
-        } else { local = false; legacy = false; } // Preserve native shadows and other materials' ordering.
+        } else { local = false; legacy = false; allGlass = false; } // Preserve native shadows and other materials' ordering.
     }
     // Match the compositor's planes while preserving each plane's z-order.
     // A float may precede a tile in WindowState after either is raised/lowered;
@@ -292,13 +323,37 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
     scene->cacheBackground = cacheBackground && g_pGlobalState->damageSurfaceHook;
     scene->cacheBase = scene->cacheBackground && disjoint && legacy;
     scene->cacheInputs = scene->cacheBase && Desktop::fadingOutState()->fadeouts().empty();
-    if (scene->cacheInputs) for (const auto& ref : scene->windows) {
+    scene->cacheTiledBase = !local && !scene->cacheBase && scene->cacheBackground && containedSurfaces && allGlass && !tiledBoxes.empty();
+    // Keep the exact destination samples at antialiased tile edges independent
+    // of neighboring clients, including fractional positions and Liquid corners.
+    for (size_t i = 0; scene->cacheTiledBase && i < tiledBoxes.size(); ++i) {
+        auto padded = tiledBoxes[i];
+        padded.expand(2);
+        for (size_t j = i + 1; j < tiledBoxes.size(); ++j)
+            if (!padded.intersection(tiledBoxes[j]).empty()) scene->cacheTiledBase = false;
+    }
+    if (!local && scene->cacheBackground && containedSurfaces && allGlass && scene->windows.size() > 1 &&
+        Desktop::fadingOutState()->fadeouts().empty()) {
+        const auto bottom = scene->windows.front().lock();
+        auto bounds = WindowGeometry::computeWindowBox(bottom, monitor).value();
+        bounds.expand(-2);
+        bool contained = !bottom->m_isFloating && !bounds.empty();
+        for (size_t i = 1; contained && i < scene->windows.size(); ++i) {
+            const auto box = WindowGeometry::computeWindowBox(scene->windows[i].lock(), monitor).value();
+            contained = box.x >= bounds.x && box.y >= bounds.y &&
+                box.x + box.w <= bounds.x + bounds.w && box.y + box.h <= bounds.y + bounds.h;
+        }
+        if (contained) scene->independentWindow = bottom;
+    }
+    scene->regional = !scene->local && !scene->cacheInputs && scene->cacheBackground && containedSurfaces && allGlass &&
+        Desktop::fadingOutState()->fadeouts().empty();
+    if (scene->cacheInputs || scene->independentWindow || scene->regional) for (const auto& ref : scene->windows) {
         const auto window = ref.lock();
-        if (window->popupsCount() || window->m_group) scene->cacheInputs = false;
+        if (window->popupsCount() || window->m_group) { scene->cacheInputs = false; scene->independentWindow.reset(); scene->regional = false; }
         for (const auto& decoration : window->m_windowDecorations) {
             const auto type = decoration->getDecorationType();
             if (type != DECORATION_SHADOW && type != DECORATION_BORDER && type != DECORATION_INNER_GLOW &&
-                decoration.get() != decorationFor(window)) scene->cacheInputs = false;
+                decoration.get() != decorationFor(window)) { scene->cacheInputs = false; scene->independentWindow.reset(); scene->regional = false; }
         }
     }
     return hasGlass && (local || scene->windows.size() > 1 || scene->cacheInputs) ? scene : nullptr;
@@ -345,6 +400,8 @@ std::vector<uint64_t> localKey(const SWindowScene& scene, PHLMONITOR monitor, PH
 
 std::vector<uint64_t> inputKey(const SWindowScene& scene) {
     auto key = scene.backgroundKey;
+    key.push_back(scene.regional);
+    key.push_back(scene.regionalInputs);
     const auto number = [&](double value) { key.push_back(std::bit_cast<uint64_t>(value)); };
     for (const auto& ref : scene.windows) {
         const auto window = ref.lock();
@@ -442,6 +499,10 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
         scene->inputKey = inputKey(*scene);
         scene->damage = std::move(storage.damage);
         storage.damage.clear();
+        for (const auto& change : scene->damage) {
+            renderer->m_renderData.damage.add(change.region);
+            renderer->m_renderData.finalDamage.add(change.region);
+        }
         scene->ready = true;
         if (storage.background || storage.image)
             g_pGlobalState->renderBuffers.discardBackdrop(std::format("monitor:{}:base", monitor->m_id));
@@ -493,7 +554,7 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
             // Only our glass plus the client's main surfaces. Popups, shadows
             // and other plugins' decorations belong to the normal scene pass.
             if (auto* decoration = decorationFor(window.lock())) {
-                if (scene->cacheBase) {
+                if (scene->cacheBase || (scene->cacheTiledBase && !window->m_isFloating)) {
                     auto baseRedirect = renderer->redirectPass(&capture->basePass);
                     decoration->draw(monitor, 1.0f);
                 } else decoration->draw(monitor, 1.0f);
@@ -504,18 +565,69 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
     }
     auto key = scene->local || scene->cacheBackground ? localKey(*scene, monitor, workspace) : std::vector<uint64_t>{};
     if (scene->cacheBackground) scene->backgroundKey = key;
-    if (scene->cacheInputs) scene->inputKey = inputKey(*scene);
+    const auto source = renderer->m_renderData.currentFB;
+    if (scene->regional && source) {
+        uint64_t bytes = CRenderBuffers::bytes(source->m_size.x, source->m_size.y, source->m_drmFormat);
+        size_t pairs = 1; // Auxiliary repair workspace.
+        for (const auto& ref : scene->windows) {
+            if (ref == scene->independentWindow) continue;
+            const auto cost = decorationFor(ref.lock())->regionalInputCost(monitor, source->m_drmFormat);
+            bytes += cost.bytes;
+            pairs += cost.pairs;
+            if (bytes > CRenderBuffers::RETAINED_BYTES || pairs > CRenderBuffers::RETAINED_PAIRS) break;
+        }
+        // Oversubscribing named inputs evicts another receiver on every draw.
+        // Keep regional auxiliary repair but use shared full inputs instead.
+        scene->regionalInputs = bytes <= CRenderBuffers::RETAINED_BYTES && pairs <= CRenderBuffers::RETAINED_PAIRS;
+    }
+    if (scene->cacheInputs || scene->cacheTiledBase || scene->independentWindow || scene->regional) scene->inputKey = inputKey(*scene);
     scene->damage = std::move(storage.damage);
     storage.damage.clear();
-    const auto source = renderer->m_renderData.currentFB;
+    // Surface texture filtering reaches past integer-rounded native damage at
+    // fractional scales. Cached glass bypasses live-blur expansion, so carry
+    // the guarded surface damage into the actual framebuffer repaint too.
+    for (const auto& change : scene->damage) {
+        renderer->m_renderData.damage.add(change.region);
+        renderer->m_renderData.finalDamage.add(change.region);
+    }
     capture->reuse = scene->local && g_pGlobalState->damageSurfaceHook && storage.cache->valid &&
         key == storage.key && source && storage.image->isAllocated() &&
         storage.image->m_size == source->m_size && storage.image->m_drmFormat == source->m_drmFormat;
     const bool reuse = capture->reuse;
-    capture->reuseBackground = scene->cacheBase && storage.cache->valid && key == storage.key && source &&
+    capture->reuseBackground = scene->cacheBackground && storage.cache->valid && key == storage.key && source &&
         storage.background->isAllocated() && storage.background->m_size == source->m_size &&
         storage.background->m_drmFormat == source->m_drmFormat;
-    capture->reuseScene = capture->reuseBackground && scene->cacheInputs && scene->inputKey == storage.inputKey && scene->damage.empty();
+    capture->reuseScene = capture->reuseBackground && (scene->cacheInputs || scene->cacheTiledBase || scene->independentWindow || scene->regional) &&
+        scene->inputKey == storage.inputKey && scene->damage.empty();
+    capture->repairScene = scene->regional && capture->reuseBackground && scene->inputKey == storage.inputKey &&
+        storage.image->isAllocated() && storage.image->m_size == source->m_size && storage.image->m_drmFormat == source->m_drmFormat;
+    if (scene->regional) {
+        const CBox screen{{}, monitor->m_transformedSize};
+        for (const auto& change : scene->damage) scene->auxiliaryDamage.add(change.region);
+        // Auxiliary material rays see wallpaper. Only Liquid's undisplaced
+        // native destination lookup can carry client changes across a pixel
+        // boundary, once per pane in painting order.
+        scene->auxiliaryDamage = DamageRegion::bounded(scene->auxiliaryDamage.copy().expand(4 * scene->windows.size()), screen);
+        CRegion beneath;
+        for (const auto& ref : scene->windows) {
+            const auto window = ref.lock();
+            const auto box = WindowGeometry::computeWindowBox(window, monitor).value();
+            auto input = scene->auxiliaryDamage.copy().subtract(CRegion(box)).add(beneath);
+            auto output = decorationFor(window)->affectedDamage(monitor, input);
+            scene->receivers.push_back({ref, std::move(input), output});
+            beneath.add(output);
+            for (const auto& change : scene->damage) if (change.window == window) beneath.add(change.region);
+        }
+        // Rebuild the native backdrop beneath every propagated material change
+        // before the receivers execute. A new cache needs a complete initial
+        // image; later frames only repaint the conservatively affected region.
+        if (!capture->repairScene) {
+            beneath = CRegion(screen);
+            scene->previousInputSerial = 0;
+        }
+        renderer->m_renderData.damage.add(beneath);
+        renderer->m_renderData.finalDamage.add(beneath);
+    }
     if (!reuse && !capture->reuseScene) storage.cache->valid = false;
     storage.key = std::move(key);
     storage.inputKey = scene->inputKey;

@@ -223,6 +223,87 @@ static void liquidMasks(const Program& shader) {
     std::cout << "PASS: Liquid alpha/region masks and unfiltered opaque layer content\n";
 }
 
+static void liquidLayerShapes(const Program& windowShader) {
+    Program layerShader(read("shaders/liquid-layer.frag"), false);
+    int comparisons = 0;
+    for (float scale : {1.0f, 1.25f, 1.6f, 2.0f}) {
+        const int w = 400 * scale, h = 600 * scale;
+        std::array<std::array<float, 4>, 3> boxes{{{20, 20, 180, 100}, {20, 160, 180, 80}, {240, 20, 120, 140}}};
+        std::array<float, 3> radii{20, 12, 24};
+        for (auto& b : boxes) for (float& v : b) v *= scale;
+        for (float& r : radii) r *= scale;
+        const auto distance = [&](int x, int y) {
+            double d = 1e30;
+            for (size_t i = 0; i < boxes.size(); ++i) {
+                const auto& b = boxes[i];
+                const double qx = std::abs(x + .5 - b[0] - b[2] / 2) - b[2] / 2 + radii[i];
+                const double qy = std::abs(y + .5 - b[1] - b[3] / 2) - b[3] / 2 + radii[i];
+                d = std::min(d, std::min(std::max(qx, qy), 0.0) + std::hypot(std::max(qx, 0.0), std::max(qy, 0.0)) - radii[i]);
+            }
+            return d;
+        };
+        std::vector<unsigned char> scene(w * h * 4);
+        for (size_t i = 0; i < scene.size(); i += 4) {
+            scene[i] = 64; scene[i+1] = 96; scene[i+2] = 128; scene[i+3] = 255;
+        }
+        Target sharp(w, h, scene.data()), actual(w, h), expected(w, h);
+        for (bool dark : {false, true}) for (float fade : {1.0f, 0.35f, 0.0f}) {
+            // A native rounded-window draw is the independent reference for
+            // each card's material. The layer has large transparent margins.
+            copy(sharp, expected); expected.bind();
+            for (size_t i = 0; i < boxes.size(); ++i) {
+                const auto& b = boxes[i];
+                liquidParameters(windowShader, liquidMaterial(dark), scale, b[2], b[3], b[2], b[3], 0);
+                windowShader.f("radius", radii[i]); windowShader.i("renderShadow", 0); windowShader.f("fadeAlpha", fade);
+                for (int unit : {0, 1, 4, 6, 7}) sharp.sample(unit);
+                glViewport(b[0], b[1], b[2], b[3]);
+                glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); quad(); glDisable(GL_BLEND);
+            }
+            auto reference = expected.pixels();
+            std::vector<unsigned char> surface(w * h * 4, 0);
+            for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+                const int at = (y * w + x) * 4;
+                if (distance(x, y) < -1) {
+                    const bool text = x > 60 * scale && x < 160 * scale && y > 50 * scale && y < 60 * scale;
+                    const int a = text ? 255 : 38;
+                    surface[at] = std::round((text ? 230 : 4) * fade);
+                    surface[at+1] = std::round((text ? 180 : 5) * fade);
+                    surface[at+2] = std::round((text ? 120 : 6) * fade);
+                    surface[at+3] = std::round(a * fade);
+                }
+                for (int c = 0; c < 3; ++c)
+                    reference[at+c] = std::round(surface[at+c] + reference[at+c] * (1.0 - surface[at+3] / 255.0));
+            }
+            Target mask(w, h, surface.data());
+            copy(sharp, actual); actual.bind();
+            liquidParameters(layerShader, liquidMaterial(dark), scale, w, h, w, h, 0);
+            layerShader.i("renderShadow", 0); layerShader.f("fadeAlpha", fade);
+            layerShader.i("useMask", 1); layerShader.i("maskMode", 2); layerShader.f("maskAlphaThreshold", 0);
+            layerShader.v2("maskUVOffset", 0, 0); layerShader.v2("maskUVScale", 1, 1);
+            layerShader.i("layerShapeCount", boxes.size());
+            glUniform4fv(layerShader.loc("layerShapeBounds[0]"), boxes.size(), boxes[0].data());
+            glUniform1fv(layerShader.loc("layerShapeRadii[0]"), radii.size(), radii.data());
+            for (int unit : {0, 1, 4, 6, 7}) sharp.sample(unit);
+            mask.sample(2);
+            glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); quad(); glDisable(GL_BLEND);
+            const auto output = actual.pixels();
+            for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+                const double d = distance(x, y);
+                const int at = (y * w + x) * 4;
+                if (d > 1) for (int c = 0; c < 4; ++c)
+                    require(output[at+c] == scene[at+c], "Rounded layer leaked into a corner, gap or transparent padding");
+                if (d < 0) for (int c = 0; c < 4; ++c)
+                    require(std::abs(int(output[at+c]) - int(reference[at+c])) <= 2, "Layer card material differs from its rounded-window reference");
+                if (surface[at+3] == 255) for (int c = 0; c < 4; ++c)
+                    require(output[at+c] == surface[at+c], "Layer material changed opaque foreground content");
+            }
+            require(glGetError() == GL_NO_ERROR, "Rounded layer shader GL error");
+            ++comparisons;
+        }
+    }
+    std::cout << "PASS: " << comparisons << " rounded layer/native-window comparisons, stacked cards, gaps, scaling, fade and opaque content\n";
+}
+
 static void liquidShadow(const Program& shader) {
     // Changing the material's sampled scene must never copy that content into
     // the exterior shadow. Its only effect there is local destination shading.
@@ -352,13 +433,15 @@ static void liquidRendering(const Program& blurShader) {
     Program native(read("shaders/liquid.frag"), false);
     liquidControls(native, blurShader);
     liquidMasks(native);
+    liquidLayerShapes(native);
     liquidShadow(native);
     Program reference(read("tests/reference/liquid-medium.frag"), true);
     Program reduction(read("shaders/material-backdrop.frag"), false);
     // Isolate the material equations from the documented native corner stabilization.
     auto directSource = read("shaders/liquid.frag");
-    const std::string optical = "vec2 optical = optical_normal(p, max(-d, 0.0), normal);";
-    directSource.replace(directSource.find(optical), optical.size(), "vec2 optical = normal;");
+    const std::string optical = "optical_normal(p, max(-d, 0.0), normal)";
+    require(directSource.find(optical) != std::string::npos, "Missing native optical-normal expression");
+    directSource.replace(directSource.find(optical), optical.size(), "normal");
     Program direct(directSource, false);
     int comparisons = 0;
     for (float scale : {1.0f, 1.5f, 2.0f}) {

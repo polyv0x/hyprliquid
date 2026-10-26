@@ -5,7 +5,7 @@
 #include <numbers>
 
 struct SLiquidUniforms {
-    GLint backdrop = -1, cleanBackdrop = -1, outputExtent = -1, renderShadow = -1;
+    GLint backdrop = -1, cleanBackdrop = -1, outputExtent = -1, renderShadow = -1, transparentTarget = -1;
     GLint refraction = -1, outer = -1, distances = -1, opacities = -1;
     GLint face = -1, faceFill = -1, shadow = -1, shadowOffset = -1, shadowYCC = -1, shadowFill = -1;
     GLint highlight0 = -1, highlight1 = -1, highlight2 = -1, keyColor = -1, fillColor = -1, bias = -1;
@@ -14,6 +14,7 @@ struct SLiquidUniforms {
         const auto loc = [program](const char* name) { return glGetUniformLocation(program, name); };
         backdrop = loc("backdrop_texture"); cleanBackdrop = loc("clean_backdrop_texture");
         outputExtent = loc("outputExtent"); renderShadow = loc("renderShadow");
+        transparentTarget = loc("transparentTarget");
         refraction = loc("uRefraction"); outer = loc("uOuter");
         distances = loc("uBlurDistances[0]"); opacities = loc("uBlurOpacities[0]");
         face = loc("uFace"); faceFill = loc("uFaceFill");

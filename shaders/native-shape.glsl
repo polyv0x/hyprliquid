@@ -1,12 +1,19 @@
+#ifndef LAYER_SHAPES
 float sdf_at(vec2 p) {
     vec2 halfSize = fullSize / (2.0 * pixelScale);
     float r = clamp(radius / pixelScale, 0.0, min(halfSize.x, halfSize.y));
     float exponent = max(roundingPower, 1.0);
     vec2 q = abs(p) - (halfSize - r);
+    // Both positive parts are zero throughout the rectangular core. Preserve
+    // the original subtraction, but avoid three powers for every SDF sample
+    // used by coverage, finite-difference normals, refraction and shadows.
+    if (max(q.x, q.y) <= 0.0)
+        return max(q.x, q.y) - r;
     vec2 qc = max(q, 0.0);
     float corner = pow(pow(qc.x, exponent) + pow(qc.y, exponent), 1.0 / exponent) - r;
     return min(max(q.x, q.y), 0.0) + corner;
 }
+#endif
 
 vec2 sdf_gradient(vec2 p, float e) {
     return vec2(

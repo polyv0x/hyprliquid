@@ -24,7 +24,11 @@ from liquid_scene import verify_liquid
 from hover_angle import verify_hover_angle
 from gpu_cache import verify_gpu_cache
 from decoration_lifecycle import verify_decoration_lifecycle
+from window_close import verify_window_close
+from damage_flicker import verify_damage_flicker
 from surface_cache import verify_surface_cache
+from regional_damage import verify_regional_damage
+from noctalia_layers import verify_noctalia_layers
 
 
 def wait_for(predicate, process, seconds=20):
@@ -91,12 +95,25 @@ def main():
                 shadow = json.loads(ctl('-j', 'getoption', 'decoration:shadow:enabled'))
                 assert shadow.get('bool', shadow.get('int')) == 1, shadow
                 print('PASS: load and Lua configuration (including signed preset values)', flush=True)
+                if '--noctalia-layers-only' in sys.argv:
+                    verify_noctalia_layers(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), config_path)
+                    return
                 if '--decoration-lifecycle-only' in sys.argv:
                     verify_decoration_lifecycle(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES, PLUGIN)
+                    return
+                if '--window-close-only' in sys.argv:
+                    verify_window_close(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES)
+                    return
+                if '--damage-flicker-only' in sys.argv:
+                    verify_damage_flicker(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES)
                     return
                 if '--surface-cache-only' in sys.argv:
                     verify_surface_cache(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES, PLUGIN,
                                          os.environ.get('HYPRLIQUID_TEST_BASELINE'))
+                    return
+                if '--regional-damage-only' in sys.argv:
+                    verify_regional_damage(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES, PLUGIN,
+                                           os.environ.get('HYPRLIQUID_TEST_BASELINE'))
                     return
                 control = verify_control(ctl, config_path)
                 security_plugin = FIXTURES / 'security-test.so'

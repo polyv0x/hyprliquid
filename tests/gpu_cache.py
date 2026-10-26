@@ -334,8 +334,11 @@ while True:
             frame, last_draw = retired['frame'], now
         timeline.append({'seconds': now - started, 'frame': frame,
                          'scratch_bytes': retired['scratch_pool']['bytes'],
-                         'backdrop_bytes': retired.get('backdrop_cache', {}).get('bytes', 0)})
-        if not timeline[-1]['scratch_bytes'] and not timeline[-1]['backdrop_bytes']:
+                         'backdrop_bytes': retired.get('backdrop_cache', {}).get('bytes', 0),
+                         'material_bytes': retired.get('material_cache', {}).get('bytes', 0)})
+        # Finished-image replays can outlive the last scratch/blur use. Wait
+        # for each cache's own idle deadline, within the existing timer slack.
+        if not any(timeline[-1][key] for key in ('scratch_bytes', 'backdrop_bytes', 'material_bytes')):
             break
         # Output removal can deliver delayed configure/commit frames. Measure
         # the five-second idle lifetime from the last draw, with timer slack.

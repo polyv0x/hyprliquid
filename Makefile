@@ -62,7 +62,7 @@ $(TARGET): $(OBJECTS) $(RUST_LIB) Makefile
 build/LiquidMaterialData.hpp: materials/liquid.json scripts/embed-material.py | build
 	python3 scripts/embed-material.py $@
 
-build/render-test: tests/render.cpp tests/liquid-render.hpp tests/glass-exact.hpp src/GlassInterior.hpp src/LiquidUniforms.hpp src/Material.hpp src/LiquidMaterial.hpp build/LiquidMaterialData.hpp src/MaterialParams.inc src/BuiltInPresets.hpp src/PixelTransfer.hpp src/RustCore.hpp build/RustCore.o $(RUST_LIB) | build
+build/render-test: tests/render.cpp tests/liquid-render.hpp tests/liquid-exact.hpp tests/glass-exact.hpp src/GlassInterior.hpp src/LiquidUniforms.hpp src/Material.hpp src/LiquidMaterial.hpp build/LiquidMaterialData.hpp src/MaterialParams.inc src/BuiltInPresets.hpp src/PixelTransfer.hpp src/RustCore.hpp build/RustCore.o $(RUST_LIB) | build
 	$(CXX) $(CXXFLAGS) -Isrc -Ibuild $< $(RUST_LINK) -o $@ $$(pkg-config --cflags --libs egl glesv2)
 
 build/security-test: tests/security.cpp src/ResizeAngle.hpp src/PointerAngle.hpp src/RenderSafety.hpp src/Material.hpp src/LiquidMaterial.hpp src/BuiltInPresets.hpp build/LiquidMaterialData.hpp src/MaterialParams.inc src/LuaSafety.hpp src/RustCore.hpp build/RustCore.o $(RUST_LIB) | build
@@ -78,10 +78,14 @@ $(RUST_FAULT_LIB): $(RUST_INPUTS) Makefile | build
 build/rust-bridge-failure-test: tests/rust-bridge-failure.cpp $(RUST_FAULT_LIB) | build
 	$(CXX) $(CXXFLAGS) -UNDEBUG -I$(RUST_FAULT_DIR)/cxxbridge $< $(RUST_FAULT_LIB) -ldl -lpthread -lm -o $@
 
-test: build/security-test build/render-test build/rust-differential-test build/rust-bridge-failure-test
+build/layer-shape-test: tests/layer-shape.cpp src/LayerShape.hpp | build
+	$(CXX) $(CXXFLAGS) -UNDEBUG -Isrc $< -o $@
+
+test: build/security-test build/render-test build/rust-differential-test build/rust-bridge-failure-test build/layer-shape-test
 	./build/rust-differential-test
 	./build/rust-bridge-failure-test
 	./build/security-test
+	./build/layer-shape-test
 	LIBGL_ALWAYS_SOFTWARE=1 ./build/render-test
 
 # Optional disposable-compositor instrumentation; never part of hyprliquid.so.
@@ -94,6 +98,10 @@ build/security-test.so: tests/security-render.cpp $(TARGET) | build
 
 build/decoration-lifecycle-test.so: tests/decoration-lifecycle.cpp tests/capture.exports | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared $< -Wl,--version-script=tests/capture.exports $(LDLIBS) -o $@
+
+# Optional bridge for unloading older installations with stale registrations.
+build/reload-guard.so: scripts/reload-guard.cpp tests/capture.exports | build
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared $< -Wl,--version-script=tests/capture.exports $(LDLIBS) -ldl -o $@
 
 build/layer-test: tests/layer.cpp | build
 	$(CXX) $(CXXFLAGS) $< -o $@ $$(pkg-config --cflags --libs gtk4 gtk4-layer-shell-0)

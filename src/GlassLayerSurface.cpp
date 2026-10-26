@@ -352,6 +352,7 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
         .uvOffset  = {transformBox.x / monitorWidth, transformBox.y / monitorHeight},
         .uvScale   = {transformBox.w / monitorWidth, transformBox.h / monitorHeight},
     };
+    m_renderedShapeCount = 0;
 
     switch (maskSource) {
         case EMaskSource::ALPHA_THRESHOLD: {
@@ -380,6 +381,33 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
             // scale/translate/transform sequence as transformedLayerBox()
             CRegion region = wlSurface->m_blurRegion.copy();
             region.intersect(0, 0, logicalSize.x, logicalSize.y); // spec: clipped to surface size
+            if (material.family == EMaterialFamily::LIQUID) {
+                std::vector<LayerShape::Rect> strips;
+                const auto logicalRects = region.getRects();
+                if (logicalRects.size() <= LayerShape::MAX_RECTS) {
+                    strips.reserve(logicalRects.size());
+                    for (const auto& r : logicalRects)
+                        strips.push_back({double(r.x1), double(r.y1), double(r.x2), double(r.y2)});
+                }
+                if (strips != m_shapeRegion) {
+                    m_shapeRegion = std::move(strips);
+                    m_shapes = LayerShape::recognize(m_shapeRegion);
+                }
+                for (const auto& shape : m_shapes) {
+                    CBox box{shape.x, shape.y, shape.w, shape.h};
+                    box.scale(monitor->m_scale).translate(rawBox.pos());
+                    box.transform(Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform)),
+                                  monitor->m_transformedSize.x, monitor->m_transformedSize.y);
+                    const int i = maskInfo.shapeCount++;
+                    maskInfo.shapeBounds[i] = {float(box.x - transformBox.x), float(box.y - transformBox.y), float(box.w), float(box.h)};
+                    maskInfo.shapeRadii[i] = shape.radius * monitor->m_scale;
+                }
+                if (maskInfo.shapeCount) {
+                    maskInfo.maskMode = 2;
+                    m_renderedShapeCount = maskInfo.shapeCount;
+                    break;
+                }
+            }
             region.scale(static_cast<float>(monitor->m_scale));
             region.translate(rawBox.pos());
             region.intersect(rawBox.x, rawBox.y, rawBox.w, rawBox.h); // defensive
@@ -435,6 +463,14 @@ json_object* CGlassLayerSurface::diagnostics() const {
     json_object_object_add(result, "preset", json_object_new_string(preset.c_str()));
     json_object_object_add(result, "dark", json_object_new_boolean(resolveThemeIsDark()));
     json_object_object_add(result, "cached", json_object_new_boolean(m_hasCachedSample));
+    auto* shapes = json_object_new_array();
+    for (int i = 0; i < m_renderedShapeCount; ++i) {
+        const auto& shape = m_shapes[i];
+        auto* data = json_object_new_array();
+        for (double v : {shape.x, shape.y, shape.w, shape.h, shape.radius}) json_object_array_add(data, json_object_new_double(v));
+        json_object_array_add(shapes, data);
+    }
+    json_object_object_add(result, "rounded_regions", shapes);
     auto* values = json_object_new_object();
 #define GLASS_PARAM(name, value, lo, hi) json_object_object_add(values, #name, json_object_new_double(material.name));
 #include "MaterialParams.inc"

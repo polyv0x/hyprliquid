@@ -45,8 +45,8 @@ void addMaterialInfo(json_object* target, const SMaterial& material, bool layer)
         json_object_object_add(info, "effective_parameters", effective);
     }
     json_object_object_add(info, "display_angle_degrees", json_object_new_double(material.display_angle_degrees));
-    json_object_object_add(info, "shadow_owner", json_object_new_string(layer ? "surface" : "material"));
-    json_object_object_add(info, "output_extent", json_object_new_double(layer ? 0 : materialOutputExtent(material)));
+    json_object_object_add(info, "shadow_owner", json_object_new_string(layer ? "surface" : "native"));
+    json_object_object_add(info, "output_extent", json_object_new_double(0));
     auto* assumptions = json_object_new_array();
     for (const auto* assumption : {
         "light uses the default material variant; dark uses the dark variant",
@@ -56,9 +56,9 @@ void addMaterialInfo(json_object* target, const SMaterial& material, bool layer)
         "highlight matrix uses alpha-scaled bias and premultiplied source-over",
         "display angle rotates key/fill lighting; highlight response coefficients are fixed at zero",
         "native outline uses unit highlight normals and stabilized optical normals",
-        "outer shadow locally darkens the destination with Gaussian coverage truncated at four radii; no displaced shadow sampling",
-        "shadow displacement and color fields are inactive; layers retain surface shadows",
-        "layer highlights follow rectangular bounds; arbitrary alpha SDF is not generated",
+        "windows retain native Hyprland drop shadows; layers retain surface shadows",
+        "material shadow fields are inactive; native decoration settings control window shadows",
+        "layer highlights follow recognized rounded protocol regions; arbitrary alpha SDF is not generated",
         "SDR only; adaptive feedback and headroom conversion are not implemented"})
         json_object_array_add(assumptions, json_object_new_string(assumption));
     json_object_object_add(info, "assumptions", assumptions);

@@ -41,6 +41,24 @@ Multiple backdrop-effect plugins can interfere with the same rendering path.
 A manual load lasts for the current session. Use `hyprctl plugin unload` with
 the same absolute path to unload it.
 
+For an upgrade from a build predating the decoration-registration cleanup,
+build `make build/reload-guard.so` and load that bridge immediately before
+unloading the old plugin. Older builds left dead pointers in Hyprland's
+decoration registry, which could remove a native border during unload and
+crash a later animation. The corrected plugin retires those registrations
+when windows close and clears its registry during teardown.
+
+```sh
+hyprctl plugin load /absolute/path/to/hyprliquid/build/reload-guard.so
+hyprctl plugin unload /absolute/path/to/hyprliquid/hyprliquid.so
+hyprctl plugin unload /absolute/path/to/hyprliquid/build/reload-guard.so
+hyprctl plugin load /absolute/path/to/hyprliquid/hyprliquid.so
+```
+
+The bridge is only for the old plugin's unload. Normal reloads of the corrected
+build do not need it. Runtime panel settings reset on reload; export and reapply
+the profile to preserve them (see [control API](control-api.md)).
+
 For a manual installation, load it at startup from `~/.config/hypr/hyprland.lua`:
 
 ```lua
@@ -149,7 +167,7 @@ glass.config({ default_preset = "my_liquid", default_theme = "dark" })
 ```
 
 `frosted-liquid-medium` retains the original Liquid appearance with no overrides.
-Both presets expose 21 scalar controls. All existing blur and refraction
+Both presets expose 19 scalar controls. All existing blur and refraction
 controls apply to Liquid:
 
 | Controls | Liquid defaults | Meaning |
@@ -165,8 +183,6 @@ controls apply to Liquid:
 | `face_opacity` | 1 | Strength of the material's face color treatment |
 | `rim_width`, `rim_opacity` | 1, 1 | Key/fill highlight band height and color/alpha strength |
 | `display_angle_degrees` | 0 | Rotate Liquid's key/fill highlights, from -180° to 180° |
-| `shadow_amount` | 0.05 dark, 0.15 light | Opacity of the local outer shadow |
-| `shadow_offset` | 8 | Vertical shadow offset in logical units, positive downward |
 | `glass_opacity`, `effect_scale` | 1, 1 | Overall opacity and material distance scale |
 | `neighbor_contribution`, `neighbor_falloff` | 1, 0 | Neighbor strength and reflection falloff |
 
@@ -199,7 +215,7 @@ each window uses its own resolved angle as the sweep's peak. The default 0°
 angle and disabled toggle preserve existing rendering.
 
 The remaining legacy color, bleed, aberration, coverage, rim-softness, and
-shadow-height fields are inapplicable and retain their saved values. Clients
+material-shadow fields are inapplicable and retain their saved values. Clients
 can read applicability and the effective material through the
 [control API](control-api.md). The companion panel may require an update to hide
 inapplicable sliders and label Liquid's refraction strength and highlights.
@@ -207,29 +223,39 @@ inapplicable sliders and label Liquid's refraction strength and highlights.
 Dark and light select their respective material variants. The API names the
 light variant's environment `default`. The window shape, rounding power, and
 output scale come from Hyprland. `effect_scale` scales material distances once,
-independently of texture density. Output transforms also rotate the lighting and
-shadow coordinates.
+independently of texture density. Output transforms also rotate the lighting.
 
 The renderer retains the exact destination crop and a separate half-resolution
 material backdrop, then filters a copy. Inner and outer refraction sample
 separately with signed-distance blur weights. All material inputs compose
 neighbors before reduction. Reduced neighbor contribution protects real
-underlying windows on both refraction rays. Exterior shadows only darken the
-exact destination at each pixel; they never displace or copy neighboring content
-outside the glass.
+underlying windows on both refraction rays.
 
-For windows, the material owns the outer shadow and temporarily suppresses only
-that window's native shadow. Switching family, disabling glass, and unloading
-restore the previous native property. The output quad expands by 105 material
-units while retaining the original window shape. Sampling uses conservative
+All window presets use Hyprland's native drop shadow, including both Liquid
+presets. Configure its color, opacity, range and offset with
+`decoration.shadow`; per-window shadow rules remain effective. Liquid draws
+only within the window bounds and adds no second material shadow. Native
+shadows also remain present in closing snapshots, with translucent edges.
+The stored Liquid `shadow_amount` and `shadow_offset` fields are inactive.
+Sampling retains the original conservative
 padding of 268 pixels for `frosted-liquid`, or 209 for `frosted-liquid-medium`,
 at scale 1, including a conservative sampling margin. Movement and teardown
-damage the old and new bounds. Gaussian shadow tails are truncated at four radii.
-Layers retain their surface shadows and masks; their rectangular SDF cannot make
-highlights follow arbitrary rounded or disconnected surface alpha.
+damage the old and new bounds.
+Layers retain their surface shadows and foreground content. For Liquid layers,
+rounded rectangles in a client's background-effect region are recognized as
+separate cards: highlights, refraction and the blur ramp follow each card's
+outline, including stacked Noctalia notifications and padded floating panels.
+Region geometry is cached until the client changes it; no framebuffer readback
+or additional blur pass is required. The `buffers` diagnostics expose these
+surface-local logical bounds and radii as `rounded_regions`.
 
-Adjacent panes occlude each other's exterior shadows regardless of focus draw
-order. Overlapping floating windows keep native shadow occlusion order. The
+Recognition supports up to 32 cards and 512 region strips. Arbitrary silhouettes,
+asymmetric corners and alpha-only masks retain the rectangular layer fallback;
+their alpha or protocol mask still controls where the effect is visible. Corner
+radii are inferred from the protocol's integer strips, so very coarse regions
+may only describe an approximate radius.
+
+Window shadows follow Hyprland's native painting and occlusion order. The
 auxiliary neighbor capture contains material bodies and content, without shadows.
 
 The base variants are defined in [materials/liquid.json](../materials/liquid.json).
@@ -280,6 +306,51 @@ respectively; these are observations on the test machine, not GPU timings or
 a performance guarantee. Idle retained bytes depend on recent sizes and expire
 through the existing pool. The runner writes details to
 `build/liquid-buffer-audit.json` and captures representative images there.
+
+Moving clients reuse the unchanged auxiliary wallpaper capture and blur.
+Separated tiles also share one cached auxiliary glass image beneath floating
+windows, while client surfaces retain their original painting order. A
+bottom tiled pane also retains its finished native pixels when every floating
+client stays wholly inside it; those clients cannot change its backdrop or its
+outside-owner neighbor samples. Crossing the tile boundary, changing geometry,
+opacity, material, or wallpaper invalidates that result. The receiving pane
+above a playing video continues to sample each new frame.
+
+Stable overlapping stacks propagate client damage through the original painting
+order. Captures, Gaussian filters, auxiliary scenes, and retained materials repair
+affected regions with integer scissors, keeping their original formats, texture
+sizes, and projection. Liquid keeps its shadow and antialiased boundary live;
+only its fully covered body can reuse finished pixels. Geometry, material,
+surface-tree, opacity, and ordering changes rebuild the caches. Fragmented or
+large damage falls back to broader updates. Full video behind a transparent
+center still requires updating that center.
+
+Finished material images survive eviction of their temporary inputs. The
+backdrop cache reserves Liquid's extra half-resolution input within a 160 MiB
+limit; the transient input and finished-output limits are 256 MiB and 64 MiB.
+The input pool keeps up to 32 exact sizes so mixed 4K layouts do not repeatedly
+allocate the same window buffers after exceeding the former 128 MiB limit.
+New finished images that cannot fit the material budget use the normal draw
+instead of repeatedly evicting and reallocating one another.
+If the estimated per-pane input working set exceeds the input budget or entry
+limit, the stack keeps regional auxiliary repair and uses shared full inputs.
+The filtering resolution, kernels, and material parameters are unchanged.
+`scripts/benchmark-vram.py --steady-only --steady-video-stack --steady-panes 3`
+reproduces a tiled transparent terminal below an opaque animated float and a
+transparent receiving float. Larger pane counts add more tiles below the two
+floats. Add `--verify-steady-pixels` to compare raw native
+pixels against saved baseline/reference libraries, or `--native-blur
+--native-unloaded --only-arm candidate` to measure native Hyprland alone.
+`--verify-steady-pixels --only-arm candidate` checks cached frames against full
+rebuilds without running the reference arms. `--steady-transform` selects an
+output rotation/reflection. The nested `--regional-damage-only` suite also checks
+real small subsurface commits across the three frosted presets, fractional
+scaling, rotation, and 8-bit, 10-bit, and FP16 framebuffers. Set
+`HYPRLIQUID_TEST_BASELINE` to compare against a saved plugin library.
+Add `--steady-video-edge` to put a smaller video beside a tall receiving pane,
+exercising changes to only part of its optical edge.
+Use `--steady-scale 1.25 --steady-bitdepth 10` or `--steady-fp16` for precision
+coverage. These switches also require the script's library and output arguments.
 
 Common settings:
 
