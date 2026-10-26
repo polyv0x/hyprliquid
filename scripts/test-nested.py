@@ -26,6 +26,7 @@ from gpu_cache import verify_gpu_cache
 from decoration_lifecycle import verify_decoration_lifecycle
 from window_close import verify_window_close
 from damage_flicker import verify_damage_flicker
+from monitor_transition import verify_monitor_transition
 from surface_cache import verify_surface_cache
 from regional_damage import verify_regional_damage
 from noctalia_layers import verify_noctalia_layers
@@ -107,6 +108,9 @@ def main():
                 if '--damage-flicker-only' in sys.argv:
                     verify_damage_flicker(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES)
                     return
+                if '--monitor-transition-only' in sys.argv:
+                    verify_monitor_transition(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES)
+                    return
                 if '--surface-cache-only' in sys.argv:
                     verify_surface_cache(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES, PLUGIN,
                                          os.environ.get('HYPRLIQUID_TEST_BASELINE'))
@@ -116,9 +120,10 @@ def main():
                                            os.environ.get('HYPRLIQUID_TEST_BASELINE'))
                     return
                 control = verify_control(ctl, config_path)
-                security_plugin = FIXTURES / 'security-test.so'
+                security_override = os.environ.get('HYPRLIQUID_TEST_SECURITY_PLUGIN')
+                security_plugin = Path(security_override).resolve() if security_override else FIXTURES / 'security-test.so'
                 # The fault-injection fixture links the current checkout's library.
-                if security_plugin.exists() and PLUGIN == (ROOT / 'hyprliquid.so').resolve():
+                if security_plugin.exists() and (security_override or PLUGIN == (ROOT / 'hyprliquid.so').resolve()):
                     ctl('plugin', 'load', str(security_plugin))
                     ctl('hyprliquid-test:security', 'run')
                     result = wait_for(lambda: (status if (status := ctl('hyprliquid-test:security', 'status')) != 'pending' else None), compositor)
