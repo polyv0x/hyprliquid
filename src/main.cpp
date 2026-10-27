@@ -83,6 +83,24 @@ static CGlassDecoration* glassDecorationFor(const PHLWINDOW& window) {
     return nullptr;
 }
 
+using windowRoundingFn = float (*)(Desktop::View::CWindow*);
+static float hkWindowRounding(Desktop::View::CWindow* window) {
+    const float radius = reinterpret_cast<windowRoundingFn>(g_pGlobalState->windowRoundingHook->m_original)(window);
+    const auto size = window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+    const float limit = static_cast<float>(std::max(0.0, std::min(size.x, size.y) * 0.5));
+    if (radius <= limit)
+        return radius;
+    const auto* glass = glassDecorationFor(window->m_self.lock());
+    if (!glass || !glass->usesGlass())
+        return radius;
+
+    // Hyprland multiplies the configured radius by rounding_power / 2.
+    // On tiny panes that can invert the native shadow's corner bounds and
+    // interior cutout. Match the size limit already used by our shape shader
+    // for every native consumer too: surfaces, borders, shadows and snapshots.
+    return limit;
+}
+
 // Hyprland skips window decorations when internal fullscreen mode is
 // FSMODE_FULLSCREEN, queue the glass pass from RENDER_PRE_WINDOW to avoid double-queue.
 static void drawGlassForFullscreenWindow() {
@@ -556,6 +574,20 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         onNewWindow(window);
     }
 
+    if (const auto address = rendererSymbol(PHANDLE, "rounding", "CWindow::rounding()")) {
+        g_pGlobalState->windowRoundingHook = HyprlandAPI::createFunctionHook(PHANDLE, address, (void*)hkWindowRounding);
+        if (g_pGlobalState->windowRoundingHook && !g_pGlobalState->windowRoundingHook->hook()) {
+            HyprlandAPI::removeFunctionHook(PHANDLE, g_pGlobalState->windowRoundingHook);
+            g_pGlobalState->windowRoundingHook = nullptr;
+        }
+    }
+    if (!g_pGlobalState->windowRoundingHook)
+        HyprlandAPI::addNotificationV2(PHANDLE, {
+            {"text", std::string("[hyprliquid] Could not constrain native rounding for small glass windows")},
+            {"time", (uint64_t)5000},
+            {"color", CHyprColor{1.0, 0.8, 0.2, 1.0}},
+        });
+
     // Hook renderLayer for layer surface glass support
     if (const auto address = rendererSymbol(PHANDLE, "renderLayer", "IHyprRenderer::renderLayer(")) {
         g_pGlobalState->renderLayerHook = HyprlandAPI::createFunctionHook(PHANDLE, address, (void*)hkRenderLayer);
@@ -623,6 +655,11 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassLayerPassElement");
     g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassLayerCompositeElement");
     WindowScene::destroy();
+
+    if (g_pGlobalState->windowRoundingHook) {
+        HyprlandAPI::removeFunctionHook(PHANDLE, g_pGlobalState->windowRoundingHook);
+        g_pGlobalState->windowRoundingHook = nullptr;
+    }
 
     for (auto& decoration : g_pGlobalState->decorations) {
         if (auto* deco = decoration.get()) {

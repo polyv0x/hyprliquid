@@ -274,6 +274,56 @@ captures, which remain test-only. For a staged plugin, build its matching
 `HYPRLIQUID_TEST_SECURITY_PLUGIN=build/security-test.so` alongside
 `HYPRLIQUID_TEST_PLUGIN` when running `--security-only`.
 
+## Tiny tiles and rectangular shadows (2026-10-27)
+
+DP-1 had 79-by-36 logical-pixel Kitty panes at scale 1.25. With configured
+rounding 24 and rounding power 6, Hyprland's native radius was 72 logical
+pixels. This inverted native shadow corner bounds and the interior cutout,
+leaving hard rectangular patches around the tiny panes and their neighbors.
+The patches persisted with glass disabled and disappeared with native shadows
+disabled or a smaller configured radius. All temporary live settings were
+restored.
+
+The plugin now bounds `CWindow::rounding()` by half the smaller current window
+dimension for enabled glass windows. This matches the existing material SDF
+limit across native surfaces, borders, shadows and snapshots. Ordinary radii
+return immediately; disabled/untreated windows retain their native radius.
+The hook uses the existing exact-build ABI check and is removed before
+decoration teardown.
+
+Investigation also found a separate compositing bug: auxiliary glass rendered
+after an opaque pass could overwrite transparent corners when blending was
+disabled. Every material draw now enables blending and restores the caller's
+state. This fix alone did not change the reported live artifact; the bounded
+native radius is the verified correction for the user's screenshot.
+
+Evidence in `build/tiny-tiles-20261026/`:
+
+- `shadows-baseline-final.log` reproduces the failure on the blend-fixed,
+  unbounded build; its screenshot has the same hard rectangular shadow.
+- `shadows-final/tiny-shadows.json`: all 48 complete native-frame comparisons
+  match an explicitly bounded reference. Covers horizontal, vertical and square
+  tiny panes, an ordinary pane, a reflected neighbor, all three material
+  families, 8-bit/10-bit/FP16, fractional scaling and rotation.
+- `corners-before-2.log` independently reproduces the inherited-blending bug;
+  `rounded-corners/tiny-corners.json` passes all 48 blend-state comparisons.
+- `rounded-lifecycle.log`: five unload/remap cycles preserve native decorations.
+  `rounded-closing.log`: native shadows, toggles and closing snapshots pass.
+- `unit-final.log`: `make test` passes, including 540 exact Glass and 288 exact
+  Liquid shader comparisons. `git diff --check` passes.
+- `live-rounded/`: before/after screenshots confirm the rectangular patches
+  are gone on DP-1. Installation kept compositor PID 2371538, all 13 clients
+  and their geometry, dark `frosted-glass`, and normal damage tracking 2.
+  No configuration errors; `live-rollback.so` retains the blend-only build.
+
+Installed SHA-256: `78074ff5911c87338a448abbb67e1faacf99323e63a75dfa34721e03d674c0b4`.
+
+Reproduce with `--tiny-shadows-only` and `--tiny-tiles-only` in
+`scripts/test-nested.py`. Build the matching security fixture for the chosen
+plugin target and pass `HYPRLIQUID_TEST_SECURITY_PLUGIN` as described above.
+Load fixtures before setting transient test config: plugin loading reloads
+Hyprland's configuration. Instrumentation remains disposable-compositor only.
+
 ## Historical artifacts
 
 - `make -j4 test`: passed, including 540 exact Glass and 288 exact Liquid shader comparisons across 8-bit, 10-bit, and FP16.
