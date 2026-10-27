@@ -615,18 +615,18 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
         if (cacheOutput)
             GlassRenderer::transferOutput(source, samples->sharp, outputBounds, true, nativeDamage ? &*nativeDamage : nullptr,
                                           std::array{geometry->x0, geometry->y0});
-        // A scene rebuild can finish on an opaque client with blending off.
-        // Transparent corner fragments must leave the real destination intact
-        // before that completed image can be retained across future frames.
-        const bool blend = cacheOutput && glIsEnabled(GL_BLEND);
-        if (cacheOutput) g_pHyprOpenGL->setCapStatus(GL_BLEND, true);
+        // Backgrounds and opaque clients can leave blending disabled. Every
+        // glass pass, including auxiliary panes reflected by their neighbors,
+        // must preserve the destination beneath transparent rounded corners.
+        const bool blend = glIsEnabled(GL_BLEND);
+        g_pHyprOpenGL->setCapStatus(GL_BLEND, true);
         // Hyprland owns the drop shadow in both families. The material stays
         // inside its window, including when rendered into a closing snapshot.
         GlassRenderer::applyGlassEffect(sharp, blurred, source,
                                          windowBox, transformBox, glassAlpha,
                                          cornerRadius, roundingPower, paddingRatio, material, nullptr, neighbors,
                                          liquid ? samples->halfSharp : nullptr, false, visible ? &*visible : nullptr);
-        if (cacheOutput) g_pHyprOpenGL->setCapStatus(GL_BLEND, blend);
+        g_pHyprOpenGL->setCapStatus(GL_BLEND, blend);
         ++m_materialDraws;
         if (outputDamage) ++m_partialMaterials;
         if (cacheOutput) {

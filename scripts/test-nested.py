@@ -27,6 +27,7 @@ from decoration_lifecycle import verify_decoration_lifecycle
 from window_close import verify_window_close
 from damage_flicker import verify_damage_flicker
 from monitor_transition import verify_monitor_transition
+from tiny_tiles import verify_tiny_tiles, verify_tiny_shadows
 from surface_cache import verify_surface_cache
 from regional_damage import verify_regional_damage
 from noctalia_layers import verify_noctalia_layers
@@ -110,6 +111,13 @@ def main():
                     return
                 if '--monitor-transition-only' in sys.argv:
                     verify_monitor_transition(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES)
+                    return
+                if '--tiny-tiles-only' in sys.argv:
+                    security = Path(os.environ.get('HYPRLIQUID_TEST_SECURITY_PLUGIN', FIXTURES / 'security-test.so')).resolve()
+                    verify_tiny_tiles(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES, security)
+                    return
+                if '--tiny-shadows-only' in sys.argv:
+                    verify_tiny_shadows(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES)
                     return
                 if '--surface-cache-only' in sys.argv:
                     verify_surface_cache(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES, PLUGIN,

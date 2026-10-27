@@ -77,6 +77,8 @@ struct SGlobalState {
     CFunctionHook* renderLayerHook = nullptr;
     // damageSurface hook (live layer re-render)
     CFunctionHook* damageSurfaceHook = nullptr;
+    // Keep native surface/border/shadow geometry within tiny glass panes.
+    CFunctionHook* windowRoundingHook = nullptr;
 };
 
 using Render::GL::g_pHyprOpenGL;

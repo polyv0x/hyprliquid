@@ -15,6 +15,7 @@ inline void* rendererSymbol(HANDLE handle, const std::string& name, std::string_
     } catch (const std::filesystem::filesystem_error&) {
         struct SFallback { std::string_view name; const char* signature; };
         static constexpr SFallback symbols[] = {
+            {"rounding", "_ZN7Desktop4View7CWindow8roundingEv"},
             {"renderLayer", "_ZN6Render13IHyprRenderer11renderLayerEN9Hyprutils6Memory14CSharedPointerIN7Desktop4View13CLayerSurfaceEEE"
                             "NS3_IN7Monitor8CMonitorEEERKNSt6chrono10time_pointINSB_3_V212steady_clockENSB_8durationIlSt5ratioILl1ELl1000000000EEEEEEbb"},
             {"damageSurface", "_ZN6Render13IHyprRenderer13damageSurfaceEN9Hyprutils6Memory14CSharedPointerI18CWLSurfaceResourceEEddd"},
