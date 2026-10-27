@@ -1,5 +1,6 @@
 // Test-only fault injection, loaded only by scripts/test-nested.py.
 #include "../src/GlassRenderer.hpp"
+#include "../src/GlassDecoration.hpp"
 #include "../src/DamageRegion.hpp"
 #include "../src/Globals.hpp"
 #include "../src/PixelTransfer.hpp"
@@ -10,6 +11,7 @@
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/state/MonitorState.hpp>
+#include <hyprland/src/desktop/state/WindowState.hpp>
 #include <climits>
 #include <dlfcn.h>
 
@@ -19,6 +21,7 @@ SP<SHyprCtlCommand> command;
 Hyprutils::Signal::CHyprSignalListener listener;
 std::string result = "idle";
 bool pending = false;
+bool tinyCorners = false;
 
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -163,15 +166,76 @@ class CFailedAllocation : public Render::GL::CGLFramebuffer {
     int calls = 0;
 };
 
+void verifyTinyCorners(const SP<Render::IFramebuffer>& source) {
+    CGlassDecoration* decoration = nullptr;
+    for (const auto& window : Desktop::windowState()->windows()) {
+        if (window->m_class != "tiny-corner-test") continue;
+        for (const auto& item : window->m_windowDecorations)
+            if (auto* glass = dynamic_cast<CGlassDecoration*>(item.get())) decoration = glass;
+    }
+    require(decoration, "tiny corner fixture missing");
+    auto& renderer = *g_pHyprRenderer;
+    const auto saved = renderer.m_renderData;
+    const auto monitor = saved.pMonitor.lock();
+    const bool blend = glIsEnabled(GL_BLEND), scissor = glIsEnabled(GL_SCISSOR_TEST);
+    GLint scissorBox[4]; GLfloat clear[4];
+    glGetIntegerv(GL_SCISSOR_BOX, scissorBox);
+    glGetFloatv(GL_COLOR_CLEAR_VALUE, clear);
+    Hyprutils::Utils::CScopeGuard restore([&] {
+        renderer.m_renderData = saved;
+        renderer.bindFB(source);
+        g_pHyprOpenGL->scissor(CBox(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]), false);
+        g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, scissor);
+        g_pHyprOpenGL->setCapStatus(GL_BLEND, blend);
+        glClearColor(clear[0], clear[1], clear[2], clear[3]);
+    });
+    CRenderBuffers buffers;
+    SP<Render::IFramebuffer> background, target;
+    for (auto* fb : {&background, &target}) {
+        require(buffers.prepare(*fb, source->m_size.x, source->m_size.y, source->m_drmFormat, "tiny-corners"), "tiny target allocation failed");
+        (*fb)->setImageDescription(source->imageDescription());
+    }
+    auto scene = std::make_shared<SWindowScene>();
+    scene->background = background;
+    std::vector<unsigned char> reference;
+    for (const bool incomingBlend : {true, false}) {
+        for (const auto& fb : {background, target}) {
+            renderer.bindFB(fb);
+            g_pHyprOpenGL->scissor(nullptr);
+            glClearColor(.3f, .5f, .7f, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+        renderer.bindFB(target);
+        renderer.m_renderData.damage = CRegion(CBox{{}, monitor->m_transformedSize});
+        g_pHyprOpenGL->setCapStatus(GL_BLEND, incomingBlend);
+        decoration->renderPass(monitor, 1.0f, scene, true);
+        require(bool(glIsEnabled(GL_BLEND)) == incomingBlend, "tiny draw changed caller blend state");
+        auto pixels = rawPixels(target);
+        if (incomingBlend) reference = std::move(pixels);
+        else require(pixels == reference, "tiny rounded auxiliary glass depends on incoming blend state");
+    }
+}
+
 class CSecurityPass : public IPassElement {
   public:
+    explicit CSecurityPass(bool tiny = false) : m_tiny(tiny) {}
     std::vector<UP<IPassElement>> draw() override {
         const auto source = g_pHyprRenderer->m_renderData.currentFB;
         GLint read = 0, draw = 0, viewport[4]{};
         glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
         glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
         glGetIntegerv(GL_VIEWPORT, viewport);
+        Hyprutils::Utils::CScopeGuard restore([&] {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, read);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw);
+            Render::GL::g_pHyprOpenGL->setViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        });
         try {
+            if (m_tiny) {
+                verifyTinyCorners(source);
+                result = "pass";
+                return {};
+            }
             CRenderBuffers buffers;
             auto failed = makeShared<CFailedAllocation>();
             SP<Render::IFramebuffer> target = failed;
@@ -268,9 +332,6 @@ class CSecurityPass : public IPassElement {
         } catch (const std::exception& error) {
             result = std::string("FAIL: ") + error.what();
         }
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, read);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw);
-        Render::GL::g_pHyprOpenGL->setViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
         return {};
     }
     bool needsLiveBlur() override { return false; }
@@ -278,6 +339,8 @@ class CSecurityPass : public IPassElement {
     bool disableSimplification() override { return true; }
     const char* passName() override { return "CHyprliquidSecurityTest"; }
     ePassElementType type() override { return EK_CUSTOM; }
+  private:
+    bool m_tiny;
 };
 }
 
@@ -295,8 +358,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
             }
             if (request.ends_with(" unlock")) { g_pSessionLockManager->forceUnlock(); return std::string("ok"); }
             if (request.ends_with(" locked")) return std::string(g_pSessionLockManager->isSessionLocked() ? "yes" : "no");
-            if (request.ends_with(" run")) {
+            if (request.ends_with(" run") || request.ends_with(" tiny")) {
                 pending = true;
+                tinyCorners = request.ends_with(" tiny");
                 result = "pending";
                 for (const auto& monitor : State::monitorState()->monitors()) {
                     g_pHyprRenderer->damageMonitor(monitor);
@@ -307,7 +371,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
         }});
     listener = Event::bus()->m_events.render.stage.listen([](eRenderStage stage) {
         if (stage == RENDER_LAST_MOMENT && std::exchange(pending, false))
-            g_pHyprRenderer->addPassElement(makeUnique<CSecurityPass>());
+            g_pHyprRenderer->addPassElement(makeUnique<CSecurityPass>(std::exchange(tinyCorners, false)));
     });
     return {"hyprliquid-security-test", "Disposable security regression fixture", "hyprliquid", "1"};
 }
