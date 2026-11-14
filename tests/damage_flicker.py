@@ -1,6 +1,7 @@
-"""Replay small split-window commits without intervening screenshot repaints."""
+"""Check real swapchain pixels after small commits, without screenshot repaints."""
 import gzip
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -26,7 +27,7 @@ def verify_damage_flicker(ctl, env, log, clients, build, wait, fixtures):
 
     def capture(name, trigger=None):
         path = build / name
-        ctl('hyprliquid-test:capture', ('next ' if trigger else '') + str(path))
+        ctl('hyprliquid-test:capture', ('next ' if trigger else '') + ('presented ' if actual_output else '') + 'monitor HYPRLIQUID-TEST ' + str(path))
         if trigger:
             trigger()
         wait(lambda: path.with_suffix('.json').exists())
@@ -37,12 +38,16 @@ def verify_damage_flicker(ctl, env, log, clients, build, wait, fixtures):
         return pixels, metadata
 
     ctl('plugin', 'load', str(fixtures / 'capture-test.so'))
+    bitdepth = int(os.environ.get('HYPRLIQUID_TEST_BITDEPTH', '8'))
+    patch_y = int(os.environ.get('HYPRLIQUID_TEST_PATCH_Y', '5'))
+    window_count = int(os.environ.get('HYPRLIQUID_TEST_WINDOWS', '2'))
+    actual_output = os.environ.get('HYPRLIQUID_TEST_PRESENTED', '1') == '1'
     ctl('dismissnotify')
     ctl('eval', 'hl.config({ animations = { enabled = false }, general = { border_size = 3, gaps_in = 8, gaps_out = 12 }, '
         'decoration = { active_opacity = 1, inactive_opacity = 1, dim_inactive = false, '
         'blur = { enabled = true, size = 8, passes = 3 } }, cursor = { no_warps = true, inactive_timeout = 0.1 }, '
         'render = { use_fp16 = 2 } }); '
-        'hl.monitor({output="HYPRLIQUID-TEST", mode="3840x2160@160", position="auto", scale=1.25, transform=0, bitdepth=8, cm="srgb"}); '
+        f'hl.monitor({{output="HYPRLIQUID-TEST", mode="3840x2160@160", position="auto", scale=1.25, transform=0, bitdepth={bitdepth}, cm="srgb"}}); '
         'hl.layer_rule({name="flicker-bar", match={namespace="^hyprliquid-vram-test$"}, ignore_alpha=0.5, no_anim=true})')
     control('apply', profile={'base_preset': 'frosted-glass', 'theme': 'dark'})
     bar = subprocess.Popen([str(fixtures / 'layer-test'), '--bar'], env=env | {'GSK_RENDERER': 'cairo', 'GTK_A11Y': 'none'}, stdout=log, stderr=log)
@@ -50,14 +55,16 @@ def verify_damage_flicker(ctl, env, log, clients, build, wait, fixtures):
     wait(lambda: 'hyprliquid-vram-test' in ctl('-j', 'layers'))
     paths = []
     initial = {'root': {'alpha': 70, 'color': 0x183048}, 'child': {'alpha': 170, 'color': 0x305070,
-               'patch': 0x507090, 'patch_x': 5, 'patch_y': 5, 'patch_w': 28, 'patch_h': 18},
+               'patch': 0x507090, 'patch_x': 5, 'patch_y': patch_y, 'patch_w': 28, 'patch_h': 18},
                'grandchild': {'mapped': True, 'width': 180, 'height': 80, 'x': 40, 'y': 120, 'color': 0x804020}}
-    for side in range(2):
+    window_clients = []
+    for side in range(window_count):
         path = build / f'split-{side}.json'
         path.write_text(json.dumps(initial))
         paths.append(path)
         client = subprocess.Popen([str(fixtures / 'subsurface-test'), f'flicker-{side}', str(path)], env=env, stdout=log, stderr=log)
         clients.append(client)
+        window_clients.append(client)
         wait(lambda: len(json.loads(ctl('-j', 'clients'))) == side + 1)
     time.sleep(.4)
     geometry = json.loads(ctl('-j', 'clients'))
@@ -94,7 +101,7 @@ def verify_damage_flicker(ctl, env, log, clients, build, wait, fixtures):
 
     def replay(case, states, count):
         # Generate ground truth with an explicitly rebuilt material and full
-        # native frame. The tested replay below requests only next-frame readback;
+        # output frame. The tested replay below requests only next-frame readback;
         # screenshot-triggered repaints must not repair between its commits.
         references = []
         for index, (side, value) in enumerate(states):
@@ -113,16 +120,23 @@ def verify_damage_flicker(ctl, env, log, clients, build, wait, fixtures):
         results = []
         for index, (side, value) in enumerate(states):
             pixels, metadata = capture(f'{case}-replay-{index}', lambda: update(side, value))
-            composed = bytearray(presented)
-            stride = metadata['width'] * metadata['pixel_bytes']
-            for x0, y0, x1, y1 in metadata['native_damage']:
-                for y in range(y0, y1):
-                    lo, hi = y * stride + x0 * metadata['pixel_bytes'], y * stride + x1 * metadata['pixel_bytes']
-                    composed[lo:hi] = pixels[lo:hi]
-            presented = bytes(composed)
+            if actual_output:
+                # An acquired output buffer can be older than the last frame.
+                # Never reconstruct it from the previous presented image: that
+                # would hide missing buffer-age damage and stale-pixel reversion.
+                presented = pixels
+            else:
+                composed = bytearray(presented)
+                stride = metadata['width'] * metadata['pixel_bytes']
+                for x0, y0, x1, y1 in metadata['final_damage']:
+                    for y in range(y0, y1):
+                        lo, hi = y * stride + x0 * metadata['pixel_bytes'], y * stride + x1 * metadata['pixel_bytes']
+                        composed[lo:hi] = pixels[lo:hi]
+                presented = bytes(composed)
             reference = gzip.open(references[index], 'rb').read()
             mismatches = sum(a != b for a, b in zip(presented, reference))
-            results.append({'index': index, 'side': side, 'mismatched_bytes': mismatches, 'damage': metadata['native_damage']})
+            results.append({'index': index, 'side': side, 'mismatched_bytes': mismatches, 'damage': metadata['final_damage'],
+                            'render_damage': metadata['native_damage']})
             (build / f'{case}-flicker.json').write_text(json.dumps(results, indent=2))
             if mismatches:
                 for name, content in [('presented', presented), ('expected', reference), ('internal', pixels)]:
@@ -135,9 +149,15 @@ def verify_damage_flicker(ctl, env, log, clients, build, wait, fixtures):
         assert any(sum((x1-x0)*(y1-y0) for x0,y0,x1,y1 in item['damage']) < metadata['width']*metadata['height']/10
                    for item in results), 'Replay did not exercise small partial redraws'
 
-    replay('split', states, 2)
-    client.terminate()
-    client.wait(timeout=5)
+    replay('split', states, window_count)
+    if window_count != 2:
+        # The larger-layout variant exercises the split sequence only. Keep
+        # the established one-window/bar regression in the two-window run.
+        ctl('plugin', 'unload', str(fixtures / 'capture-test.so'))
+        return
+    for client in window_clients[1:]:
+        client.terminate()
+        client.wait(timeout=5)
     wait(lambda: len(json.loads(ctl('-j', 'clients'))) == 1)
     single = []
     for phase, color in enumerate((0xd05040, 0x40b080)):

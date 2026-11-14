@@ -1,6 +1,7 @@
 // Test-only raw capture. Load only in the disposable compositor, never the
-// desktop. Captures the internal target before output conversion; native
-// readback preserves both 10-bit SDR and RGBA16F values without quantization.
+// desktop. Default capture reads the internal target before output conversion;
+// `presented` retains outFB and reads it at RENDER_POST to catch stale swapchain
+// pixels. Native readback preserves each target's channel precision.
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
@@ -26,6 +27,9 @@ SP<SHyprCtlCommand> captureCommand, timingCommand, snapshotCommand;
 Hyprutils::Signal::CHyprSignalListener listener;
 std::string pending;
 std::string pendingMonitor;
+bool pendingPresented = false;
+std::string presentedPath;
+SP<Render::IFramebuffer> presentedBuffer;
 std::deque<double> times;
 std::chrono::steady_clock::time_point begun;
 uint64_t frames = 0;
@@ -60,6 +64,7 @@ class CCapture : public IPassElement {
         auto* metadata = json_object_new_object();
         auto add = [&](const char* key, int64_t n) { json_object_object_add(metadata, key, json_object_new_int64(n)); };
         add("width", width); add("height", height); add("drm_format", fb->m_drmFormat);
+        add("framebuffer", glFramebuffer->getFBID());
         add("gl_type", type); add("gl_format", format); add("pixel_bytes", pixelBytes); add("gl_error", error);
         auto* damage = json_object_new_array();
         renderer->m_renderData.damage.forEachRect([&](const auto& r) {
@@ -80,6 +85,17 @@ class CCapture : public IPassElement {
                 });
         }
         json_object_object_add(metadata, "native_damage", nativeDamage);
+        auto* finalDamage = json_object_new_array();
+        if (monitor) {
+            const auto transform = Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform));
+            renderer->m_renderData.finalDamage.copy().transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y)
+                .intersect(CBox(0, 0, width, height)).forEachRect([&](const auto& r) {
+                    auto* rect = json_object_new_array();
+                    for (const auto v : {r.x1, r.y1, r.x2, r.y2}) json_object_array_add(rect, json_object_new_int(v));
+                    json_object_array_add(finalDamage, rect);
+                });
+        }
+        json_object_object_add(metadata, "final_damage", finalDamage);
         const auto color = fb->imageDescription();
         json_object_object_add(metadata, "color_description", json_object_new_string(color ? std::format("{}", color->value()).c_str() : "none"));
         if (!error) {
@@ -136,6 +152,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
             auto argument = request.substr(at + 1);
             const bool nextFrame = argument.starts_with("next ");
             if (nextFrame) argument.erase(0, 5);
+            const bool presented = argument.starts_with("presented ");
+            if (presented) argument.erase(0, 10);
             std::string monitorName;
             if (argument.starts_with("monitor ")) {
                 const auto end = argument.find(' ', 8);
@@ -151,6 +169,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
             if (!path.is_absolute() || !std::filesystem::is_directory(path.parent_path(), error)) return std::string("invalid artifact path");
             pending = path;
             pendingMonitor = std::move(monitorName);
+            pendingPresented = presented;
             if (!nextFrame) for (const auto& monitor : State::monitorState()->monitors()) {
                 if (!pendingMonitor.empty() && monitor->m_name != pendingMonitor) continue;
                 renderer->damageMonitor(monitor);
@@ -176,13 +195,20 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
         if (stage == RENDER_PRE && !pending.empty()) renderer->setCursorHidden(true);
         if (stage == RENDER_BEGIN) begun = std::chrono::steady_clock::now();
         if (stage == RENDER_POST) {
+            if (presentedBuffer) {
+                CCapture(std::exchange(presentedPath, {}), presentedBuffer).draw();
+                presentedBuffer.reset();
+            }
             ++frames;
             times.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begun).count());
             if (times.size() > 1024) times.pop_front();
         }
         if (stage == RENDER_LAST_MOMENT && !pending.empty() &&
             (pendingMonitor.empty() || renderer->m_renderData.pMonitor->m_name == pendingMonitor)) {
-            renderer->addPassElement(makeUnique<CCapture>(std::exchange(pending, {})));
+            if (pendingPresented) {
+                presentedPath = std::exchange(pending, {});
+                presentedBuffer = renderer->m_renderData.outFB;
+            } else renderer->addPassElement(makeUnique<CCapture>(std::exchange(pending, {})));
             pendingMonitor.clear();
         }
     });
@@ -196,5 +222,6 @@ APICALL EXPORT void PLUGIN_EXIT() {
     HyprlandAPI::unregisterHyprCtlCommand(handle, snapshotCommand);
     captureCommand.reset(); timingCommand.reset(); pending.clear(); pendingMonitor.clear(); times.clear();
     snapshotCommand.reset();
+    presentedBuffer.reset(); presentedPath.clear(); pendingPresented = false;
     renderer = nullptr;
 }

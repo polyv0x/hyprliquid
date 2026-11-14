@@ -2,12 +2,14 @@
 import gzip
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
 
 
 def verify_regional_damage(ctl, env, log, clients, build, wait, fixtures, plugin, baseline=None):
+    actual_output = os.environ.get('HYPRLIQUID_TEST_PRESENTED') == '1'
     def control(op, **values):
         result = json.loads(ctl('hyprliquid:control', json.dumps({'op': op, **values})))
         assert result['ok'], result
@@ -29,7 +31,7 @@ def verify_regional_damage(ctl, env, log, clients, build, wait, fixtures, plugin
 
     def capture(name, trigger=None):
         path = build / name
-        ctl('hyprliquid-test:capture', ('next ' if trigger else '') + str(path))
+        ctl('hyprliquid-test:capture', ('next ' if trigger else '') + ('presented ' if actual_output else '') + str(path))
         if trigger:
             trigger()
         wait(lambda: Path(str(path) + '.json').exists())
@@ -77,18 +79,19 @@ def verify_regional_damage(ctl, env, log, clients, build, wait, fixtures, plugin
 
         def check(name, trigger=None):
             # An internal target has undefined pixels outside native damage.
-            # Reconstruct presentation from a complete frame and the next real
-            # commit; comparing raw undamaged storage would test buffer reuse.
+            # Reconstruct presentation using final transfer damage, which can
+            # be smaller than the internal render damage used for sampling.
             previous = capture(arm + '-' + name + '-before')[0] if trigger else None
             pixels, metadata = capture(arm + '-' + name, trigger)
             if previous:
                 composed = bytearray(previous)
                 stride = metadata['width'] * metadata['pixel_bytes']
-                for x0, y0, x1, y1 in metadata['native_damage']:
+                for x0, y0, x1, y1 in metadata['final_damage']:
                     for y in range(y0, y1):
                         lo, hi = y * stride + x0 * metadata['pixel_bytes'], y * stride + x1 * metadata['pixel_bytes']
                         composed[lo:hi] = pixels[lo:hi]
-                pixels = bytes(composed)
+                if not actual_output:
+                    pixels = bytes(composed)
                 full, _ = capture(arm + '-' + name + '-full')
                 assert pixels == full, f'Partial presentation differs from full repaint: {arm} {name}'
             digest = hashlib.sha256(pixels).hexdigest()
