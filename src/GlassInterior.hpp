@@ -12,6 +12,7 @@ inline std::optional<double> glassInteriorInset(const SMaterial& m, double radiu
     return (1 + std::max({radius / pixelScale, double(m.blur_dist3),
         1.0 / m.outer_refraction_inv_height, 1.0 / m.inner_refraction_inv_height,
         1.0 / m.inv_aberration_height, 1.0 / m.edge_bleed_inv_height,
-        double(m.rim_width), std::abs(double(m.shadow_offset)) + 1.0 / m.shadow_inv_height,
+        double(m.rim_width) + (materialUsesLiquidRim(m) ? 2.0 * std::max(1.0 / pixelScale, 1.0) : 0.0),
+        std::abs(double(m.shadow_offset)) + 1.0 / m.shadow_inv_height,
         double(m.coverage_offset + m.coverage_width)})) * pixelScale;
 }

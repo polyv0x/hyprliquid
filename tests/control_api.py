@@ -12,7 +12,7 @@ def verify_control(ctl, config_path):
     assert description['ok'] and description['api'] == 1, description
     assert len(description['parameters']) == 34
     angle = next(p for p in description['parameters'] if p['name'] == 'display_angle_degrees')
-    assert (angle['min'], angle['max'], angle['default'], angle['models']) == (-180, 180, 0, ['liquid'])
+    assert (angle['min'], angle['max'], angle['default'], angle['models']) == (-180, 180, 0, ['legacy', 'liquid'])
     assert 'display_angle_animation' in description['capabilities']
     assert 'hover_angle_animation' in description['capabilities']
     neighbor = next(p for p in description['parameters'] if p['name'] == 'neighbor_contribution')
@@ -58,9 +58,17 @@ def verify_control(ctl, config_path):
             assert 'use_measured_face' not in material
             assert math.isclose(material['face_slope'], 0.72 if theme == 'dark' else 0.68, abs_tol=1e-6)
             assert math.isclose(material['face_intercept'], 0.06 if theme == 'dark' else 0.30, abs_tol=1e-6)
-            assert math.isclose(material['rim_opacity'], rim * (0.65 if theme == 'dark' else 0.85), abs_tol=1e-6)
+            if preset == 'frosted-glass':
+                assert state['rim_model'] == 'liquid'
+                assert material['rim_width'] == 1 and material['rim_opacity'] == 1
+                assert 'display_angle_degrees' in state['applicable_parameters']
+                assert 'rim_soft' not in state['applicable_parameters']
+            else:
+                assert state['rim_model'] == 'legacy'
+                assert 'display_angle_degrees' not in state['applicable_parameters']
+                assert math.isclose(material['rim_opacity'], rim * (0.65 if theme == 'dark' else 0.85), abs_tol=1e-6)
         changed = {key for key in materials['dark'] if materials['dark'][key] != materials['light'][key]}
-        assert changed == {'face_slope', 'face_intercept'} | ({'rim_opacity'} if rim else set()), (preset, changed)
+        assert changed == {'face_slope', 'face_intercept'} | ({'rim_opacity'} if rim and preset != 'frosted-glass' else set()), (preset, changed)
     assert request('reset')['ok']
 
     # Structured material data stays outside the compatible scalar contract.
@@ -172,6 +180,10 @@ def verify_control(ctl, config_path):
     customized = request('apply', profile={'base_preset': 'frosted-full'})
     assert customized['ok'] and customized['state']['base_preset'] == 'frosted-full'
     assert customized['state']['material']['blur_sigma'] == 9
+    assert customized['state']['rim_model'] == 'liquid'
+    angle = request('apply', patch={'overrides': {'display_angle_degrees': 45}})['state']
+    assert angle['material']['display_angle_degrees'] == 45
+    assert 'display_angle_degrees' in angle['applicable_parameters']
     assert request('reset')['ok']
 
     applied = request('apply', profile={'base_preset': 'platform', 'theme': 'light', 'enabled': False,

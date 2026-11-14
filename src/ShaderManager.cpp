@@ -115,6 +115,7 @@ void CShaderManager::initializeIfNeeded() {
         return;
 
     if (!compileGlassShader(glassShader, glassUniforms, "glass.frag") ||
+        !compileGlassShader(glassRimShader, glassRimCommonUniforms, "glass-liquid-rim.frag") ||
         !compileGlassShader(interiorShader, interiorUniforms, "glass-interior.frag") ||
         !compileGlassShader(liquidShader, liquidCommonUniforms, "liquid.frag") ||
         !compileGlassShader(liquidLayerShader, liquidLayerCommonUniforms, "liquid-layer.frag"))
@@ -127,6 +128,7 @@ void CShaderManager::initializeIfNeeded() {
         !compileSceneSampleShader(materialBackdropShader, materialBackdropUniforms, "material-backdrop.frag"))
         return;
 
+    glassRimUniforms.locate(glassRimShader->program());
     liquidUniforms.locate(liquidShader->program());
     liquidLayerUniforms.locate(liquidLayerShader->program());
     m_initialized = true;
@@ -159,6 +161,7 @@ int CShaderManager::bindUnderlayShapes(std::span<const std::array<float, 8>> sha
 
 void CShaderManager::destroy() noexcept {
     glassShader->destroy();
+    glassRimShader->destroy();
     interiorShader->destroy();
     liquidShader->destroy();
     liquidLayerShader->destroy();

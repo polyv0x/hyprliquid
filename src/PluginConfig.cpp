@@ -619,6 +619,7 @@ float resolvePresetFloat(
 SMaterial resolveMaterial(const SResolveContext& context) {
     SMaterial material;
     material.family = resolveMaterialFamily(context.presetName, context.customPresets);
+    material.rimModel = resolveRimModel(context.presetName, context.customPresets);
     material.darkTheme = context.isDark;
 #define GLASS_PARAM(name, value, lo, hi) \
     material.name = resolvePresetFloat(context, &SPresetValues::name, &SOverridableConfig::name, value);

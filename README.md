@@ -118,7 +118,9 @@ Liquid settings with sigma 6. See the
 [Liquid material contract](docs/guide.md#liquid-material) for controls, theme
 mapping, and rendering behavior.
 
-Liquid's `display_angle_degrees` rotates its edge highlights (default `0`). The
+`display_angle_degrees` rotates the edge highlights of `frosted-glass` and
+Liquid presets (default `0`). Frosted-glass uses Liquid's key/fill rim with
+width and strength both set to `1`. The
 optional `animate_display_angle = true` setting sweeps 0° → configured angle →
 0° during native window size animations, following the window's easing. See the
 [Liquid configuration example](docs/guide.md#liquid-material).

@@ -71,6 +71,9 @@ class CShaderManager {
 
     SP<CShader>    glassShader = makeShared<CShader>();
     SGlassUniforms glassUniforms;
+    SP<CShader> glassRimShader = makeShared<CShader>();
+    SGlassUniforms glassRimCommonUniforms;
+    SLiquidHighlightUniforms glassRimUniforms;
     SP<CShader> interiorShader = makeShared<CShader>();
     SGlassUniforms interiorUniforms;
     SP<CShader> liquidShader = makeShared<CShader>();

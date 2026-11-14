@@ -74,7 +74,7 @@ void CHoverAngles::changed(MONITORID id) {
         if (!decoration) continue;
         const auto window = decoration->getOwner();
         if (!window || window->m_monitor != monitor || !window->m_isMapped || window->isHidden() ||
-            !g_pHyprRenderer->shouldRenderWindow(window, monitor) || !decoration->usesLiquidGlass()) continue;
+            !g_pHyprRenderer->shouldRenderWindow(window, monitor) || !decoration->usesLiquidRim()) continue;
         decoration->damageEntire();
         damaged = true;
     }

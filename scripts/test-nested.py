@@ -244,12 +244,12 @@ def main():
                     (BUILD / 'nested-clients.json').write_text(ctl('-j', 'clients'))
                     # No move/resize/input between these captures: an accepted edit
                     # must repaint an otherwise idle transparent window itself.
-                    def capture(name):
+                    def capture(name, inset=40):
                         time.sleep(0.3)
                         path = BUILD / (name + '.png')
                         subprocess.run(['grim', str(path)], env=env, check=True, capture_output=True, timeout=10)
                         from PIL import Image
-                        return Image.open(path).crop((x + 40, y + 40, x + width - 40, y + height - 40)).tobytes()
+                        return Image.open(path).crop((x + inset, y + inset, x + width - inset, y + height - inset)).tobytes()
 
                     original = capture('nested-control-baseline')
                     assert control('apply', patch={'overrides': {'blur_sigma': 0, 'face_opacity': 0, 'rim_opacity': 0}})['ok']
@@ -283,13 +283,13 @@ def main():
                     listed = {p['id'] for p in control('describe')['presets']}
                     assert public_presets <= listed, listed
                     assert not listed & {'default', 'measured', 'platform', 'lens', 'lighter', 'darker', 'ultra_darker', 'no_bleed', 'liquid-medium', 'clear-edge', 'frosted-clear-edge'}, listed
-                    # Renaming must preserve existing profiles, including the
-                    # saved lens-based frost settings that became built-ins.
+                    # Compatibility names preserve the presets they alias.
+                    # Frosted Glass now intentionally uses a different rim
+                    # from a saved lens profile with matching blur settings.
                     equivalents = [
                         ('measured', 'frosted', {}),
                         ('platform', 'soft-glass', {}),
                         ('lens', 'clear-glass', {}),
-                        ('lens', 'frosted-glass', {'blur_alpha0': 0.96, 'blur_alpha3': 1}),
                         ('lens', 'frosted-glass-clear-edge', {'blur_alpha0': 0.02, 'blur_alpha3': 1, 'blur_dist3': 38.4}),
                         ('clear-edge', 'frosted-glass-clear-edge', {}),
                         ('frosted-clear-edge', 'frosted-glass-clear-edge', {}),
@@ -303,8 +303,14 @@ def main():
                         assert after['ok'] and after['state']['base_preset'] == preset, after
                         assert before['state']['material'] == after['state']['material'], preset
                         assert capture('nested-renamed-' + preset) == pixels, preset
+                    before = control('apply', profile={'base_preset': 'lens', 'overrides': {'blur_alpha0': 0.96, 'blur_alpha3': 1}})
+                    assert before['ok'] and before['state']['rim_model'] == 'legacy', before
+                    old_frost = capture('nested-legacy-frosted-glass', inset=0)
+                    after = control('apply', profile={'base_preset': 'frosted-glass'})
+                    assert after['ok'] and after['state']['model'] == 'legacy' and after['state']['rim_model'] == 'liquid', after
+                    assert capture('nested-liquid-rim-frosted-glass', inset=0) != old_frost, 'Frosted Glass did not select its new rim'
                     assert control('reset')['ok']
-                    print('PASS: renamed presets and saved frosted profiles render identically', flush=True)
+                    print('PASS: compatibility presets preserve pixels and Frosted Glass selects its Liquid rim', flush=True)
                     for preset in sorted(public_presets):
                         assert control('apply', profile={'base_preset': preset, 'theme': 'dark'})['ok']
                         dark_pixels = capture('nested-theme-' + preset + '-dark')

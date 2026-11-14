@@ -44,13 +44,14 @@ deleted or repaired by the control API.
 | `generation` | Configuration reload count within this epoch |
 | `revision` | Increases on accepted mutations, reloads, and dynamic `config()` writes |
 | `enabled`, `base_preset`, `theme` | Effective window defaults; theme is `dark` or `light` |
-| `animate_display_angle` | Boolean; sweep Liquid highlights during native window size transitions, default `false` |
+| `animate_display_angle` | Boolean; sweep Liquid and frosted-glass rim highlights during native window size transitions, default `false` |
 | `active` | Whether any panel override exists |
 | `panel` | Sparse explicit `enabled`, `animate_display_angle`, `base_preset`, `theme`, and `overrides` |
 | `inherited` | Resolved selected base material/theme before scalar panel overrides |
 | `material` | Actual resolved/sanitized material after panel overrides |
 | `baseline` | Configured enabled/preset/theme and resolved configured material |
 | `model` | Resolved material family: `legacy` or `liquid`, inherited through custom presets |
+| `rim_model` | Resolved rim lighting: `legacy` or `liquid`; frosted-glass uses a Liquid rim with the legacy material body |
 | `applicable_parameters` | Scalar names that affect the effective model |
 | `effective_blur_sigma` | Resolved logical blur sigma, including fixed material values |
 | `model_data` | Liquid environment, base `parameters`, resolved `effective_parameters`, rendering assumptions, shadow owner and output extent |
@@ -64,7 +65,10 @@ signed. Boolean values and numeric strings are not accepted as scalar numbers.
 The additive `material_models` capability supplies these model fields in state,
 baseline, and window/layer diagnostics. Each described scalar also has a
 `models` array. The `material` and `inherited` objects keep the existing scalar
-contract; fields absent from `applicable_parameters` are inapplicable to Liquid. Model selection is
+contract; fields absent from `applicable_parameters` do not affect the selected
+material. The parameter descriptor's `models` array lists family capabilities;
+`applicable_parameters` also accounts for the selected rim model. Frosted-glass
+exposes `display_angle_degrees` and excludes `rim_soft`. Model selection is
 through preset inheritance, never a numeric override. `model_data` is read-only
 and separate from those scalar objects. Unknown model fields in `apply` reject
 the entire request.
@@ -103,12 +107,13 @@ and a null scalar value removes that scalar override. `reset_fields` is an array
 of scalar names and is convenient for clients without a JSON-null value.
 
 The additive `display_angle_animation` capability advertises the boolean
-`animate_display_angle` and Liquid-only scalar `display_angle_degrees` (-180 to
+`animate_display_angle` and scalar `display_angle_degrees` (-180 to
 180, default 0). With the toggle off, the angle stays fixed. With it on, each
 native size transition sweeps 0° → configured angle → 0° using the window's
 eased resize progress. Idle windows remain at 0°; interrupted resizes continue
-from the last drawn angle. The boolean applies to all Liquid windows, including
-tagged presets, while their own resolved angle supplies the peak. Layers keep
+from the last drawn angle. The boolean applies to all Liquid and frosted-glass
+windows, including inherited and tagged presets, while their own resolved angle
+supplies the peak. The same presets support `animate_hover_angle`. Layers keep
 their static angle. A profile omission or patch null relinquishes ownership of
 the boolean; `reset_fields` remains for scalar controls only.
 

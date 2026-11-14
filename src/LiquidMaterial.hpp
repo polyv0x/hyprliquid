@@ -30,6 +30,8 @@ inline constexpr bool liquidParameter(std::string_view name) {
 inline constexpr bool materialParameter(EMaterialFamily family, std::string_view name) {
     // Keep stored model fields and preset defaults compatible, but advertise
     // only rendered controls. Native Hyprland decorations own window shadows.
+    // Some Glass presets use Liquid's rim. Per-material applicability narrows
+    // this family-level capability list to the selected rim model.
     return family == EMaterialFamily::LIQUID ?
-        liquidParameter(name) && name != "shadow_amount" && name != "shadow_offset" : name != "display_angle_degrees";
+        liquidParameter(name) && name != "shadow_amount" && name != "shadow_offset" : true;
 }

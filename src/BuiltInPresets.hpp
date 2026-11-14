@@ -4,7 +4,7 @@
 
 namespace BuiltInPresets {
 
-// Existing materials and aliases retain their values; Liquid is an opt-in family.
+// Material body and rim lighting are inherited independently by custom presets.
 inline std::unordered_map<std::string, SCustomPreset> getAll() {
     std::unordered_map<std::string, SCustomPreset> presets;
     const auto add = [&](const std::string& name, const std::string& parent = "") -> SPresetValues& {
@@ -65,8 +65,14 @@ inline std::unordered_map<std::string, SCustomPreset> getAll() {
     alias("lens", "clear-glass");
 
     auto& frostedGlass = add("frosted-glass", "lens");
+    presets.at("frosted-glass").rimModel = ERimModel::LIQUID;
     frostedGlass.blur_alpha0 = 0.96f;
     frostedGlass.blur_alpha3 = 1.0f;
+    frostedGlass.rim_width = 1.0f;
+    frostedGlass.rim_opacity = 1.0f;
+    // Match Liquid's screen-pixel coverage at the native window outline.
+    frostedGlass.coverage_offset = 0.0f;
+    frostedGlass.coverage_width = 0.0f;
 
     auto& clearEdge = add("frosted-glass-clear-edge", "lens");
     clearEdge.blur_alpha0 = 0.02f;

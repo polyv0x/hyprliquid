@@ -3,10 +3,11 @@
 
 void addMaterialInfo(json_object* target, const SMaterial& material, bool layer) {
     json_object_object_add(target, "model", json_object_new_string(materialFamilyName(material.family)));
+    json_object_object_add(target, "rim_model", json_object_new_string(materialUsesLiquidRim(material) ? "liquid" : "legacy"));
     json_object_object_add(target, "effective_blur_sigma", json_object_new_double(materialBlurSigma(material)));
     auto* applicable = json_object_new_array();
 #define GLASS_PARAM(name, value, lo, hi) \
-    if (materialParameter(material.family, #name)) \
+    if (materialParameter(material, #name)) \
         json_object_array_add(applicable, json_object_new_string(#name));
 #include "MaterialParams.inc"
 #undef GLASS_PARAM

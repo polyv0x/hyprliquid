@@ -130,10 +130,35 @@ def verify_hover_angle(ctl, env, log, clients, build, wait, plugin):
     wait(lambda: settled(90))
     print('PASS: hover plus adjacent-window resize sweeps, spring curves and disabled native animations', flush=True)
 
+    # Frosted Glass shares the rim and angle path while retaining its Glass body.
+    glass_profile = profile | {'base_preset': 'frosted-glass'}
+    glass = control('apply', profile=glass_profile)['state']
+    assert glass['model'] == 'legacy' and glass['rim_model'] == 'liquid'
+    assert 'display_angle_degrees' in glass['applicable_parameters']
+    wait(lambda: all(abs(v - 15) < 0.1 for v in sample_windows().values()))
+    glass_baseline = capture('glass-hover-disabled')
+    control('apply', patch={'animate_hover_angle': True})
+    move(1200, 400)
+    wait(lambda: settled(90))
+    wait(lambda: all(abs(v - 105) < 0.1 for v in sample_windows().values()))
+    assert ImageChops.difference(glass_baseline, capture('glass-hover-right')).getbbox(), 'Glass hover changed no pixels'
+    control('apply', patch={'animate_hover_angle': False})
+    wait(lambda: all(abs(v - 15) < 0.1 for v in sample_windows().values()))
+    assert ImageChops.difference(glass_baseline, capture('glass-hover-restored')).getbbox() is None
+    legacy = control('apply', profile=profile | {'base_preset': 'frosted-glass-clear-edge', 'animate_hover_angle': True})['state']
+    assert legacy['rim_model'] == 'legacy' and 'display_angle_degrees' not in legacy['applicable_parameters']
+    wait(lambda: all(v == 0 for v in sample_windows().values()))
+    control('apply', profile=profile | {'animate_hover_angle': True})
+    print('PASS: frosted-glass rim rotation, hover pixels and exact restoration; legacy rims remain fixed', flush=True)
+
     secondary = 'HYPRLIQUID-HOVER'
     ctl('output', 'create', 'headless', secondary)
     ctl('eval', 'hl.monitor({ output = "' + secondary + '", mode = "800x600@60", position = "-640x0", scale = 1.25, transform = 0 })')
-    wait(lambda: len(json.loads(ctl('-j', 'monitors'))) == 2)
+    # Creation publishes the headless output before its requested position and
+    # scale are applied. Moving earlier can clamp the cursor to the old layout.
+    wait(lambda: any(m['name'] == secondary and m['x'] == -640 and m['y'] == 0
+                     and m['width'] == 800 and m['height'] == 600 and m['scale'] == 1.25
+                     for m in json.loads(ctl('-j', 'monitors'))))
     move(-40, 240)
     wait(lambda: settled(90, secondary) and settled(0))
     wait(lambda: all(abs(v - 15) < 0.1 for v in sample_windows().values()))

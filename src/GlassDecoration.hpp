@@ -32,6 +32,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
                                        const std::shared_ptr<SWindowScene>& scene = {}, bool sceneBase = false);
     [[nodiscard]] bool      usesGlass() const { return resolveEnabled(); }
     [[nodiscard]] bool      usesLiquidGlass() const;
+    [[nodiscard]] bool      usesLiquidRim() const;
     [[nodiscard]] bool      needsNeighborScene() const;
     void                    appendCacheKey(std::vector<uint64_t>& key) const;
     void                    reusedLocalBackdrop() { ++m_cacheReuses; }

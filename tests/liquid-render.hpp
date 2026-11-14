@@ -361,6 +361,7 @@ static void liquidShadow(const Program& shader) {
 
 static void liquidControls(const Program& shader, const Program& blurShader) {
     Program baseline(read("tests/reference/liquid-medium-baseline.frag"), false);
+    Program frozenAA(frozenHighlightAntialiasing(read("shaders/liquid.frag")), false);
     Program reduction(read("shaders/material-backdrop.frag"), false);
     int defaultComparisons = 0, controlComparisons = 0;
     for (float scale : {1.0f, 1.25f, 1.5f, 2.0f}) {
@@ -389,7 +390,7 @@ static void liquidControls(const Program& shader, const Program& blurShader) {
             const auto material = presetMaterial("frosted-liquid-medium", dark);
             for (float power : {2.0f, 4.4f}) for (float fade : {0.5f, 1.0f}) {
                 const auto expected = render(baseline, material, liquidMaterial(dark), power, fade);
-                require(render(shader, material, effectiveLiquidMaterial(material), power, fade) == expected,
+                require(render(frozenAA, material, effectiveLiquidMaterial(material), power, fade) == expected,
                         "Liquid preset changed from the frozen native baseline");
                 ++defaultComparisons;
             }
@@ -408,13 +409,20 @@ static void liquidControls(const Program& shader, const Program& blurShader) {
                 {"rim_width", &SMaterial::rim_width, 5}, {"rim_opacity", &SMaterial::rim_opacity, 0},
                 {"shadow_amount", &SMaterial::shadow_amount, 0.6f}, {"shadow_offset", &SMaterial::shadow_offset, -20}}) {
                 auto before = material;
-                if (edit.field == &SMaterial::outer_refraction_inv_height) before.outer_refraction_amount = 45;
+                if (edit.field == &SMaterial::outer_refraction_inv_height) {
+                    // Give the narrow outer ray visible backdrop detail; blur
+                    // and the rim otherwise hide almost all of its movement.
+                    before.outer_refraction_amount = 45;
+                    before.blur_sigma = 0;
+                    before.rim_opacity = 0;
+                }
                 const auto expected = render(shader, before, effectiveLiquidMaterial(before), 3.6f, 1);
                 auto edited = before; edited.*edit.field = edit.value; sanitizeMaterial(edited);
                 const auto changed = render(shader, edited, effectiveLiquidMaterial(edited), 3.6f, 1);
                 size_t differences = 0;
                 for (size_t i = 0; i < changed.size(); ++i) differences += changed[i] != expected[i];
-                require(differences > 8, std::string("Liquid control has no visible effect: ") + edit.name);
+                require(differences > 8, std::string("Liquid control has no visible effect: ") + edit.name
+                    + " dark=" + std::to_string(dark) + " differing bytes=" + std::to_string(differences));
                 ++controlComparisons;
             }
             auto unblurred = material; unblurred.blur_sigma = 0;
@@ -442,7 +450,7 @@ static void liquidRendering(const Program& blurShader) {
     const std::string optical = "optical_normal(p, max(-d, 0.0), normal)";
     require(directSource.find(optical) != std::string::npos, "Missing native optical-normal expression");
     directSource.replace(directSource.find(optical), optical.size(), "normal");
-    Program direct(directSource, false);
+    Program direct(frozenHighlightAntialiasing(directSource), false);
     int comparisons = 0;
     for (float scale : {1.0f, 1.5f, 2.0f}) {
         const int ww = 300 * scale, wh = 120 * scale, pad = 160 * scale;

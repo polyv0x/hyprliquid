@@ -9,13 +9,26 @@
 #include <string>
 #include <unordered_map>
 
+enum class ERimModel { LEGACY, LIQUID };
+
 struct SMaterial {
     EMaterialFamily family = EMaterialFamily::LEGACY;
+    ERimModel rimModel = ERimModel::LEGACY;
     bool darkTheme = true;
 #define GLASS_PARAM(name, value, lo, hi) float name = value;
 #include "MaterialParams.inc"
 #undef GLASS_PARAM
 };
+
+inline bool materialUsesLiquidRim(const SMaterial& material) {
+    return material.family == EMaterialFamily::LIQUID || material.rimModel == ERimModel::LIQUID;
+}
+
+inline bool materialParameter(const SMaterial& material, std::string_view name) {
+    if (name == "display_angle_degrees") return materialUsesLiquidRim(material);
+    if (name == "rim_soft" && materialUsesLiquidRim(material)) return false;
+    return materialParameter(material.family, name);
+}
 
 // Local Liquid uses the wallpaper/real underlay for its filter support, even
 // when that support crosses the owner edge. Outward rays opt into the color
@@ -42,6 +55,7 @@ struct SCustomPreset {
     // Compatibility aliases stay usable without duplicating the preset picker.
     bool          hidden = false;
     std::optional<EMaterialFamily> family;
+    std::optional<ERimModel> rimModel;
     SPresetValues shared;
     SPresetValues dark;
     SPresetValues light;
@@ -58,4 +72,15 @@ inline EMaterialFamily resolveMaterialFamily(std::string name, const std::unorde
         name = it->second.inherits;
     }
     return EMaterialFamily::LEGACY;
+}
+
+inline ERimModel resolveRimModel(std::string name, const std::unordered_map<std::string, SCustomPreset>& presets) {
+    for (size_t depth = 0; depth <= presets.size(); ++depth) {
+        const auto it = presets.find(name);
+        if (it == presets.end()) break;
+        if (it->second.rimModel) return *it->second.rimModel;
+        if (it->second.inherits.empty()) break;
+        name = it->second.inherits;
+    }
+    return ERimModel::LEGACY;
 }
