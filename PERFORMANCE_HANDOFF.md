@@ -324,6 +324,71 @@ plugin target and pass `HYPRLIQUID_TEST_SECURITY_PLUGIN` as described above.
 Load fixtures before setting transient test config: plugin loading reloads
 Hyprland's configuration. Instrumentation remains disposable-compositor only.
 
+## Zen hover reflections and output-buffer history — 2026-11-14
+
+Hovering Zen's side tabs caused a thin reflection strip on adjacent windows to
+flicker, while continuous scrolling looked smooth. Temporarily disabling damage
+tracking removed it. The fix is installed in compositor PID 6926 with normal
+`debug:damage_tracking=2`; all six windows, geometry and material settings were
+preserved. The user confirmed **"Stable now"** after the final installation.
+
+Two omissions combined:
+
+1. Disjoint cached Glass panes did not declare their complete optical output
+   damage. Native blur can render a larger region than it finally transfers to
+   the output, so correct reflection pixels could remain undisplayed.
+2. Expanding only the current frame still omitted those changes from Hyprland's
+   buffer-age damage history, which rotates before workspace rendering. An older
+   swapchain buffer could restore the stale strip on a subsequent bar-only frame.
+   The fractional surface-filter guard had the same history omission, including
+   the separate single-window fast path.
+
+`WindowScene.cpp` now propagates neighboring optical output into render and final
+transfer damage, and records newly introduced optical and guarded source regions
+in the monitor's pending damage history. It does not schedule extra frames or
+feed accumulated historical render damage back into the ring. Regional material
+propagation records its newly generated damage too. Rendering remains partial.
+
+The old replay oracle inspected internal render damage, then reconstructed a
+frame from the previously presented image. That hid both final-transfer omissions
+and stale swapchain-buffer reversion. The capture fixture now reports
+`final_damage` and supports `next presented monitor NAME /absolute/path`: retain
+`outFB` during rendering and read its actual pixels at `RENDER_POST`. The hover
+regression uses complete output-buffer pixels by default. `framebuffer` metadata
+demonstrates rotation; benchmark comparisons exclude these telemetry fields.
+All capture instrumentation remains restricted to disposable compositors.
+
+Evidence under `build/hover-refresh/`:
+
+- `before.so`: original live build. `before-replay/`: 15/27 side-update frames
+  fail the corrected final-transfer reconstruction at 10-bit/scale 1.25.
+- `candidate.so`: current-frame-only correction. `swapchain-before/`: actual
+  output readback exposes 9/27 failing frames, including bar-only reversion.
+- `zen-browser/`: independent real Zen sidebar reproduction. Before history
+  correction, 8/15 consecutive frames contain 6,794 incorrect neighboring-strip
+  pixels, alternating with three output buffers. After correction, two hovers
+  yield 28/28 byte-identical full-output frames with no recording gaps.
+- `final-output/` and `independent-final-output/`: final build passes 31/31
+  actual-output comparisons each at 10-bit and 8-bit, including single-window
+  filter fringes. Ordinary small commits still exercise partial repaint.
+- `regional-output/`: 96 actual-output comparisons pass across overlapping
+  Glass/Liquid materials, 8-bit/10-bit/FP16 rendering, fractional scale and rotation.
+- `hyprliquid-hover-unit.log`: `make -j4 test` passes. Lifecycle logs cover five
+  unload/remap cycles and closed-window registration cleanup.
+- `final-live/`: settings/geometry preservation and live installation evidence;
+  `before.so` there retains the immediately preceding plugin for rollback.
+
+Final installed SHA-256:
+`abcdd6205c2503bbfd1de469c1b8c186a134f7035296d5c6e3e32fdc7ebc9480`.
+
+Reproduce with `python3 scripts/test-nested.py --damage-flicker-only` after
+building the capture/client fixtures. Set `HYPRLIQUID_TEST_BITDEPTH=10` and
+`HYPRLIQUID_TEST_PATCH_Y=300` for the straight-side regression;
+`HYPRLIQUID_TEST_WINDOWS=5` runs the larger split-layout sequence.
+`HYPRLIQUID_TEST_PRESENTED=0` selects the intermediate-image diagnostic oracle.
+For regional output-buffer checks, set `HYPRLIQUID_TEST_PRESENTED=1` with
+`--regional-damage-only`. Performance timings were not remeasured.
+
 ## Historical artifacts
 
 - `make -j4 test`: passed, including 540 exact Glass and 288 exact Liquid shader comparisons across 8-bit, 10-bit, and FP16.

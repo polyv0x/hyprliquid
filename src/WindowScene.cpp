@@ -502,6 +502,7 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
         for (const auto& change : scene->damage) {
             renderer->m_renderData.damage.add(change.region);
             renderer->m_renderData.finalDamage.add(change.region);
+            monitor->m_damage.damage(change.region);
         }
         scene->ready = true;
         if (storage.background || storage.image)
@@ -589,6 +590,28 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
     for (const auto& change : scene->damage) {
         renderer->m_renderData.damage.add(change.region);
         renderer->m_renderData.finalDamage.add(change.region);
+        // The fractional-filter guard must survive buffer reuse as well.
+        monitor->m_damage.damage(change.region);
+    }
+    if (scene->cacheInputs && !scene->local) {
+        // Disjoint panes retain their inputs, but their optical output can
+        // change farther away than native blur's presentation damage reaches.
+        // Native render damage is larger than final transfer damage: having
+        // rendered the reflection correctly does not ensure it gets displayed.
+        for (const auto& window : scene->windows) {
+            CRegion input;
+            for (const auto& change : scene->damage)
+                if (change.window != window) input.add(change.region);
+            if (input.empty()) continue;
+            const auto output = decorationFor(window.lock())->affectedDamage(monitor, input);
+            renderer->m_renderData.damage.add(output);
+            renderer->m_renderData.finalDamage.add(output);
+            // beginRender already rotated the damage ring. Keep these new
+            // optical changes pending for the next buffer acquisition too,
+            // so an older swapchain buffer cannot bring stale reflections
+            // back on an unrelated frame. Do not schedule an extra frame.
+            monitor->m_damage.damage(output);
+        }
     }
     capture->reuse = scene->local && g_pGlobalState->damageSurfaceHook && storage.cache->valid &&
         key == storage.key && source && storage.image->isAllocated() &&
@@ -627,6 +650,7 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
         }
         renderer->m_renderData.damage.add(beneath);
         renderer->m_renderData.finalDamage.add(beneath);
+        monitor->m_damage.damage(beneath);
     }
     if (!reuse && !capture->reuseScene) storage.cache->valid = false;
     storage.key = std::move(key);

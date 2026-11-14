@@ -592,7 +592,7 @@ while True:
                         actual = results['arms'][arm]['captures'][name]
                         # Damage is telemetry, not image data: cache hits are
                         # expected to reduce it while preserving every pixel.
-                        image = lambda capture: capture | {'metadata': {k: v for k, v in capture['metadata'].items() if k not in ('damage', 'native_damage')}}
+                        image = lambda capture: capture | {'metadata': {k: v for k, v in capture['metadata'].items() if k not in ('damage', 'native_damage', 'final_damage', 'framebuffer')}}
                         identical = image(expected) == image(actual)
                         results['comparisons'].append({'case': name, 'arm': arm, 'identical': identical})
                 (output / 'result.json').write_text(json.dumps(results, indent=2))
