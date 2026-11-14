@@ -21,8 +21,6 @@ uniform float uBlurDistances[5], uBlurOpacities[5];
 uniform vec4 uFace, uFaceFill;
 uniform vec4 uShadow;
 uniform vec2 uShadowOffset;
-uniform vec4 uHighlight0, uHighlight1, uHighlight2, uKeyColor, uFillColor;
-uniform vec4 uHighlightRow0, uHighlightRow1, uHighlightRow2, uHighlightRow3, uHighlightBias;
 
 uniform sampler2D maskTex;
 uniform int useMask, maskMode, regionRectCount;
@@ -91,6 +89,9 @@ void main() {
 #endif
     float d = sdf_at(p);
     float coverage = liquidSaturate(0.5 - d / max(fwidth(d), 0.0001));
+    // Keep pixel derivatives outside the conditional normal/highlight path,
+    // including helper lanes needed by partial redraws of a thin rim.
+    vec2 rimFootprint = vec2(dFdx(d), dFdy(d));
     float inner = refractAmount(-d, uRefraction.x, uRefraction.y);
     float outer = refractAmount(-d, uRefraction.z, uRefraction.w);
     float e = 1.0 / pixelScale;
@@ -112,7 +113,7 @@ void main() {
     // need neither its directional response nor its derivative arithmetic.
     vec4 highlight = vec4(0.0);
     if (-d <= highlightLimit)
-        highlight = keyFillHighlight(vec4(d, normal, 1.0), uHighlight0, uHighlight1, uHighlight2, uKeyColor, uFillColor);
+        highlight = keyFillHighlight(vec4(d, normal, 1.0), uHighlight0, uHighlight1, uHighlight2, uKeyColor, uFillColor, rimFootprint);
     vec4 tinted = approximateHighlightMatrix(highlight);
 
     vec4 surfacePixel = vec4(0.0);

@@ -20,6 +20,18 @@ static void exactGlass(const Program& candidate) {
             for (const auto* name : {"frosted", "soft-glass", "clear-glass", "frosted-glass", "frosted-glass-clear-edge"})
                 for (bool dark : {false, true}) for (int variant = 0; variant < 6; ++variant) {
                     auto material = presetMaterial(name, dark);
+                    // Keep frozen optics/lighting comparisons at their original
+                    // settings. The new coverage and rim have Liquid comparisons.
+                    if (material.coverage_width == 0) {
+                        material.coverage_width = SMaterial{}.coverage_width;
+                        material.coverage_offset = SMaterial{}.coverage_offset;
+                    }
+                    if (material.rimModel == ERimModel::LIQUID) {
+                        const auto old = presetMaterial("clear-glass", dark);
+                        material.rimModel = ERimModel::LEGACY;
+                        material.rim_width = old.rim_width;
+                        material.rim_opacity = old.rim_opacity;
+                    }
                     const float power = std::array{1.0f, 1.5f, 2.0f, 3.6f, 4.4f, 10.0f}[variant];
                     const float fade = std::array{1.0f, .73f, .125f, 0.0f, 1.0f, 1.0f}[variant];
                     if (variant == 4) {

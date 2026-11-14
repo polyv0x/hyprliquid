@@ -170,16 +170,17 @@ void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
                                            g_pGlobalState->customPresets, runtimeOverrides()});
     const float previousAngle = m_renderedDisplayAngle;
     const auto owner = m_window.lock();
-    if (enabled && material.family == EMaterialFamily::LIQUID && runtimeAnimateDisplayAngle() && owner && owner->sizeAnimation()) {
+    const bool liquidRim = materialUsesLiquidRim(material);
+    if (enabled && liquidRim && runtimeAnimateDisplayAngle() && owner && owner->sizeAnimation()) {
         const auto& animation = owner->sizeAnimation();
         const auto begun = animation->begun(), goal = animation->goal(), current = animation->value();
         m_displayAngle.update(material.display_angle_degrees, animation->isBeingAnimated(),
                               {begun.x, begun.y}, {goal.x, goal.y}, {current.x, current.y});
     } else {
-        m_displayAngle.reset(enabled && material.family == EMaterialFamily::LIQUID ? material.display_angle_degrees : 0.0f);
+        m_displayAngle.reset(enabled && liquidRim ? material.display_angle_degrees : 0.0f);
     }
     m_renderedDisplayAngle = m_displayAngle.value();
-    if (enabled && material.family == EMaterialFamily::LIQUID && runtimeAnimateHoverAngle() && owner)
+    if (enabled && liquidRim && runtimeAnimateHoverAngle() && owner)
         m_renderedDisplayAngle += g_pGlobalState->hoverAngles.value(owner->m_monitor.lock());
     // Diagnostics must pair the angle with geometry from the same draw. IPC
     // can otherwise observe a newer native animation tick beside an old angle.
@@ -233,6 +234,13 @@ bool CGlassDecoration::usesLiquidGlass() const {
     return resolveEnabled() && resolveMaterialFamily(resolvePresetName(), g_pGlobalState->customPresets) == EMaterialFamily::LIQUID;
 }
 
+bool CGlassDecoration::usesLiquidRim() const {
+    const auto preset = resolvePresetName();
+    const auto& presets = g_pGlobalState->customPresets;
+    return resolveEnabled() && (resolveMaterialFamily(preset, presets) == EMaterialFamily::LIQUID ||
+                               resolveRimModel(preset, presets) == ERimModel::LIQUID);
+}
+
 bool CGlassDecoration::needsNeighborScene() const {
     return materialNeedsNeighborScene(resolveMaterial({resolvePresetName(), resolveThemeIsDark(), g_pGlobalState->config,
                                                        g_pGlobalState->customPresets, runtimeOverrides()}));
@@ -243,6 +251,7 @@ void CGlassDecoration::appendCacheKey(std::vector<uint64_t>& key) const {
                                            g_pGlobalState->customPresets, runtimeOverrides()});
     key.push_back(resolveEnabled());
     key.push_back(static_cast<uint64_t>(material.family));
+    key.push_back(static_cast<uint64_t>(material.rimModel));
     key.push_back(material.darkTheme);
 #define GLASS_PARAM(name, value, lo, hi) key.push_back(std::bit_cast<uint32_t>(material.name));
 #include "MaterialParams.inc"

@@ -441,9 +441,11 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
     g_pGlobalState->renderBuffers.touch(blurredFramebuffer);
     auto& manager = g_pGlobalState->shaderManager;
     const bool liquid = material.family == EMaterialFamily::LIQUID;
+    const bool liquidRim = materialUsesLiquidRim(material);
     if (liquid && !materialBackdrop) return;
     const bool shapedLayer = liquid && mask && mask->shapeCount > 0;
-    const auto& uniforms = shapedLayer ? manager.liquidLayerCommonUniforms : liquid ? manager.liquidCommonUniforms : manager.glassUniforms;
+    const auto& uniforms = shapedLayer ? manager.liquidLayerCommonUniforms : liquid ? manager.liquidCommonUniforms :
+        liquidRim ? manager.glassRimCommonUniforms : manager.glassUniforms;
     const float extent = liquid && !mask && renderShadow ? std::ceil(materialOutputExtent(material) *
         g_pHyprRenderer->m_renderData.pMonitor->m_scale * material.effect_scale) : 0.0f;
     CBox outputBox = rawBox;
@@ -478,7 +480,8 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
     }
     glActiveTexture(GL_TEXTURE0);
 
-    auto shader = g_pHyprOpenGL->useShader(shapedLayer ? manager.liquidLayerShader : liquid ? manager.liquidShader : manager.glassShader);
+    auto shader = g_pHyprOpenGL->useShader(shapedLayer ? manager.liquidLayerShader : liquid ? manager.liquidShader :
+        liquidRim ? manager.glassRimShader : manager.glassShader);
     shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_FALSE, matrix.getMatrix());
     shader->setUniformInt(SHADER_TEX, 0);
     shader->setUniformFloat2(SHADER_FULL_SIZE, transformedBox.width, transformedBox.height);
@@ -499,20 +502,24 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
 #define GLASS_PARAM(name, value, lo, hi) glUniform1f(uniforms.name, material.name);
 #include "MaterialParams.inc"
 #undef GLASS_PARAM
-    if (liquid) {
-        const auto& u = shapedLayer ? manager.liquidLayerUniforms : manager.liquidUniforms;
+    if (liquidRim) {
         // Output rotation/reflection is a coordinate transform, separate from
         // material display angle. Convert through the
         // compositor's own transform, with y-up material vectors on both sides.
         const auto origin = Vector2D{0, 0}.transform(transform, {1, 1});
         const auto x = Vector2D{1, 0}.transform(transform, {1, 1}) - origin;
         const auto y = Vector2D{0, -1}.transform(transform, {1, 1}) - origin;
-        u.upload(effectiveLiquidMaterial(material), material.display_angle_degrees,
-                 {static_cast<float>(x.x), static_cast<float>(-x.y), static_cast<float>(y.x), static_cast<float>(-y.y)});
-        glUniform1i(u.backdrop, 6); glUniform1i(u.cleanBackdrop, 7);
-        glUniform2f(u.outputExtent, extent, extent);
-        glUniform1i(u.renderShadow, !mask && renderShadow);
-        glUniform1i(u.transparentTarget, !mask && g_pHyprRenderer->m_bRenderingSnapshot);
+        const std::array<float, 4> basis{static_cast<float>(x.x), static_cast<float>(-x.y),
+                                         static_cast<float>(y.x), static_cast<float>(-y.y)};
+        const auto effective = effectiveLiquidMaterial(material);
+        if (liquid) {
+            const auto& u = shapedLayer ? manager.liquidLayerUniforms : manager.liquidUniforms;
+            u.upload(effective, material.display_angle_degrees, basis);
+            glUniform1i(u.backdrop, 6); glUniform1i(u.cleanBackdrop, 7);
+            glUniform2f(u.outputExtent, extent, extent);
+            glUniform1i(u.renderShadow, !mask && renderShadow);
+            glUniform1i(u.transparentTarget, !mask && g_pHyprRenderer->m_bRenderingSnapshot);
+        } else manager.glassRimUniforms.upload(effective.highlight, material.display_angle_degrees, basis);
     }
 
     // Window falloff also applies without a neighbor scene, so the transition

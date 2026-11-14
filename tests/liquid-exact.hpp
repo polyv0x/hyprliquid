@@ -1,11 +1,13 @@
 // Freeze the complete pre-optimization shader and its shape/material helpers.
 // Compare native attachment values, including the 10-bit desktop and HDR path.
+// Pin the candidate's intentional rim AA change to the frozen implementation;
+// rimAntialiasing checks the new filter against an independent sampled reference.
 static void exactLiquid() {
     Program original(read("tests/reference/liquid-unoptimized.frag"), false);
-    Program candidate(read("shaders/liquid.frag"), false);
+    Program candidate(frozenHighlightAntialiasing(read("shaders/liquid.frag")), false);
     auto layerSource = read("tests/reference/liquid-unoptimized.frag");
     layerSource.insert(layerSource.find('\n') + 1, "#define LAYER_SHAPES\n");
-    Program originalLayer(layerSource, false), candidateLayer(read("shaders/liquid-layer.frag"), false);
+    Program originalLayer(layerSource, false), candidateLayer(frozenHighlightAntialiasing(read("shaders/liquid-layer.frag")), false);
     int comparisons = 0;
     for (const auto format : {GL_RGBA8, GL_RGB10_A2, GL_RGBA16F}) {
         for (const float scale : {0.75f, 1.25f, 2.0f}) {

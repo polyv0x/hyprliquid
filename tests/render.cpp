@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <iostream>
 #include <iterator>
+#include <numbers>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -134,6 +135,7 @@ static SMaterial presetMaterial(const std::string& name, bool dark = true) {
     const auto all = BuiltInPresets::getAll();
     SMaterial m;
     m.family = resolveMaterialFamily(name, all);
+    m.rimModel = resolveRimModel(name, all);
     m.darkTheme = dark;
     std::vector<const SCustomPreset*> chain;
     std::string current = name;
@@ -159,6 +161,10 @@ static void parameters(const Program& p, const SMaterial& m, float scale, int wi
 #include "MaterialParams.inc"
 #undef GLASS_PARAM
     if (!reference) {
+        if (materialUsesLiquidRim(m)) {
+            SLiquidHighlightUniforms rim; rim.locate(p.id);
+            rim.upload(effectiveLiquidMaterial(m).highlight, m.display_angle_degrees);
+        }
         p.i("tex", 0); p.i("blur_texture", 1); p.i("maskTex", 2); p.i("useMask", 0);
         p.i("clean_texture", 3); p.i("clean_blur_texture", 4); p.i("useNeighborContribution", 0);
         p.i("hasCleanBlur", 1);
@@ -207,6 +213,23 @@ static std::string outlineOptics(std::string source) {
     const auto at = source.find(call);
     require(at != std::string::npos, "Missing optical normal call");
     source.replace(at, call.size(), "n");
+    return source;
+}
+
+static std::string frozenHighlightAntialiasing(std::string source) {
+    // Keep the existing body/optimization comparisons byte-exact while the
+    // intentional AA change is checked against supersampling independently.
+    const auto original = read("tests/reference/liquid-unoptimized.frag");
+    const std::string begin = "float highlightBand(", end = "float highlightDirection(";
+    const auto a = source.find(begin), b = source.find(end, a);
+    const auto oldA = original.find(begin), oldB = original.find(end, oldA);
+    require(a != std::string::npos && b != std::string::npos
+            && oldA != std::string::npos && oldB != std::string::npos, "Missing highlight band fixture");
+    source.replace(a, b - a, original.substr(oldA, oldB - oldA) + R"(
+float highlightBand(float depth, float height, float curvature, vec2 footprint) {
+    return highlightBand(depth, height, curvature);
+}
+)");
     return source;
 }
 
@@ -608,6 +631,66 @@ static void sceneSampling() {
 #include "liquid-exact.hpp"
 
 #include "glass-exact.hpp"
+#include "glass-rim.hpp"
+#include "rim-antialias.hpp"
+
+static void glassCoverage(const Program& glass) {
+    Program liquid(read("shaders/liquid.frag"), false);
+    int comparisons = 0, antialiased = 0;
+    // White material over a black destination exposes coverage directly in
+    // the rendered pixels, independently of the two materials' optics.
+    for (float scale : {1.0f, 1.25f, 1.5f, 2.0f}) {
+        const int w = 171 * scale, h = 123 * scale;
+        std::vector<unsigned char> black(w * h * 4, 0), white(black.size(), 255), surface(black.size(), 0);
+        for (int i = 0; i < w * h; ++i) {
+            black[i * 4 + 3] = 255;
+            // Alternating mask lanes exercise derivatives next to early returns.
+            surface[i * 4 + 3] = i % 3 ? 64 : 0;
+        }
+        Target sharp(w, h, black.data()), frost(w, h, white.data()), mask(w, h, surface.data());
+        Target actual(w, h), expected(w, h);
+        for (float effect : {0.5f, 1.0f, 2.0f}) for (float radius : {0.0f, 24.0f})
+            for (float power : {1.0f, 2.0f, 3.6f, 10.0f}) for (bool masked : {false, true}) {
+                auto material = presetMaterial(masked ? "frosted-full" : "frosted-glass", masked);
+                material.blur_alpha0 = material.blur_alpha3 = 1;
+                material.face_opacity = material.holding_tone_opacity = 0;
+                material.edge_bleed_opacity = material.shadow_amount = material.rim_opacity = 0;
+                auto data = liquidMaterial(masked);
+                data.blur.opacities.fill(1);
+                data.face.opacity = 0;
+                data.highlight.keyColor = data.highlight.fillColor = {};
+                auto render = [&](const Program& shader, const Target& output, bool isLiquid) {
+                    copy(sharp, output); output.bind();
+                    if (isLiquid) {
+                        liquidParameters(shader, data, scale * effect, w, h, w, h, 0, power);
+                        shader.i("renderShadow", 0);
+                    } else parameters(shader, material, scale * effect, w, h, w, h, false, power);
+                    shader.f("radius", radius * scale);
+                    shader.f("fadeAlpha", masked ? .73f : 1.0f);
+                    shader.i("useMask", masked); shader.i("maskMode", 0);
+                    shader.v2("maskUVScale", 1, 1); shader.v2("maskUVOffset", 0, 0);
+                    shader.f("maskAlphaThreshold", .01f);
+                    sharp.sample(0); frost.sample(1); mask.sample(2);
+                    frost.sample(6); frost.sample(7);
+                    glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); quad(); glDisable(GL_BLEND);
+                };
+                render(glass, actual, false); render(liquid, expected, true);
+                const auto a = actual.pixels(), b = expected.pixels();
+                int maximum = 0;
+                for (size_t i = 0; i < a.size(); ++i) {
+                    maximum = std::max(maximum, std::abs(int(a[i]) - int(b[i])));
+                    if (!masked && i % 4 == 0 && b[i] > 0 && b[i] < 255) ++antialiased;
+                }
+                require(maximum <= 1, "Glass/Liquid coverage mismatch at scale=" + std::to_string(scale)
+                        + " effect=" + std::to_string(effect) + " radius=" + std::to_string(radius)
+                        + " power=" + std::to_string(power) + " masked=" + std::to_string(masked));
+                require(glGetError() == GL_NO_ERROR, "Glass coverage OpenGL error");
+                ++comparisons;
+            }
+    }
+    require(antialiased > 0, "Coverage comparison did not exercise antialiased pixels");
+    std::cout << "PASS: " << comparisons << " Glass/Liquid outline comparisons across display/effect scales, corners, masks and fades.\n";
+}
 
 int main(int argc, char** argv) try {
     auto display = eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
@@ -621,6 +704,7 @@ int main(int argc, char** argv) try {
     require(context != EGL_NO_CONTEXT && eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context), "Cannot create GLES3 context");
     std::cout << "Renderer: " << glGetString(GL_RENDERER) << '\n';
     Program native(read("shaders/glass.frag"), false), reference(read("tests/reference/glass.frag"), true);
+    Program liquidRim(read("shaders/glass-liquid-rim.frag"), false);
     Program legacy(outlineOptics(read("shaders/glass.frag")), false);
     Program nativeBlur(read("shaders/blur.frag"), false), referenceBlur(read("tests/reference/blur.frag"), true);
     GLuint vao, vbo; glGenVertexArrays(1, &vao); glBindVertexArray(vao); glGenBuffers(1, &vbo);
@@ -628,8 +712,12 @@ int main(int argc, char** argv) try {
     const float vertices[]{0,0, 1,0, 0,1, 1,1}; glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
     glDisable(GL_DITHER);
+    rimAntialiasing();
+    if (argc == 2 && std::string(argv[1]) == "--rim-aa-only") return 0;
     if (argc == 2 && std::string(argv[1]) == "--exact-liquid-only") { exactLiquid(); return 0; }
     exactGlass(native);
+    glassCoverage(liquidRim);
+    glassRim(liquidRim);
     if (argc == 2 && std::string(argv[1]) == "--exact-glass-only") return 0;
     exactLiquid();
     if (argc == 2 && std::string(argv[1]) == "--liquid-only") { liquidRendering(nativeBlur); return 0; }
@@ -664,9 +752,19 @@ int main(int argc, char** argv) try {
         Target actual(w, h), expected(w, h);
         for (const auto& name : presets) for (const bool dark : {true, false}) {
             auto m = presetMaterial(name, dark);
-            // The frozen WebGL reference predates reflection falloff, which
-            // is exercised independently above.
+            // The frozen WebGL reference predates reflection falloff and
+            // automatic coverage, both exercised independently above.
             m.neighbor_falloff = 0;
+            if (m.coverage_width == 0) {
+                m.coverage_width = SMaterial{}.coverage_width;
+                m.coverage_offset = SMaterial{}.coverage_offset;
+            }
+            if (m.rimModel == ERimModel::LIQUID) {
+                const auto old = presetMaterial("clear-glass", dark);
+                m.rimModel = ERimModel::LEGACY;
+                m.rim_width = old.rim_width;
+                m.rim_opacity = old.rim_opacity;
+            }
             const std::string theme = dark ? "dark" : "light";
             require(m.face_slope == (dark ? 0.72f : 0.68f)
                     && m.face_intercept == (dark ? 0.06f : 0.30f), "Preset lost its theme tones: " + name);

@@ -59,9 +59,12 @@ SLiquidMaterial effectiveLiquidMaterial(const SMaterial& material) noexcept {
 }
 
 void sanitizeMaterial(SMaterial& material) noexcept {
+    // Rim selection is renderer metadata; Rust sanitizes the shared scalars.
+    const auto rimModel = material.rimModel;
     const auto result = ffi::sanitize_material(toRust(material));
     // The caller's value is replaced only after Rust has completed the operation.
     material = succeeded(result.status) ? fromRust(result.value) : disabledMaterial();
+    material.rimModel = rimModel;
 }
 
 float materialBlurSigma(const SMaterial& material) noexcept {
