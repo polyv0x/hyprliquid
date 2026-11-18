@@ -1,13 +1,13 @@
 #pragma once
 
-#include <hyprland/src/render/pass/PassElement.hpp>
+#include "HyprlandRenderCompat.hpp"
 #include <hyprutils/math/Box.hpp>
 #include <hyprutils/math/Region.hpp>
 #include <memory>
 
 class CGlassLayerSurface;
 
-class CGlassLayerPassElement : public IPassElement {
+class CGlassLayerPassElement : public HyprlandCompat::CPassElement {
   public:
     struct SGlassLayerPassData {
         std::shared_ptr<CGlassLayerSurface> layerState;

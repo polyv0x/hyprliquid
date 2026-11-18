@@ -73,7 +73,7 @@ void CHoverAngles::changed(MONITORID id) {
     for (const auto& decoration : g_pGlobalState->decorations) {
         if (!decoration) continue;
         const auto window = decoration->getOwner();
-        if (!window || window->m_monitor != monitor || !window->m_isMapped || window->isHidden() ||
+        if (!window || window->m_monitor != monitor || !HyprlandCompat::mapped(window) || window->isHidden() ||
             !g_pHyprRenderer->shouldRenderWindow(window, monitor) || !decoration->usesLiquidRim()) continue;
         decoration->damageEntire();
         damaged = true;

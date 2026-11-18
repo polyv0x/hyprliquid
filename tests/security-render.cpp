@@ -5,6 +5,10 @@
 #include "../src/Globals.hpp"
 #include "../src/PixelTransfer.hpp"
 #include "../src/RenderBuffers.hpp"
+#include "../src/HyprlandIPCCompat.hpp"
+#if HYPRLIQUID_WINDOW_PRESENTATION
+#include <hyprland/src/desktop/view/window/WindowMetadata.hpp>
+#endif
 
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/SessionLockManager.hpp>
@@ -17,7 +21,7 @@
 
 namespace {
 HANDLE handle;
-SP<SHyprCtlCommand> command;
+SP<HyprlandCompat::CCommand> command;
 Hyprutils::Signal::CHyprSignalListener listener;
 std::string result = "idle";
 bool pending = false;
@@ -64,7 +68,7 @@ void verifyBlurRegions(const SP<Render::IFramebuffer>& caller) {
     glGetFloatv(GL_COLOR_CLEAR_VALUE, clear);
     Hyprutils::Utils::CScopeGuard restore([&] {
         Render::GL::g_pHyprOpenGL->setCapStatus(GL_BLEND, blend);
-        Render::GL::g_pHyprOpenGL->scissor(CBox(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]), false);
+        HyprlandCompat::scissor(CBox(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]), false);
         Render::GL::g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, scissor);
         glClearColor(clear[0], clear[1], clear[2], clear[3]);
     });
@@ -74,7 +78,7 @@ void verifyBlurRegions(const SP<Render::IFramebuffer>& caller) {
         Render::GL::g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, true);
         glClearColor(r, g, b, 1);
         region.forEachRect([&](const auto& box) {
-            Render::GL::g_pHyprOpenGL->scissor(CBox(box.x1, box.y1, box.x2 - box.x1, box.y2 - box.y1), false);
+            HyprlandCompat::scissor(CBox(box.x1, box.y1, box.x2 - box.x1, box.y2 - box.y1), false);
             glClear(GL_COLOR_BUFFER_BIT);
         });
         Render::GL::g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
@@ -83,14 +87,14 @@ void verifyBlurRegions(const SP<Render::IFramebuffer>& caller) {
     const auto checkNativeScissor = [&](const char* operation) {
         // Native drawing can request the same rectangle it used before our
         // offscreen work. Hyprland must not skip this update using stale state.
-        Render::GL::g_pHyprOpenGL->scissor(nativeScissor, false);
+        HyprlandCompat::scissor(nativeScissor, false);
         GLint actual[4];
         glGetIntegerv(GL_SCISSOR_BOX, actual);
         if (actual[0] != nativeScissor.x || actual[1] != nativeScissor.y ||
             actual[2] != nativeScissor.w || actual[3] != nativeScissor.h)
             throw std::runtime_error(std::format("{} left native scissor cache stale: {},{},{},{}", operation,
                                                 actual[0], actual[1], actual[2], actual[3]));
-        Render::GL::g_pHyprOpenGL->scissor(nullptr);
+        HyprlandCompat::scissor(nullptr);
     };
     for (const auto format : {DRM_FORMAT_ARGB8888, DRM_FORMAT_ARGB2101010, DRM_FORMAT_ABGR16161616F}) {
         constexpr int width = 641, height = 481;
@@ -121,7 +125,7 @@ void verifyBlurRegions(const SP<Render::IFramebuffer>& caller) {
             for (size_t index = 0; index < changes.size(); ++index) {
                 SP<Render::IFramebuffer> captured;
                 Vector2D padding;
-                Render::GL::g_pHyprOpenGL->scissor(nativeScissor, false);
+                HyprlandCompat::scissor(nativeScissor, false);
                 require(GlassRenderer::sampleBackground(captured, input, CBox{0, 0, width, height}, padding,
                                                        0, nullptr, nullptr, 1, &changes[index]), "partial capture failed");
                 checkNativeScissor("partial capture");
@@ -130,11 +134,11 @@ void verifyBlurRegions(const SP<Render::IFramebuffer>& caller) {
                 // The next pane can overwrite every shared intermediate. A
                 // partial repair must reconstruct all of its own dependencies.
                 require(GlassRenderer::blurBackground(poison, discarded, sigma, caller), "scratch poison blur failed");
-                Render::GL::g_pHyprOpenGL->scissor(nativeScissor, false);
+                HyprlandCompat::scissor(nativeScissor, false);
                 require(reduce(half, &changes[index]) && reduce(fullHalf), "partial material reduction failed");
                 checkNativeScissor("material reduction");
                 if (mode == 2) require(rawPixels(half) == rawPixels(fullHalf), "partial material reduction differs");
-                Render::GL::g_pHyprOpenGL->scissor(nativeScissor, false);
+                HyprlandCompat::scissor(nativeScissor, false);
                 require(GlassRenderer::blurBackground(input, retained, sigma, caller, clean, half, &changes[index]), "partial blur failed");
                 checkNativeScissor("partial blur");
                 require(GlassRenderer::blurBackground(input, reference, sigma, caller, clean, fullHalf), "reference blur failed");
@@ -169,22 +173,27 @@ class CFailedAllocation : public Render::GL::CGLFramebuffer {
 void verifyTinyCorners(const SP<Render::IFramebuffer>& source) {
     CGlassDecoration* decoration = nullptr;
     for (const auto& window : Desktop::windowState()->windows()) {
-        if (window->m_class != "tiny-corner-test") continue;
-        for (const auto& item : window->m_windowDecorations)
+#if HYPRLIQUID_WINDOW_PRESENTATION
+        const auto appID = window->metadata().appID();
+#else
+        const auto appID = window->m_class;
+#endif
+        if (appID != "tiny-corner-test") continue;
+        for (const auto& item : HyprlandCompat::decorations(window))
             if (auto* glass = dynamic_cast<CGlassDecoration*>(item.get())) decoration = glass;
     }
     require(decoration, "tiny corner fixture missing");
     auto& renderer = *g_pHyprRenderer;
-    const auto saved = renderer.m_renderData;
+    const auto saved = HyprlandCompat::renderData();
     const auto monitor = saved.pMonitor.lock();
     const bool blend = glIsEnabled(GL_BLEND), scissor = glIsEnabled(GL_SCISSOR_TEST);
     GLint scissorBox[4]; GLfloat clear[4];
     glGetIntegerv(GL_SCISSOR_BOX, scissorBox);
     glGetFloatv(GL_COLOR_CLEAR_VALUE, clear);
     Hyprutils::Utils::CScopeGuard restore([&] {
-        renderer.m_renderData = saved;
-        renderer.bindFB(source);
-        g_pHyprOpenGL->scissor(CBox(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]), false);
+        HyprlandCompat::renderData() = saved;
+        HyprlandCompat::bindFB(source);
+        HyprlandCompat::scissor(CBox(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]), false);
         g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, scissor);
         g_pHyprOpenGL->setCapStatus(GL_BLEND, blend);
         glClearColor(clear[0], clear[1], clear[2], clear[3]);
@@ -200,13 +209,13 @@ void verifyTinyCorners(const SP<Render::IFramebuffer>& source) {
     std::vector<unsigned char> reference;
     for (const bool incomingBlend : {true, false}) {
         for (const auto& fb : {background, target}) {
-            renderer.bindFB(fb);
-            g_pHyprOpenGL->scissor(nullptr);
+            HyprlandCompat::bindFB(fb);
+            HyprlandCompat::scissor(nullptr);
             glClearColor(.3f, .5f, .7f, 1);
             glClear(GL_COLOR_BUFFER_BIT);
         }
-        renderer.bindFB(target);
-        renderer.m_renderData.damage = CRegion(CBox{{}, monitor->m_transformedSize});
+        HyprlandCompat::bindFB(target);
+        HyprlandCompat::renderData().damage = CRegion(CBox{{}, monitor->m_transformedSize});
         g_pHyprOpenGL->setCapStatus(GL_BLEND, incomingBlend);
         decoration->renderPass(monitor, 1.0f, scene, true);
         require(bool(glIsEnabled(GL_BLEND)) == incomingBlend, "tiny draw changed caller blend state");
@@ -216,11 +225,11 @@ void verifyTinyCorners(const SP<Render::IFramebuffer>& source) {
     }
 }
 
-class CSecurityPass : public IPassElement {
+class CSecurityPass : public HyprlandCompat::CPassElement {
   public:
     explicit CSecurityPass(bool tiny = false) : m_tiny(tiny) {}
     std::vector<UP<IPassElement>> draw() override {
-        const auto source = g_pHyprRenderer->m_renderData.currentFB;
+        const auto source = HyprlandCompat::renderData().currentFB;
         GLint read = 0, draw = 0, viewport[4]{};
         glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
         glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
@@ -349,8 +358,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     handle = h;
     if (std::string(__hyprland_api_get_hash()) != __hyprland_api_get_client_hash())
         throw std::runtime_error("Security test ABI mismatch");
-    command = HyprlandAPI::registerHyprCtlCommand(handle, {"hyprliquid-test:security", false,
-        [](eHyprCtlOutputFormat, std::string request) {
+    command = HyprlandCompat::registerCommand(handle, "hyprliquid-test:security",
+        [](std::string request) {
             if (request.ends_with(" lock")) {
                 g_pSessionLockManager->forceLock();
                 for (const auto& monitor : State::monitorState()->monitors()) g_pHyprRenderer->damageMonitor(monitor);
@@ -368,16 +377,24 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
                 }
             }
             return result;
-        }});
-    listener = Event::bus()->m_events.render.stage.listen([](eRenderStage stage) {
+        });
+    listener = Event::bus()->m_events.render.stage.listen(
+#if HYPRLIQUID_RENDER_CONTEXT
+        [](const Event::SRenderStageEvent& event) {
+        if (!event.context) return;
+        HyprlandCompat::CRenderScope scope(event.context->get());
+        const auto stage = event.stage;
+#else
+        [](eRenderStage stage) {
+#endif
         if (stage == RENDER_LAST_MOMENT && std::exchange(pending, false))
-            g_pHyprRenderer->addPassElement(makeUnique<CSecurityPass>(std::exchange(tinyCorners, false)));
+            HyprlandCompat::addPassElement(makeUnique<CSecurityPass>(std::exchange(tinyCorners, false)));
     });
     return {"hyprliquid-security-test", "Disposable security regression fixture", "hyprliquid", "1"};
 }
 APICALL EXPORT void PLUGIN_EXIT() {
     listener.reset();
-    g_pHyprRenderer->m_renderPass.removeAllOfType("CHyprliquidSecurityTest");
+    HyprlandCompat::renderPass().removeAllOfType("CHyprliquidSecurityTest");
     HyprlandAPI::unregisterHyprCtlCommand(handle, command);
     command.reset();
 }

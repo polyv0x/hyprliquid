@@ -1,6 +1,6 @@
 #pragma once
 
-#include <hyprland/src/render/pass/PassElement.hpp>
+#include "HyprlandRenderCompat.hpp"
 #include <hyprutils/math/Box.hpp>
 #include <hyprutils/math/Region.hpp>
 #include <hyprland/src/helpers/memory/Memory.hpp>
@@ -9,7 +9,7 @@
 
 class CGlassDecoration;
 
-class CGlassPassElement : public IPassElement {
+class CGlassPassElement : public HyprlandCompat::CPassElement {
   public:
     struct SGlassPassData {
         WP<CGlassDecoration> decoration;
@@ -33,6 +33,9 @@ class CGlassPassElement : public IPassElement {
 
   private:
     SGlassPassData m_data;
+#if HYPRLIQUID_WINDOW_PRESENTATION
+    std::optional<Render::SWindowRenderPresentation> m_presentation;
+#endif
     std::shared_ptr<CRenderBuffers::SSamples> m_cachedOutput;
     std::shared_ptr<CRenderBuffers::SSamples> m_pendingInput;
 };

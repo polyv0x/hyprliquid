@@ -11,7 +11,7 @@ CGlassLayerPassElement::CGlassLayerPassElement(const SGlassLayerPassData& data)
 
 std::vector<UP<IPassElement>> CGlassLayerPassElement::draw() {
     if (m_data.layerState && m_data.layerState->getLayerSurface())
-        m_data.layerState->sampleAndRedirect(g_pHyprRenderer->m_renderData.pMonitor.lock(), m_data.alpha);
+        m_data.layerState->sampleAndRedirect(HyprlandCompat::renderData().pMonitor.lock(), m_data.alpha);
 
     return {};
 }
@@ -24,7 +24,7 @@ std::optional<CBox> CGlassLayerPassElement::boundingBox() {
     if (!layerSurface)
         return std::nullopt;
 
-    const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+    const auto monitor = HyprlandCompat::renderData().pMonitor.lock();
     auto box = LayerGeometry::computeLayerBox(layerSurface, monitor);
     if (!box)
         return std::nullopt;

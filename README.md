@@ -12,10 +12,12 @@ https://github.com/user-attachments/assets/5d078786-1cad-4b21-af75-1c751e7cec3f
 
 ## Installation
 
-Targets **Hyprland 0.56.2**. The plugin must be built against the exact running
-Hyprland build and library ABI; matching the version number alone is not enough.
-Rebuild after updating Hyprland. Other Hyprland versions are not currently
-supported.
+Supports **Hyprland 0.56.2 and 0.57.2** from the same source. Build the plugin
+against the exact running Hyprland build and library ABI; matching the version
+number alone is not enough.
+Rebuild after updating Hyprland. Each installation needs its own matching binary.
+Other Hyprland versions are not currently tested. See the
+[compatibility checks and adapter design](docs/compatibility.md).
 
 Build requirements: Git, a C++23 compiler compatible with your Hyprland build,
 GNU Make, Python 3, pkg-config, and development files for Hyprland, pixman,
@@ -76,8 +78,9 @@ hyprctl plugin load "$(pwd)/hyprliquid.so"
 This creates `hyprliquid.so` with the shaders embedded; no external shader files
 are needed. Manual loading lasts for the current session. See the
 [loading guide](docs/guide.md#load) for startup loading and unloading.
-After updating Hyprland's headers, use `make -B -j4` to rebuild all objects before
-loading into the new session.
+After updating Hyprland's headers, run `make -j4` again before loading into the
+new session. The build detects compiler/header ABI changes and rebuilds the C++
+adapter; system-header dependencies are tracked as well.
 
 For distribution, `make release` creates a separate
 `build/release/<source-sha256>/` directory containing a stripped `hyprliquid.so`,

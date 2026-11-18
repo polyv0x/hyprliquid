@@ -6,6 +6,8 @@ CXXFLAGS += -fno-gnu-unique
 endif
 CPPFLAGS += $(shell pkg-config --cflags hyprland pixman-1 libdrm json-c)
 LDLIBS += $(shell pkg-config --libs hyprland json-c)
+# Capture these before target-specific Rust bridge include paths are added.
+HYPRLAND_CPPFLAGS := $(CPPFLAGS)
 
 TARGET = hyprliquid.so
 OBJCOPY ?= objcopy
@@ -37,14 +39,19 @@ test-release: $(TARGET)
 build:
 	mkdir -p $@
 
+build/hyprland-build.stamp: FORCE scripts/update-hyprland-build.py | build
+	@python3 scripts/update-hyprland-build.py $@ -- $(CXX) $(HYPRLAND_CPPFLAGS) $(CXXFLAGS)
+
+$(OBJECTS): build/hyprland-build.stamp
+
 build/%.o: src/%.cpp build/LiquidMaterialData.hpp | build
-	$(CXX) $(CPPFLAGS) -Ibuild $(CXXFLAGS) -MMD -MP -c $< -o $@
+	$(CXX) $(CPPFLAGS) -Ibuild $(CXXFLAGS) -MD -MP -c $< -o $@
 
 build/ShaderManager.o: build/ShaderSources.hpp
 
 # Cargo also tracks schema inputs. Forward the compiler and ABI flags used by
 # the host adapter to CXX's generated C++ translation unit.
-$(RUST_LIB): $(RUST_INPUTS) Makefile | build
+$(RUST_LIB): $(RUST_INPUTS) Makefile build/hyprland-build.stamp | build
 	CXX="$(CXX)" CXXFLAGS="$(CXXFLAGS)" CARGO_TARGET_DIR="$(RUST_TARGET_DIR)" $(CARGO) build --release --locked -p hyprliquid-bridge
 
 build/RustCore.o: $(RUST_LIB)
@@ -72,7 +79,7 @@ build/rust-differential-test: tests/rust-differential.cpp tests/reference/materi
 	$(CXX) $(CXXFLAGS) -UNDEBUG -Isrc -Ibuild $< $(RUST_LINK) -o $@
 
 # A separate archive keeps the deliberate panic entry point out of production.
-$(RUST_FAULT_LIB): $(RUST_INPUTS) Makefile | build
+$(RUST_FAULT_LIB): $(RUST_INPUTS) Makefile build/hyprland-build.stamp | build
 	CXX="$(CXX)" CXXFLAGS="$(CXXFLAGS)" CARGO_TARGET_DIR="$(RUST_FAULT_DIR)" $(CARGO) build --release --locked -p hyprliquid-bridge --features fault_injection
 
 build/rust-bridge-failure-test: tests/rust-bridge-failure.cpp $(RUST_FAULT_LIB) | build
@@ -89,22 +96,26 @@ test: build/security-test build/render-test build/rust-differential-test build/r
 	LIBGL_ALWAYS_SOFTWARE=1 ./build/render-test
 
 # Optional disposable-compositor instrumentation; never part of hyprliquid.so.
-build/capture-test.so: tests/capture.cpp tests/capture.exports src/PixelTransfer.hpp src/RenderSafety.hpp src/RustCore.hpp build/RustCore.o $(RUST_LIB) Makefile | build
+build/capture-test.so: tests/capture.cpp tests/native-style.hpp tests/capture.exports src/PixelTransfer.hpp src/RenderSafety.hpp src/RustCore.hpp src/HyprlandRenderCompat.hpp src/HyprlandCompat.hpp src/HyprlandIPCCompat.hpp build/RustCore.o $(RUST_LIB) Makefile build/hyprland-build.stamp | build
 # The fixture must not interpose its numerical helpers on comparison plugins.
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared $< $(RUST_LINK) $(RUST_HIDE) -Wl,--version-script=tests/capture.exports $(LDLIBS) -o $@
 
-build/security-test.so: tests/security-render.cpp $(TARGET) | build
+build/security-test.so: tests/security-render.cpp $(TARGET) src/HyprlandRenderCompat.hpp src/HyprlandCompat.hpp src/HyprlandIPCCompat.hpp build/hyprland-build.stamp | build
 	$(CXX) $(CPPFLAGS) -Ibuild $(CXXFLAGS) -shared $< -L. -l:$(TARGET) -Wl,-rpath,'$$ORIGIN/..' $(LDLIBS) -o $@
 
-build/decoration-lifecycle-test.so: tests/decoration-lifecycle.cpp tests/capture.exports | build
+build/decoration-lifecycle-test.so: tests/decoration-lifecycle.cpp tests/capture.exports src/HyprlandCompat.hpp src/HyprlandIPCCompat.hpp build/hyprland-build.stamp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared $< -Wl,--version-script=tests/capture.exports $(LDLIBS) -o $@
 
 # Optional bridge for unloading older installations with stale registrations.
-build/reload-guard.so: scripts/reload-guard.cpp tests/capture.exports | build
+build/reload-guard.so: scripts/reload-guard.cpp tests/capture.exports build/hyprland-build.stamp | build
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -shared $< -Wl,--version-script=tests/capture.exports $(LDLIBS) -ldl -o $@
 
 build/layer-test: tests/layer.cpp | build
 	$(CXX) $(CXXFLAGS) $< -o $@ $$(pkg-config --cflags --libs gtk4 gtk4-layer-shell-0)
+
+# Hyprland 0.57+ native workspace capture, including shell-layer exclusions.
+build/workspace-capture-test: tests/workspace-capture.cpp scripts/build-workspace-capture.py build/hyprland-build.stamp | build
+	CC="$(CC)" CXX="$(CXX)" CXXFLAGS="$(CXXFLAGS)" python3 scripts/build-workspace-capture.py $@
 
 build/xdg-shell-client.h: | build
 	wayland-scanner client-header $$(pkg-config --variable=pkgdatadir wayland-protocols)/stable/xdg-shell/xdg-shell.xml $@
@@ -126,4 +137,4 @@ demo: $(TARGET) build/demo-scene
 
 -include $(OBJECTS:.o=.d)
 
-.PHONY: all test demo release test-release
+.PHONY: all test demo release test-release FORCE

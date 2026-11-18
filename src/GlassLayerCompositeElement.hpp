@@ -2,12 +2,12 @@
 
 #include "GlassLayerSurface.hpp"
 
-#include <hyprland/src/render/pass/PassElement.hpp>
+#include "HyprlandRenderCompat.hpp"
 #include <hyprutils/math/Box.hpp>
 #include <hyprutils/math/Region.hpp>
 #include <memory>
 
-class CGlassLayerCompositeElement : public IPassElement {
+class CGlassLayerCompositeElement : public HyprlandCompat::CPassElement {
   public:
     struct SGlassLayerCompositeData {
         std::shared_ptr<CGlassLayerSurface> layerState;

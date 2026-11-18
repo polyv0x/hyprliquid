@@ -8,7 +8,11 @@
 #include <hyprland/src/state/MonitorState.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include "../src/HyprlandRenderCompat.hpp"
+#include "../src/HyprlandIPCCompat.hpp"
+#if HYPRLIQUID_WINDOW_PRESENTATION
+#include <hyprland/src/desktop/view/window/WindowMetadata.hpp>
+#endif
 #include <json-c/json.h>
 #include <chrono>
 #include <algorithm>
@@ -19,11 +23,12 @@
 #include "../src/PixelTransfer.hpp"
 #include "../src/RenderSafety.hpp"
 #include <hyprutils/utils/ScopeGuard.hpp>
+#include "native-style.hpp"
 
 namespace {
 HANDLE handle;
 Render::IHyprRenderer* renderer = nullptr;
-SP<SHyprCtlCommand> captureCommand, timingCommand, snapshotCommand;
+SP<HyprlandCompat::CCommand> captureCommand, timingCommand, snapshotCommand;
 Hyprutils::Signal::CHyprSignalListener listener;
 std::string pending;
 std::string pendingMonitor;
@@ -34,11 +39,44 @@ std::deque<double> times;
 std::chrono::steady_clock::time_point begun;
 uint64_t frames = 0;
 
-class CCapture : public IPassElement {
+auto& renderData() {
+#if HYPRLIQUID_RENDER_CONTEXT
+    return (HyprlandCompat::boundContext ? *HyprlandCompat::boundContext : renderer->context()).m_data;
+#else
+    return renderer->m_renderData;
+#endif
+}
+
+struct SCaptureMetadata {
+    CRegion damage, nativeDamage, finalDamage;
+};
+std::optional<SCaptureMetadata> presentedMetadata;
+
+SCaptureMetadata captureMetadata(bool presented = false) {
+    const auto& data = renderData();
+    SCaptureMetadata metadata{data.damage};
+    if (const auto monitor = data.pMonitor.lock()) {
+        // A normal monitor's presented outFB receives physical-output rotation
+        // after LAST_MOMENT. A currentFB read follows the active target instead.
+        const auto transform = presented || data.transformDamage
+            ? Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform))
+            : HYPRUTILS_TRANSFORM_NORMAL;
+        metadata.nativeDamage = data.damage.copy().transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y);
+        metadata.finalDamage = data.finalDamage.copy().transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y);
+    }
+    return metadata;
+}
+
+class CCapture : public HyprlandCompat::CPassElement {
   public:
-    explicit CCapture(std::string path, SP<Render::IFramebuffer> snapshot = nullptr) : path(std::move(path)), snapshot(std::move(snapshot)) {}
+    explicit CCapture(std::string path, SP<Render::IFramebuffer> snapshot = nullptr,
+                      std::optional<SCaptureMetadata> metadata = std::nullopt)
+        : path(std::move(path)), snapshot(std::move(snapshot)), savedMetadata(std::move(metadata)) {}
     std::vector<UP<IPassElement>> draw() override {
-        const auto fb = snapshot ? snapshot : renderer->m_renderData.currentFB;
+        const auto fb = snapshot ? snapshot : renderData().currentFB;
+        // POST and IPC snapshots have no live render context. Presented frames
+        // retain metadata from LAST_MOMENT; isolated snapshots have no damage.
+        const auto drawMetadata = snapshot ? savedMetadata.value_or(SCaptureMetadata{}) : captureMetadata();
         if (!fb || !RenderSafety::dimension(fb->m_size.x) || !RenderSafety::dimension(fb->m_size.y)) return {};
         auto* glFramebuffer = dynamic_cast<Render::GL::CGLFramebuffer*>(fb.get());
         if (!glFramebuffer) return {};
@@ -66,35 +104,27 @@ class CCapture : public IPassElement {
         add("width", width); add("height", height); add("drm_format", fb->m_drmFormat);
         add("framebuffer", glFramebuffer->getFBID());
         add("gl_type", type); add("gl_format", format); add("pixel_bytes", pixelBytes); add("gl_error", error);
+        add("gl_dither", glIsEnabled(GL_DITHER));
         auto* damage = json_object_new_array();
-        renderer->m_renderData.damage.forEachRect([&](const auto& r) {
+        drawMetadata.damage.forEachRect([&](const auto& r) {
             auto* rect = json_object_new_array();
             for (const auto v : {r.x1, r.y1, r.x2, r.y2}) json_object_array_add(rect, json_object_new_int(v));
             json_object_array_add(damage, rect);
         });
         json_object_object_add(metadata, "damage", damage);
         auto* nativeDamage = json_object_new_array();
-        const auto monitor = renderer->m_renderData.pMonitor.lock();
-        if (monitor) {
-            const auto transform = Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform));
-            renderer->m_renderData.damage.copy().transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y)
-                .intersect(CBox(0, 0, width, height)).forEachRect([&](const auto& r) {
+        drawMetadata.nativeDamage.copy().intersect(CBox(0, 0, width, height)).forEachRect([&](const auto& r) {
                     auto* rect = json_object_new_array();
                     for (const auto v : {r.x1, r.y1, r.x2, r.y2}) json_object_array_add(rect, json_object_new_int(v));
                     json_object_array_add(nativeDamage, rect);
                 });
-        }
         json_object_object_add(metadata, "native_damage", nativeDamage);
         auto* finalDamage = json_object_new_array();
-        if (monitor) {
-            const auto transform = Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform));
-            renderer->m_renderData.finalDamage.copy().transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y)
-                .intersect(CBox(0, 0, width, height)).forEachRect([&](const auto& r) {
+        drawMetadata.finalDamage.copy().intersect(CBox(0, 0, width, height)).forEachRect([&](const auto& r) {
                     auto* rect = json_object_new_array();
                     for (const auto v : {r.x1, r.y1, r.x2, r.y2}) json_object_array_add(rect, json_object_new_int(v));
                     json_object_array_add(finalDamage, rect);
                 });
-        }
         json_object_object_add(metadata, "final_damage", finalDamage);
         const auto color = fb->imageDescription();
         json_object_object_add(metadata, "color_description", json_object_new_string(color ? std::format("{}", color->value()).c_str() : "none"));
@@ -115,6 +145,7 @@ class CCapture : public IPassElement {
   private:
     std::string path;
     SP<Render::IFramebuffer> snapshot;
+    std::optional<SCaptureMetadata> savedMetadata;
 };
 }
 
@@ -129,24 +160,31 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
     const auto* owner = static_cast<const decltype(g_pHyprRenderer)*>(dlsym(RTLD_DEFAULT, "g_pHyprRenderer"));
     if (!owner || !*owner) throw std::runtime_error("Capture host renderer unavailable");
     renderer = owner->get();
-    snapshotCommand = HyprlandAPI::registerHyprCtlCommand(handle, {"hyprliquid-test:snapshot", false,
-        [](eHyprCtlOutputFormat, std::string request) {
+    NativeStyleTest::initialize(handle);
+    snapshotCommand = HyprlandCompat::registerCommand(handle, "hyprliquid-test:snapshot",
+        [](std::string request) {
             const auto first = request.find(' '), second = request.find(' ', first + 1);
             if (first == std::string::npos || second == std::string::npos) return std::string("missing class and path");
             const auto app = request.substr(first + 1, second - first - 1);
             const std::filesystem::path path = request.substr(second + 1);
             std::error_code error;
             if (!path.is_absolute() || !std::filesystem::is_directory(path.parent_path(), error)) return std::string("invalid artifact path");
-            for (const auto& window : Desktop::windowState()->windows()) if (window->m_class == app && window->m_isMapped) {
+            for (const auto& window : Desktop::windowState()->windows()) {
+#if HYPRLIQUID_WINDOW_PRESENTATION
+                const auto appID = window->metadata().appID();
+#else
+                const auto appID = window->m_class;
+#endif
+                if (appID != app || !HyprlandCompat::mapped(window)) continue;
                 auto snapshot = renderer->makeSnapshotFB(window);
                 if (!snapshot) return std::string("snapshot unavailable");
                 CCapture(path, snapshot).draw();
                 return std::string("ok");
             }
             return std::string("missing window");
-        }});
-    captureCommand = HyprlandAPI::registerHyprCtlCommand(handle, {"hyprliquid-test:capture", false,
-        [](eHyprCtlOutputFormat, std::string request) {
+        });
+    captureCommand = HyprlandCompat::registerCommand(handle, "hyprliquid-test:capture",
+        [](std::string request) {
             const auto at = request.find(' ');
             if (at == std::string::npos) return std::string("missing absolute artifact path");
             auto argument = request.substr(at + 1);
@@ -176,9 +214,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
                 monitor->scheduleFrame();
             }
             return std::string("ok");
-        }});
-    timingCommand = HyprlandAPI::registerHyprCtlCommand(handle, {"hyprliquid-test:timing", false,
-        [](eHyprCtlOutputFormat, std::string) {
+        });
+    timingCommand = HyprlandCompat::registerCommand(handle, "hyprliquid-test:timing",
+        [](std::string) {
             auto* result = json_object_new_object();
             auto* samples = json_object_new_array();
             for (double ms : times) json_object_array_add(samples, json_object_new_double(ms));
@@ -188,40 +226,68 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE h) {
             json_object_put(result);
             times.clear();
             return text;
-        }});
-    listener = Event::bus()->m_events.render.stage.listen([](eRenderStage stage) {
+        });
+    listener = Event::bus()->m_events.render.stage.listen(
+#if HYPRLIQUID_RENDER_CONTEXT
+        [](const Event::SRenderStageEvent& event) {
+        const auto stage = event.stage;
+        std::optional<HyprlandCompat::CRenderScope> scope;
+        if (event.context) scope.emplace(event.context->get());
+        if (stage == RENDER_LAST_MOMENT && !scope) return;
+#else
+        [](eRenderStage stage) {
+#endif
         // Cursor visibility is asynchronous and can change between identical
         // scene captures. Exclude it before this frame's passes are queued.
         if (stage == RENDER_PRE && !pending.empty()) renderer->setCursorHidden(true);
-        if (stage == RENDER_BEGIN) begun = std::chrono::steady_clock::now();
+        if (stage == RENDER_BEGIN) {
+            begun = std::chrono::steady_clock::now();
+            NativeStyleTest::beginFrame();
+        }
         if (stage == RENDER_POST) {
             if (presentedBuffer) {
-                CCapture(std::exchange(presentedPath, {}), presentedBuffer).draw();
+                CCapture(std::exchange(presentedPath, {}), presentedBuffer, std::move(presentedMetadata)).draw();
                 presentedBuffer.reset();
+                presentedMetadata.reset();
             }
             ++frames;
             times.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begun).count());
             if (times.size() > 1024) times.pop_front();
         }
         if (stage == RENDER_LAST_MOMENT && !pending.empty() &&
-            (pendingMonitor.empty() || renderer->m_renderData.pMonitor->m_name == pendingMonitor)) {
+            (pendingMonitor.empty() || renderData().pMonitor->m_name == pendingMonitor)) {
             if (pendingPresented) {
                 presentedPath = std::exchange(pending, {});
-                presentedBuffer = renderer->m_renderData.outFB;
-            } else renderer->addPassElement(makeUnique<CCapture>(std::exchange(pending, {})));
+                presentedBuffer = renderData().outFB;
+                presentedMetadata = captureMetadata(true);
+            } else {
+#if HYPRLIQUID_RENDER_CONTEXT
+                renderer->addPassElement(event.context->get(), makeUnique<CCapture>(std::exchange(pending, {})));
+#else
+                renderer->addPassElement(makeUnique<CCapture>(std::exchange(pending, {})));
+#endif
+            }
             pendingMonitor.clear();
         }
     });
     return {"hyprliquid-test-capture", "Internal framebuffer comparison fixture", "hyprliquid", "1"};
 }
 APICALL EXPORT void PLUGIN_EXIT() {
+    NativeStyleTest::destroy();
     listener.reset();
-    if (renderer) renderer->m_renderPass.removeAllOfType("CHyprliquidTestCapture");
+    if (renderer) {
+#if HYPRLIQUID_RENDER_CONTEXT
+        renderer->context().m_pass.removeAllOfType("CHyprliquidTestCapture");
+#else
+        renderer->m_renderPass.removeAllOfType("CHyprliquidTestCapture");
+#endif
+    }
     HyprlandAPI::unregisterHyprCtlCommand(handle, captureCommand);
     HyprlandAPI::unregisterHyprCtlCommand(handle, timingCommand);
     HyprlandAPI::unregisterHyprCtlCommand(handle, snapshotCommand);
     captureCommand.reset(); timingCommand.reset(); pending.clear(); pendingMonitor.clear(); times.clear();
     snapshotCommand.reset();
     presentedBuffer.reset(); presentedPath.clear(); pendingPresented = false;
+    presentedMetadata.reset();
     renderer = nullptr;
 }

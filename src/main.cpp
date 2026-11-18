@@ -46,11 +46,15 @@ static void clearLayerGlassOnClose(PHLLS layerSurface) {
 
 static void onNewWindow(PHLWINDOW window) {
     std::erase_if(g_pGlobalState->decorations, [](const auto& decoration) { return !decoration; });
-    if (std::ranges::any_of(window->m_windowDecorations,
+    if (std::ranges::any_of(HyprlandCompat::decorations(window),
                             [](const auto& decoration) { return decoration->getDisplayName() == "Hyprliquid"; }))
         return;
 
+#if HYPRLIQUID_WINDOW_PRESENTATION
+    auto decoration = makeShared<CGlassDecoration>(window);
+#else
     auto decoration = makeUnique<CGlassDecoration>(window);
+#endif
     const auto* glass = decoration.get();
     g_pGlobalState->decorations.emplace_back(decoration);
     decoration->m_self = decoration;
@@ -62,7 +66,15 @@ static void onNewWindow(PHLWINDOW window) {
     // strong outward refraction pulls the shadow's cutout edge into the pane.
     // Moving our owned pointer preserves every other decoration's order and
     // leaves the native shadow/border passes and their clipping intact.
+#if HYPRLIQUID_WINDOW_PRESENTATION
+    // The getter exposes a const view of the presentation's mutable storage.
+    // Keep this mutation synchronous: no allocation or compositor callback may
+    // occur while the span is in use. Hyprland still draws BOTTOM in this order.
+    const auto view = window->presentation().decorations();
+    auto decorations = std::span(const_cast<SP<IHyprWindowDecoration>*>(view.data()), view.size());
+#else
     auto& decorations = window->m_windowDecorations;
+#endif
     const auto inserted = std::ranges::find_if(decorations, [glass](const auto& item) { return item.get() == glass; });
     if (inserted != decorations.end())
         std::rotate(decorations.begin(), inserted, std::next(inserted));
@@ -83,9 +95,26 @@ static CGlassDecoration* glassDecorationFor(const PHLWINDOW& window) {
     return nullptr;
 }
 
-using windowRoundingFn = float (*)(Desktop::View::CWindow*);
-static float hkWindowRounding(Desktop::View::CWindow* window) {
-    const float radius = reinterpret_cast<windowRoundingFn>(g_pGlobalState->windowRoundingHook->m_original)(window);
+#if HYPRLIQUID_WINDOW_PRESENTATION
+using RoundingOwner = Desktop::View::CWindowPresentation;
+#else
+using RoundingOwner = Desktop::View::CWindow;
+#endif
+using windowRoundingFn = float (*)(RoundingOwner*);
+static float hkWindowRounding(RoundingOwner* owner) {
+    const float radius = reinterpret_cast<windowRoundingFn>(g_pGlobalState->windowRoundingHook->m_original)(owner);
+#if HYPRLIQUID_WINDOW_PRESENTATION
+    PHLWINDOW window;
+    for (const auto& decoration : g_pGlobalState->decorations) {
+        if (!decoration) continue;
+        const auto candidate = decoration->getOwner();
+        if (candidate && &candidate->presentation() == owner) { window = candidate; break; }
+    }
+    if (!window) return radius;
+#else
+    const auto window = owner->m_self.lock();
+    if (!window) return radius;
+#endif
     const auto size = window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
     const float limit = static_cast<float>(std::max(0.0, std::min(size.x, size.y) * 0.5));
     if (radius <= limit)
@@ -108,10 +137,10 @@ static void drawGlassForFullscreenWindow() {
         return;
 
     // screenshare/export and snapshots render standalone — no scene behind to sample
-    if (g_pHyprRenderer->m_renderData.projectionType != Render::RPT_MONITOR || g_pHyprRenderer->m_bRenderingSnapshot)
+    if (HyprlandCompat::renderData().projectionType != Render::RPT_MONITOR || HyprlandCompat::renderingSnapshot())
         return;
 
-    const auto window = g_pHyprRenderer->m_renderData.currentWindow.lock();
+    const auto window = HyprlandCompat::renderData().currentWindow.lock();
     if (!window)
         return;
 
@@ -119,7 +148,7 @@ static void drawGlassForFullscreenWindow() {
     if (Fullscreen::controller()->getFullscreenModes(window).internal != Fullscreen::FSMODE_FULLSCREEN)
         return;
 
-    const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+    const auto monitor = HyprlandCompat::renderData().pMonitor.lock();
     if (!monitor)
         return;
 
@@ -149,22 +178,25 @@ using damageSurfaceFn = void (*)(Render::IHyprRenderer*, SP<CWLSurfaceResource>,
 // Client commits are the only signal that content below a glassed layer changed
 // (e.g. a playing video) — the scene-generation cache only sees window events.
 static void hkDamageSurface(Render::IHyprRenderer* thisptr, SP<CWLSurfaceResource> surface, double x, double y, double scale) {
+    const auto wlSurface = surface ? Desktop::View::CWLSurface::fromResource(surface) : nullptr;
+    // Snapshot once before native rendering consumes GPU-buffer damage. The
+    // compatibility helper preserves the pending regions for the native call.
+    const auto committedDamage = wlSurface ? HyprlandCompat::surfaceDamage(wlSurface) : CRegion{};
     ((damageSurfaceFn)g_pGlobalState->damageSurfaceHook->m_original)(thisptr, surface, x, y, scale);
 
     if (!g_pGlobalState || !surface)
         return;
 
-    const auto wlSurface = Desktop::View::CWLSurface::fromResource(surface);
     if (!wlSurface) {
         // Unknown surface ownership cannot prove independence.
         WindowScene::invalidateAll();
-    } else if (!wlSurface->computeDamage().empty()) {
+    } else if (!committedDamage.empty()) {
         const auto view = wlSurface->view();
         if (const auto layer = Desktop::View::CLayerSurface::fromView(view)) {
             // Top/overlay bars and their playback animations are above glass.
             if (layer->m_layer < 2) WindowScene::invalidateBackground(layer->m_monitor.lock());
         } else if (const auto window = Desktop::View::CWindow::fromView(view)) {
-            auto damage = wlSurface->computeDamage();
+            auto damage = committedDamage.copy();
             if (scale != 1.0) damage.scale(scale);
             WindowScene::damageWindow(window, damage.translate({x, y}));
         } else {
@@ -173,7 +205,7 @@ static void hkDamageSurface(Render::IHyprRenderer* thisptr, SP<CWLSurfaceResourc
             bool known = false;
             for (const auto& window : Desktop::viewState()->windows()) {
                 if (surfaceInTree(surface, window->resource())) {
-                    auto damage = wlSurface->computeDamage();
+                    auto damage = committedDamage.copy();
                     if (scale != 1.0) damage.scale(scale);
                     WindowScene::damageWindow(window, damage.translate({x, y}));
                     known = true;
@@ -205,7 +237,7 @@ static void hkDamageSurface(Render::IHyprRenderer* thisptr, SP<CWLSurfaceResourc
         return;
 
     // same region Hyprland damaged: commits without damage change nothing behind us
-    CRegion damage = wlSurface->computeDamage();
+    CRegion damage = committedDamage.copy();
     if (damage.empty())
         return;
     if (scale != 1.0)
@@ -215,7 +247,7 @@ static void hkDamageSurface(Render::IHyprRenderer* thisptr, SP<CWLSurfaceResourc
 
     for (const auto& [_, state] : g_pGlobalState->layerSurfaces) {
         const auto layer = state->getLayerSurface();
-        if (!layer || !layer->m_mapped)
+        if (!layer || !HyprlandCompat::mapped(layer))
             continue;
 
         if (!state->liveResampleEnabled())
@@ -355,10 +387,36 @@ struct SLayerBlurSuppression {
     }
 };
 
+#if HYPRLIQUID_RENDER_CONTEXT
+using renderLayerFn = void (*)(Render::IHyprRenderer*, Render::CRenderContext&, PHLLS, PHLMONITOR,
+                               const Time::steady_tp&, bool, bool, bool);
+static void hkRenderLayer(Render::IHyprRenderer* thisptr, Render::CRenderContext& ctx, PHLLS layerSurface,
+                           PHLMONITOR monitor, const Time::steady_tp& now, bool popups, bool lockscreen, bool workspaceScene) {
+    HyprlandCompat::CRenderScope scope(ctx);
+    const auto original = [&] {
+        reinterpret_cast<renderLayerFn>(g_pGlobalState->renderLayerHook->m_original)(
+            thisptr, ctx, layerSurface, monitor, now, popups, lockscreen, workspaceScene);
+    };
+    // Workspace captures have isolated resources and may exclude windows that
+    // are present in the desktop's cached backdrop. Leave their shell rendering
+    // native, without reading or modifying the shared desktop layer cache.
+    if (ctx.m_renderingCapture || ctx.readOnlyEffects()) {
+        original();
+        return;
+    }
+    const bool visible = layerSurface && layerSurface->mapped() &&
+        (workspaceScene || layerSurface->acceptsInput()) && layerSurface->alphaNonZero() &&
+        ctx.shouldRenderContent(layerSurface->m_ruleApplicator->noScreenShare().valueOrDefault());
+#else
 using renderLayerFn = void (*)(Render::IHyprRenderer*, PHLLS, PHLMONITOR, const Time::steady_tp&, bool, bool);
-
 static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PHLMONITOR monitor,
                            const Time::steady_tp& now, bool popups, bool lockscreen) {
+    const auto original = [&] {
+        reinterpret_cast<renderLayerFn>(g_pGlobalState->renderLayerHook->m_original)(
+            thisptr, layerSurface, monitor, now, popups, lockscreen);
+    };
+    const bool visible = layerSurface && layerSurface->visible();
+#endif
     const auto& config = g_pGlobalState->config;
 
     // Never reuse a desktop backdrop above the session lock. Also honour native
@@ -366,7 +424,7 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
     if (lockscreen || g_pSessionLockManager->isSessionLocked()) {
         if (layerSurface)
             g_pGlobalState->layerSurfaces.erase(layerSurface.get());
-        ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+        original();
         return;
     }
 
@@ -374,8 +432,8 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
     // pipeline while that snapshot is being captured: the snapshot framebuffer
     // starts transparent/black, so sampling it as a background can bake a black
     // rectangle into the fade-out snapshot.
-    if (!layerSurface || !layerSurface->visible() || g_pHyprRenderer->m_bRenderingSnapshot) {
-        ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+    if (!visible || HyprlandCompat::renderingSnapshot()) {
+        original();
         return;
     }
 
@@ -398,14 +456,14 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
             it = layerStates.emplace(rawPtr, std::make_shared<CGlassLayerSurface>(layerSurface)).first;
         }
 
-        if (!layerSurface->m_mapped) {
-            ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+        if (!HyprlandCompat::mapped(layerSurface)) {
+            original();
             return;
         }
 
         float alpha = layerSurface->alpha().getTotal();
         if (alpha < 0.001f) {
-            ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+            original();
             return;
         }
 
@@ -413,13 +471,13 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
         // explicit empty region): render as Hyprland normally would
         const auto maskSource = it->second->resolveMaskSource();
         if (maskSource == CGlassLayerSurface::EMaskSource::NONE) {
-            ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+            original();
             return;
         }
 
         // Pre-surface: sample+blur background, redirect currentFB → temp FBO
         CGlassLayerPassElement::SGlassLayerPassData preData{it->second, alpha};
-        g_pHyprRenderer->m_renderPass.add(makeUnique<CGlassLayerPassElement>(preData));
+        HyprlandCompat::addPassElement(makeUnique<CGlassLayerPassElement>(preData));
 
         const bool manageBlur = config.layersManageBlur && **config.layersManageBlur;
         std::optional<SLayerBlurSuppression> blurSuppression;
@@ -431,19 +489,19 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
         // Original renderLayer: surface renders into the redirected temp FBO.
         // The suppression must wrap only this call: shouldBlur() runs inside it,
         // and the composite element must later see the real protocol state.
-        ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+        original();
         blurSuppression.reset();
 
         // Post-surface: restore currentFB, apply glass masked by temp FBO alpha, blit surface
         CGlassLayerCompositeElement::SGlassLayerCompositeData postData{it->second, alpha, maskSource};
-        g_pHyprRenderer->m_renderPass.add(makeUnique<CGlassLayerCompositeElement>(postData));
+        HyprlandCompat::addPassElement(makeUnique<CGlassLayerCompositeElement>(postData));
 
         it->second->damageIfMoved();
         return;
     }
 
     // Call the original renderLayer
-    ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+    original();
 }
 
 
@@ -469,7 +527,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     // Internal render hooks require the exact Hyprland build and library ABI.
     if (HASH != CLIENT_HASH)
-        throw std::runtime_error(std::format("hyprliquid: rebuild for the running Hyprland (plugin {}, running {})", HASH, CLIENT_HASH));
+        throw std::runtime_error(std::format("hyprliquid: rebuild for the running Hyprland (plugin {}, running {})", CLIENT_HASH, HASH));
 
     g_pGlobalState = std::make_unique<SGlobalState>();
 
@@ -514,12 +572,20 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         }));
 
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.render.stage.listen(
+#if HYPRLIQUID_RENDER_CONTEXT
+        [](const Event::SRenderStageEvent& event) {
+            std::optional<HyprlandCompat::CRenderScope> scope;
+            if (event.context) scope.emplace(event.context->get());
+            const auto stage = event.stage;
+            if (stage == RENDER_PRE_WINDOW && event.context)
+#else
         [](eRenderStage stage) {
             if (stage == RENDER_PRE_WINDOW)
+#endif
                 drawGlassForFullscreenWindow();
             if (stage == RENDER_BEGIN) {
                 g_pGlobalState->hoverAngles.refresh(false);
-                g_pGlobalState->renderBuffers.beginFrame(g_pHyprRenderer->m_renderData.pMonitor.lock());
+                g_pGlobalState->renderBuffers.beginFrame(HyprlandCompat::renderData().pMonitor.lock());
             }
             if (stage == RENDER_POST)
                 g_pGlobalState->renderBuffers.endFrame();
@@ -569,12 +635,12 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     ensureShadowsEnabled();
 
     for (auto& window : Desktop::viewState()->windows()) {
-        if (window->isHidden() || !window->m_isMapped)
+        if (window->isHidden() || !HyprlandCompat::mapped(window))
             continue;
         onNewWindow(window);
     }
 
-    if (const auto address = rendererSymbol(PHANDLE, "rounding", "CWindow::rounding()")) {
+    if (const auto address = rendererSymbol(PHANDLE, "rounding")) {
         g_pGlobalState->windowRoundingHook = HyprlandAPI::createFunctionHook(PHANDLE, address, (void*)hkWindowRounding);
         if (g_pGlobalState->windowRoundingHook && !g_pGlobalState->windowRoundingHook->hook()) {
             HyprlandAPI::removeFunctionHook(PHANDLE, g_pGlobalState->windowRoundingHook);
@@ -589,7 +655,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         });
 
     // Hook renderLayer for layer surface glass support
-    if (const auto address = rendererSymbol(PHANDLE, "renderLayer", "IHyprRenderer::renderLayer(")) {
+    if (const auto address = rendererSymbol(PHANDLE, "renderLayer")) {
         g_pGlobalState->renderLayerHook = HyprlandAPI::createFunctionHook(PHANDLE, address, (void*)hkRenderLayer);
         if (g_pGlobalState->renderLayerHook && !g_pGlobalState->renderLayerHook->hook()) {
             HyprlandAPI::removeFunctionHook(PHANDLE, g_pGlobalState->renderLayerHook);
@@ -606,7 +672,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     }
 
     // Hook damageSurface for live layer re-render on background content change
-    if (const auto address = rendererSymbol(PHANDLE, "damageSurface", "IHyprRenderer::damageSurface(")) {
+    if (const auto address = rendererSymbol(PHANDLE, "damageSurface")) {
         g_pGlobalState->damageSurfaceHook = HyprlandAPI::createFunctionHook(PHANDLE, address, (void*)hkDamageSurface);
         if (g_pGlobalState->damageSurfaceHook && !g_pGlobalState->damageSurfaceHook->hook()) {
             HyprlandAPI::removeFunctionHook(PHANDLE, g_pGlobalState->damageSurfaceHook);
@@ -651,9 +717,9 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_pGlobalState->listeners.clear();
     g_pGlobalState->hoverAngles.clear();
 
-    g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassPassElement");
-    g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassLayerPassElement");
-    g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassLayerCompositeElement");
+    HyprlandCompat::renderPass().removeAllOfType("CGlassPassElement");
+    HyprlandCompat::renderPass().removeAllOfType("CGlassLayerPassElement");
+    HyprlandCompat::renderPass().removeAllOfType("CGlassLayerCompositeElement");
     WindowScene::destroy();
 
     if (g_pGlobalState->windowRoundingHook) {
@@ -668,9 +734,13 @@ APICALL EXPORT void PLUGIN_EXIT() {
             // Hyprland defers removal while the owner is hidden or unmapped.
             // Its queued deleter must run before this library is unloaded.
             if (window && decoration) {
+#if HYPRLIQUID_WINDOW_PRESENTATION
+                window->presentation().updateDecorations();
+#else
                 g_pDecorationPositioner->uncacheDecoration(deco);
                 std::erase(window->m_decosToRemove, deco);
                 std::erase_if(window->m_windowDecorations, [deco](const auto& item) { return item.get() == deco; });
+#endif
             }
         }
     }

@@ -12,7 +12,7 @@ CGlassLayerCompositeElement::CGlassLayerCompositeElement(const SGlassLayerCompos
 std::vector<UP<IPassElement>> CGlassLayerCompositeElement::draw() {
     // Restoration is required even if the client disappeared after redirection.
     if (m_data.layerState)
-        m_data.layerState->compositeAndRestore(g_pHyprRenderer->m_renderData.pMonitor.lock(), m_data.alpha, m_data.maskSource);
+        m_data.layerState->compositeAndRestore(HyprlandCompat::renderData().pMonitor.lock(), m_data.alpha, m_data.maskSource);
 
     return {};
 }
@@ -25,7 +25,7 @@ std::optional<CBox> CGlassLayerCompositeElement::boundingBox() {
     if (!layerSurface)
         return std::nullopt;
 
-    const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+    const auto monitor = HyprlandCompat::renderData().pMonitor.lock();
     auto box = LayerGeometry::computeLayerBox(layerSurface, monitor);
     if (!box)
         return std::nullopt;

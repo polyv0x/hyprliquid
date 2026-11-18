@@ -5,24 +5,28 @@
 
 CGlassPassElement::CGlassPassElement(const SGlassPassData& data)
     : m_data(data) {
+#if HYPRLIQUID_WINDOW_PRESENTATION
+    if (data.decoration) if (const auto window = data.decoration->getOwner())
+        m_presentation = HyprlandCompat::windowPresentation(window);
+#endif
     if (!data.decoration || data.sceneBase || !data.scene || data.scene->failed)
         return;
     const auto window = data.decoration->getOwner();
-    const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+    const auto monitor = HyprlandCompat::renderData().pMonitor.lock();
     if (!window || !monitor) return;
     const bool independent = data.scene->independentWindow == window;
     if ((data.scene->regional && !independent) || (!data.scene->cacheInputs && !independent)) return;
     m_cachedOutput = g_pGlobalState->renderBuffers.retainOutput(
         std::format("monitor:{}:window:{}", monitor->m_id, reinterpret_cast<uintptr_t>(window.get())),
-        data.scene->inputKey, data.scene->previousInputSerial, g_pHyprRenderer->m_renderData.currentFB);
+        data.scene->inputKey, data.scene->previousInputSerial, HyprlandCompat::renderData().currentFB);
     if (!m_cachedOutput) {
         // Live-blur damage expansion follows the native blur radius, not our
         // complete input crop. A cache miss (including a subsurface layout
         // change or eviction) must repaint that crop before retaining it.
         if (auto box = WindowGeometry::computeWindowBox(window, monitor)) {
             box->expand(data.decoration->samplingPadding(monitor));
-            g_pHyprRenderer->m_renderData.damage.add(*box);
-            g_pHyprRenderer->m_renderData.finalDamage.add(*box);
+            HyprlandCompat::renderData().damage.add(*box);
+            HyprlandCompat::renderData().finalDamage.add(*box);
         }
         return;
     }
@@ -45,10 +49,15 @@ void CGlassPassElement::discard() {
 }
 
 std::vector<UP<IPassElement>> CGlassPassElement::draw() {
+#if HYPRLIQUID_WINDOW_PRESENTATION
+    std::optional<HyprlandCompat::CPresentationScope> presentation;
+    if (m_presentation && m_data.decoration)
+        presentation.emplace(m_data.decoration->getOwner(), *m_presentation);
+#endif
     if (m_cachedOutput && m_data.decoration && m_data.decoration->getOwner()) {
-        auto& data = g_pHyprRenderer->m_renderData;
+        auto& data = HyprlandCompat::renderData();
         const auto monitor = data.pMonitor.lock();
-        const auto transform = Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform));
+        const auto transform = HyprlandCompat::targetTransform(monitor);
         CRegion damage;
         data.damage.forEachRect([&](const auto& r) {
             CBox box(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
@@ -64,7 +73,7 @@ std::vector<UP<IPassElement>> CGlassPassElement::draw() {
     }
     m_pendingInput.reset();
     if (m_data.decoration.valid())
-        m_data.decoration->renderPass(g_pHyprRenderer->m_renderData.pMonitor.lock(), m_data.alpha,
+        m_data.decoration->renderPass(HyprlandCompat::renderData().pMonitor.lock(), m_data.alpha,
                                      m_data.scene, m_data.sceneBase);
     m_cachedOutput.reset();
     return {};
@@ -77,8 +86,12 @@ std::optional<CBox> CGlassPassElement::boundingBox() {
     auto window = m_data.decoration->getOwner();
     if (!window)
         return std::nullopt;
+#if HYPRLIQUID_WINDOW_PRESENTATION
+    std::optional<HyprlandCompat::CPresentationScope> presentation;
+    if (m_presentation) presentation.emplace(window, *m_presentation);
+#endif
 
-    const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+    const auto monitor = HyprlandCompat::renderData().pMonitor.lock();
     auto box = WindowGeometry::computeWindowBox(window, monitor);
     if (!box)
         return std::nullopt;

@@ -3,6 +3,7 @@
 #include "GlassDecoration.hpp"
 #include "Globals.hpp"
 #include "RendererSymbols.hpp"
+#include "NativeDecorationState.hpp"
 #include "WindowGeometry.hpp"
 
 #include <GLES3/gl32.h>
@@ -13,6 +14,10 @@
 #include <hyprland/src/managers/SessionLockManager.hpp>
 #include <hyprland/src/protocols/core/Compositor.hpp>
 #include <hyprland/src/render/pass/Pass.hpp>
+#include <hyprland/src/config/ConfigValue.hpp>
+#if HYPRLIQUID_RENDER_CONTEXT
+#include <hyprland/src/render/scene/SceneSelection.hpp>
+#endif
 #include <hyprutils/utils/ScopeGuard.hpp>
 #include <algorithm>
 #include <bit>
@@ -20,9 +25,17 @@
 
 namespace WindowScene {
 namespace {
+#if HYPRLIQUID_RENDER_CONTEXT
+using RenderWindow = void (*)(Render::IHyprRenderer*, Render::CRenderContext&, PHLWINDOW, PHLMONITOR,
+                              const Render::SWindowRenderPresentation&, const Time::steady_tp&,
+                              bool, Render::eRenderPassMode, bool, bool);
+using RenderWorkspace = void (*)(Render::IHyprRenderer*, Render::CRenderContext&, PHLMONITOR, PHLWORKSPACE,
+                                 const Time::steady_tp&, Render::eSceneMode);
+#else
 using RenderWindow = void (*)(Render::IHyprRenderer*, PHLWINDOW, PHLMONITOR, const Time::steady_tp&,
                               bool, Render::eRenderPassMode, bool, bool);
 using RenderWorkspace = void (*)(Render::IHyprRenderer*, PHLMONITOR, PHLWORKSPACE, const Time::steady_tp&);
+#endif
 using Hyprutils::Utils::CScopeGuard;
 
 CFunctionHook* workspaceHook = nullptr;
@@ -81,7 +94,7 @@ bool surfacesInsideWindow(PHLWINDOW window) {
     return contained;
 }
 
-class CWindowScenePassElement : public IPassElement {
+class CWindowScenePassElement : public HyprlandCompat::CPassElement {
   public:
     explicit CWindowScenePassElement(std::shared_ptr<SWindowScene> scene) : m_scene(std::move(scene)) {}
     Render::CRenderPass pass;
@@ -91,14 +104,14 @@ class CWindowScenePassElement : public IPassElement {
 
     std::vector<UP<IPassElement>> draw() override {
         auto& renderer = *g_pHyprRenderer;
-        const auto savedData = renderer.m_renderData;
+        const auto savedData = HyprlandCompat::renderData();
         const auto monitor = savedData.pMonitor.lock();
         const auto source = savedData.currentFB;
         if (!monitor || !source || !RenderSafety::dimension(source->m_size.x) || !RenderSafety::dimension(source->m_size.y))
             return {};
 
-        const bool feedback = renderer.m_bBlockSurfaceFeedback;
-        const bool snapshot = renderer.m_bRenderingSnapshot;
+        const bool feedback = HyprlandCompat::blockSurfaceFeedback();
+        const bool snapshot = HyprlandCompat::renderingSnapshot();
         const bool blur = monitor->m_blurFBShouldRender;
         GLint viewport[4];
         glGetIntegerv(GL_VIEWPORT, viewport);
@@ -106,13 +119,13 @@ class CWindowScenePassElement : public IPassElement {
         glGetIntegerv(GL_SCISSOR_BOX, scissorBox);
         const bool scissor = glIsEnabled(GL_SCISSOR_TEST);
         CScopeGuard restore([&] {
-            renderer.m_renderData = savedData;
-            renderer.m_bBlockSurfaceFeedback = feedback;
-            renderer.m_bRenderingSnapshot = snapshot;
+            HyprlandCompat::renderData() = savedData;
+            HyprlandCompat::blockSurfaceFeedback() = feedback;
+            HyprlandCompat::renderingSnapshot() = snapshot;
             monitor->m_blurFBShouldRender = blur;
-            renderer.bindFB(source);
+            HyprlandCompat::bindFB(source);
             renderer.setViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-            g_pHyprOpenGL->scissor(CBox(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]), false);
+            HyprlandCompat::scissor(CBox(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]), false);
             g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, scissor);
         });
 
@@ -123,7 +136,7 @@ class CWindowScenePassElement : public IPassElement {
             glBindFramebuffer(GL_READ_FRAMEBUFFER, fbId(from));
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbId(to));
             if (region) {
-                const auto transform = Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform));
+                const auto transform = HyprlandCompat::targetTransform(monitor);
                 region->copy().transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y).forEachRect([&](const auto& r) {
                     glBlitFramebuffer(r.x1, r.y1, r.x2, r.y2, r.x1, r.y1, r.x2, r.y2, GL_COLOR_BUFFER_BIT, GL_NEAREST);
                 });
@@ -140,9 +153,9 @@ class CWindowScenePassElement : public IPassElement {
         }
 
         if (!reuse && !reuseScene) {
-            renderer.m_bBlockSurfaceFeedback = true;
-            renderer.m_bRenderingSnapshot = true;
-            renderer.m_renderData.noSimplify = true;
+            HyprlandCompat::blockSurfaceFeedback() = true;
+            HyprlandCompat::renderingSnapshot() = true;
+            HyprlandCompat::renderData().noSimplify = true;
             // Work in a native-sized scratch image, then commit only the
             // affected core. The extra border rebuilds all undisplaced Liquid
             // lookups without reading the retained scene's later clients as an
@@ -170,11 +183,11 @@ class CWindowScenePassElement : public IPassElement {
                         if (!hit) {
                             cached->sharp->setImageDescription(source->imageDescription());
                             copy(m_scene->background, cached->sharp);
-                            renderer.bindFB(cached->sharp);
-                            basePass.render(CRegion(CBox{{}, monitor->m_transformedSize}));
+                            HyprlandCompat::bindFB(cached->sharp);
+                            HyprlandCompat::drawPass(basePass, CRegion(CBox{{}, monitor->m_transformedSize}));
                             cached->contentValid = !m_scene->failed;
                         } else for (const auto& ref : m_scene->windows)
-                            if (!m_scene->cacheTiledBase || !ref->m_isFloating)
+                            if (!m_scene->cacheTiledBase || !HyprlandCompat::floating(ref))
                                 if (auto* decoration = decorationFor(ref.lock())) decoration->reusedSceneBase();
                         copy(cached->sharp, image, repair ? &*repair : nullptr);
                         baseCopied = true;
@@ -189,15 +202,15 @@ class CWindowScenePassElement : public IPassElement {
                     const bool allBase = m_scene->cacheBase, tiledBase = m_scene->cacheTiledBase;
                     m_scene->cacheBase = m_scene->cacheTiledBase = false;
                     CScopeGuard restoreBase([&] { m_scene->cacheBase = allBase; m_scene->cacheTiledBase = tiledBase; });
-                    renderer.bindFB(image);
+                    HyprlandCompat::bindFB(image);
                     m_scene->repair = repair;
-                    basePass.render(repair ? *repair : CRegion(CBox{{}, monitor->m_transformedSize}));
+                    HyprlandCompat::drawPass(basePass, repair ? *repair : CRegion(CBox{{}, monitor->m_transformedSize}));
                     m_scene->repair.reset();
                 }
             }
-            renderer.bindFB(image);
+            HyprlandCompat::bindFB(image);
             m_scene->repair = repair;
-            pass.render(repair ? *repair : CRegion(CBox{{}, monitor->m_transformedSize}));
+            HyprlandCompat::drawPass(pass, repair ? *repair : CRegion(CBox{{}, monitor->m_transformedSize}));
             m_scene->repair.reset();
             if (repair) copy(image, m_scene->image, &m_scene->auxiliaryDamage);
             if (m_scene->cache) m_scene->cache->valid = !m_scene->failed;
@@ -213,7 +226,7 @@ class CWindowScenePassElement : public IPassElement {
             glBindFramebuffer(GL_READ_FRAMEBUFFER, fbId(m_scene->image));
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbId(source));
             auto damage = savedData.damage.copy().intersect(CBox{{}, monitor->m_transformedSize});
-            const auto transform = Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform));
+            const auto transform = HyprlandCompat::targetTransform(monitor);
             damage.forEachRect([&](const auto& rect) {
                 CBox box{rect.x1, rect.y1, rect.x2 - rect.x1, rect.y2 - rect.y1};
                 box.transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y);
@@ -231,7 +244,7 @@ class CWindowScenePassElement : public IPassElement {
     bool needsPrecomputeBlur() override { return false; }
     bool disableSimplification() override { return !reuse; }
     std::optional<CBox> boundingBox() override {
-        const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+        const auto monitor = HyprlandCompat::renderData().pMonitor.lock();
         if (!monitor || !std::isfinite(monitor->m_scale) || monitor->m_scale <= 0)
             return std::nullopt;
         return CBox{{}, monitor->m_transformedSize / monitor->m_scale};
@@ -244,35 +257,35 @@ class CWindowScenePassElement : public IPassElement {
 };
 
 std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWORKSPACE workspace) {
-    if (!monitor || !workspace || renderer->m_bRenderingSnapshot || g_pSessionLockManager->isSessionLocked() ||
-        renderer->m_renderData.projectionType != Render::RPT_MONITOR)
+    if (!monitor || !workspace || HyprlandCompat::renderingSnapshot() || g_pSessionLockManager->isSessionLocked() ||
+        HyprlandCompat::renderData().projectionType != Render::RPT_MONITOR)
         return nullptr;
 
     auto scene = std::make_shared<SWindowScene>();
     std::vector<CBox> tiledBoxes;
     bool hasGlass = false;
-    bool local = !workspace->m_isSpecialWorkspace && !monitor->m_activeSpecialWorkspace &&
+    bool local = !HyprlandCompat::special(workspace) && !monitor->m_activeSpecialWorkspace &&
         !workspace->m_renderOffset->isBeingAnimated() && workspace->m_alpha->value() == 1.0f;
     bool cacheBackground = local;
     bool disjoint = true, legacy = true, containedSurfaces = true, allGlass = true;
     std::vector<CBox> currentBoxes;
     for (const auto& window : Desktop::windowState()->windows()) {
-        if (!window->m_isMapped || window->isHidden() || !renderer->shouldRenderWindow(window, monitor))
+        if (!HyprlandCompat::mapped(window) || window->isHidden() || !renderer->shouldRenderWindow(window, monitor))
             continue;
-        const bool ignoreSpecial = window->m_monitorMovedFrom != -1 && window->m_workspace && !window->m_workspace->isVisible();
-        if (!ignoreSpecial && workspace->m_isSpecialWorkspace != window->onSpecialWorkspace())
+        const bool ignoreSpecial = HyprlandCompat::movingFromMonitor(window) && window->m_workspace && !HyprlandCompat::visible(window->m_workspace);
+        if (!ignoreSpecial && HyprlandCompat::special(workspace) != window->onSpecialWorkspace())
             continue;
 
-        if (!window->m_transformers.empty()) {
+        if (HyprlandCompat::hasTransformers(window)) {
             cacheBackground = false;
             local = false;
             // Transformed floats keep their native pass without disabling
             // the ordinary windows' capture.
-            if (window->m_isFloating)
+            if (HyprlandCompat::floating(window))
                 continue;
             return nullptr;
         }
-        if (!window->m_isFloating) {
+        if (!HyprlandCompat::floating(window)) {
             // Keep stacked tiling layouts native. Test destination boxes so
             // transient overlap while opening a split keeps its reflections.
             const auto goal = WindowGeometry::computeWindowBox(window, monitor, Desktop::View::IGeometric::GEOMETRIC_GOAL);
@@ -302,7 +315,7 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
         }
         // Animations/snapshots and real underlays keep native painting order.
         if (window->positionAnimation()->isBeingAnimated() || window->sizeAnimation()->isBeingAnimated() ||
-            window->alphaTotalWithout(Desktop::View::WINDOW_ALPHA_ACTIVE) != 1.0f) {
+            HyprlandCompat::alphaWithout(window, Desktop::View::WINDOW_ALPHA_ACTIVE) != 1.0f) {
             local = false;
             cacheBackground = false;
         }
@@ -317,7 +330,7 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
     // copying that list verbatim would reflect the tile over the floating pane.
     const auto focused = Desktop::focusState()->window();
     std::ranges::stable_sort(scene->windows, {}, [&](const PHLWINDOWREF& window) {
-        return window->m_isFloating ? (window->m_pinned ? 3 : 2) : (window == focused ? 1 : 0);
+        return HyprlandCompat::floating(window) ? (HyprlandCompat::pinned(window) ? 3 : 2) : (window == focused ? 1 : 0);
     });
     scene->local = local;
     scene->cacheBackground = cacheBackground && g_pGlobalState->damageSurfaceHook;
@@ -337,7 +350,7 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
         const auto bottom = scene->windows.front().lock();
         auto bounds = WindowGeometry::computeWindowBox(bottom, monitor).value();
         bounds.expand(-2);
-        bool contained = !bottom->m_isFloating && !bounds.empty();
+        bool contained = !HyprlandCompat::floating(bottom) && !bounds.empty();
         for (size_t i = 1; contained && i < scene->windows.size(); ++i) {
             const auto box = WindowGeometry::computeWindowBox(scene->windows[i].lock(), monitor).value();
             contained = box.x >= bounds.x && box.y >= bounds.y &&
@@ -349,11 +362,19 @@ std::shared_ptr<SWindowScene> collectScene(Render::IHyprRenderer* renderer, PHLM
         Desktop::fadingOutState()->fadeouts().empty();
     if (scene->cacheInputs || scene->independentWindow || scene->regional) for (const auto& ref : scene->windows) {
         const auto window = ref.lock();
-        if (window->popupsCount() || window->m_group) { scene->cacheInputs = false; scene->independentWindow.reset(); scene->regional = false; }
-        for (const auto& decoration : window->m_windowDecorations) {
+        if (HyprlandCompat::popupCount(window) || HyprlandCompat::grouped(window)) { scene->cacheInputs = false; scene->independentWindow.reset(); scene->regional = false; }
+        for (const auto& decoration : HyprlandCompat::decorations(window)) {
             const auto type = decoration->getDecorationType();
             if (type != DECORATION_SHADOW && type != DECORATION_BORDER && type != DECORATION_INNER_GLOW &&
                 decoration.get() != decorationFor(window)) { scene->cacheInputs = false; scene->independentWindow.reset(); scene->regional = false; }
+#if HYPRLIQUID_WINDOW_PRESENTATION
+            if (decoration.get() != decorationFor(window) &&
+                !NativeDecorationState::appendKey(scene->nativeDecorationKey, decoration)) {
+                scene->cacheInputs = false;
+                scene->independentWindow.reset();
+                scene->regional = false;
+            }
+#endif
         }
     }
     return hasGlass && (local || scene->windows.size() > 1 || scene->cacheInputs) ? scene : nullptr;
@@ -366,11 +387,13 @@ std::vector<uint64_t> localKey(const SWindowScene& scene, PHLMONITOR monitor, PH
     key.push_back(g_pGlobalState->getSceneGeneration(monitor));
     key.push_back(buffers.at(monitor->m_id).backgroundGeneration);
     key.push_back(reinterpret_cast<uintptr_t>(eglGetCurrentContext()));
+    key.push_back(static_cast<uint64_t>(HyprlandCompat::renderData().projectionType));
+    key.push_back(HyprlandCompat::renderData().transformDamage);
     number(monitor->m_scale);
     key.push_back(monitor->m_transform);
     number(monitor->m_position.x); number(monitor->m_position.y);
     number(monitor->m_transformedSize.x); number(monitor->m_transformedSize.y);
-    const auto source = g_pHyprRenderer->m_renderData.currentFB;
+    const auto source = HyprlandCompat::renderData().currentFB;
     key.push_back(source ? source->m_drmFormat : 0);
     key.push_back(source && source->imageDescription() ? source->imageDescription()->id() : 0);
     for (const auto& ref : scene.windows) {
@@ -378,7 +401,7 @@ std::vector<uint64_t> localKey(const SWindowScene& scene, PHLMONITOR monitor, PH
         key.push_back(reinterpret_cast<uintptr_t>(window.get()));
         const auto box = WindowGeometry::computeWindowBox(window, monitor).value();
         number(box.x); number(box.y); number(box.w); number(box.h);
-        number(window->rounding()); number(window->roundingPower());
+        number(HyprlandCompat::rounding(window)); number(HyprlandCompat::roundingPower(window));
         if (auto* decoration = decorationFor(window)) decoration->appendCacheKey(key);
     }
     // Geometry, opacity, mapping and order of wallpaper/bottom layers also
@@ -388,7 +411,7 @@ std::vector<uint64_t> localKey(const SWindowScene& scene, PHLMONITOR monitor, PH
         for (const auto& layer : monitor->m_layerSurfaceLayers[plane]) {
             if (!layer) continue;
             key.push_back(reinterpret_cast<uintptr_t>(layer.get()));
-            key.push_back(layer->m_mapped);
+            key.push_back(HyprlandCompat::mapped(layer));
             const auto position = layer->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
             const auto size = layer->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
             number(position.x); number(position.y); number(size.x); number(size.y);
@@ -400,19 +423,58 @@ std::vector<uint64_t> localKey(const SWindowScene& scene, PHLMONITOR monitor, PH
 
 std::vector<uint64_t> inputKey(const SWindowScene& scene) {
     auto key = scene.backgroundKey;
+    key.push_back(scene.nativeDecorationKey.size());
+    key.insert(key.end(), scene.nativeDecorationKey.begin(), scene.nativeDecorationKey.end());
     key.push_back(scene.regional);
     key.push_back(scene.regionalInputs);
     const auto number = [&](double value) { key.push_back(std::bit_cast<uint64_t>(value)); };
+    static auto shadowEnabled = CConfigValue<Config::INTEGER>("decoration:shadow:enabled");
+    static auto shadowRange = CConfigValue<Config::INTEGER>("decoration:shadow:range");
+    static auto shadowSharp = CConfigValue<Config::INTEGER>("decoration:shadow:sharp");
+    static auto shadowPower = CConfigValue<Config::INTEGER>("decoration:shadow:render_power");
+    static auto shadowScale = CConfigValue<Config::FLOAT>("decoration:shadow:scale");
+    static auto shadowOffset = CConfigValue<Config::VEC2>("decoration:shadow:offset");
+    static auto glowEnabled = CConfigValue<Config::INTEGER>("decoration:glow:enabled");
+    static auto glowRange = CConfigValue<Config::INTEGER>("decoration:glow:range");
+    static auto glowPower = CConfigValue<Config::INTEGER>("decoration:glow:render_power");
+    static auto borderPart = CConfigValue<Config::INTEGER>("decoration:border_part_of_window");
+    static auto dimAround = CConfigValue<Config::FLOAT>("decoration:dim_around");
+    for (const auto value : {*shadowEnabled, *shadowRange, *shadowSharp, *shadowPower,
+            *glowEnabled, *glowRange, *glowPower, *borderPart}) number(value);
+    number(*shadowScale); number((*shadowOffset).x); number((*shadowOffset).y); number(*dimAround);
     for (const auto& ref : scene.windows) {
         const auto window = ref.lock();
-        number(window->effectiveAlpha());
-        number(window->getRealBorderSize());
-        number(window->getReportedSize().x); number(window->getReportedSize().y);
-        number(window->m_X11SurfaceScaledBy);
+        number(HyprlandCompat::alpha(window));
+        number(HyprlandCompat::borderSize(window));
+        number(HyprlandCompat::reportedSize(window).x); number(HyprlandCompat::reportedSize(window).y);
+        number(HyprlandCompat::surfaceScale(window));
         key.push_back(window->m_ruleApplicator->opaque().valueOrDefault());
         key.push_back(window->m_ruleApplicator->nearestNeighbor().valueOrDefault());
         key.push_back(window->m_ruleApplicator->noDim().valueOrDefault());
         key.push_back(window->m_ruleApplicator->dimAround().valueOrDefault());
+#if HYPRLIQUID_WINDOW_PRESENTATION
+        key.push_back(window->m_ruleApplicator->decorate().valueOrDefault());
+        key.push_back(window->m_ruleApplicator->noShadow().valueOrDefault());
+        key.push_back(window->m_ruleApplicator->noGlow().valueOrDefault());
+        key.push_back(window->backend().traits().suggestsNoBorder);
+        key.push_back(window->backend().traits().overrideRedirect);
+        const auto shadowCutout = window->surfaceLogicalBox();
+        key.push_back(shadowCutout.has_value());
+        if (shadowCutout) {
+            number(shadowCutout->x); number(shadowCutout->y); number(shadowCutout->w); number(shadowCutout->h);
+        }
+        number(window->presentation().dimPercent());
+        number(window->presentation().notRespondingTint());
+#else
+        key.push_back(window->m_ruleApplicator->decorate().valueOrDefault());
+        key.push_back(window->m_ruleApplicator->noShadow().valueOrDefault());
+        key.push_back(window->m_X11DoesntWantBorders);
+        key.push_back(window->isX11OverrideRedirect());
+        const auto shadowCutout = window->surfaceLogicalBox();
+        key.push_back(shadowCutout.has_value());
+        if (shadowCutout) {
+            number(shadowCutout->x); number(shadowCutout->y); number(shadowCutout->w); number(shadowCutout->h);
+        }
         for (const auto* value : {window->m_dimPercent.get(), window->m_notRespondingTint.get(),
                 window->m_borderFadeAnimationProgress.get(), window->m_borderAngleAnimationProgress.get(),
                 window->m_shadowFadeAnimationProgress.get(), window->m_shadowAngleAnimationProgress.get(),
@@ -427,6 +489,7 @@ std::vector<uint64_t> inputKey(const SWindowScene& scene) {
                 number(color.r); number(color.g); number(color.b); number(color.a);
             }
         }
+#endif
         // Encode the native drawing order and each surface's rendering state.
         // Buffer identity is deliberately absent: pixel commits use damage,
         // while movement, restacking and map/unmap must invalidate even when
@@ -470,8 +533,22 @@ std::vector<uint64_t> inputKey(const SWindowScene& scene) {
     return key;
 }
 
+#if HYPRLIQUID_RENDER_CONTEXT
+void renderWorkspace(Render::IHyprRenderer* renderer, Render::CRenderContext& ctx, PHLMONITOR monitor,
+                      PHLWORKSPACE workspace, const Time::steady_tp& now, Render::eSceneMode mode) {
+    HyprlandCompat::CRenderScope scope(ctx);
+    const auto original = [&] {
+        reinterpret_cast<RenderWorkspace>(workspaceHook->m_original)(renderer, ctx, monitor, workspace, now, mode);
+    };
+    // Capture/workspace scenes have different privacy and presentation rules.
+    // Keep the native pipeline there, including its content visibility checks.
+    if (mode != Render::eSceneMode::MONITOR || ctx.m_renderingCapture) { original(); return; }
+#else
 void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWORKSPACE workspace, const Time::steady_tp& now) {
-    auto original = reinterpret_cast<RenderWorkspace>(workspaceHook->m_original);
+    const auto original = [&] {
+        reinterpret_cast<RenderWorkspace>(workspaceHook->m_original)(renderer, monitor, workspace, now);
+    };
+#endif
     auto scene = collectScene(renderer, monitor, workspace);
     // Ineligible scenes used to return before expired-monitor cleanup. Retirement
     // drops only the cache's references: queued passes keep their images alive.
@@ -481,7 +558,7 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
         if (monitor) if (const auto it = buffers.find(monitor->m_id); it != buffers.end())
             it->second.inputSerial = ++nextInputSerial;
         if (hasRetired()) g_pGlobalState->renderBuffers.scheduleCleanup();
-        original(renderer, monitor, workspace, now);
+        original();
         return;
     }
 
@@ -500,8 +577,8 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
         scene->damage = std::move(storage.damage);
         storage.damage.clear();
         for (const auto& change : scene->damage) {
-            renderer->m_renderData.damage.add(change.region);
-            renderer->m_renderData.finalDamage.add(change.region);
+            HyprlandCompat::renderData().damage.add(change.region);
+            HyprlandCompat::renderData().finalDamage.add(change.region);
             monitor->m_damage.damage(change.region);
         }
         scene->ready = true;
@@ -516,7 +593,7 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
         const auto previousScene = queuedScene;
         queuedScene = scene;
         CScopeGuard restoreScene([&] { queuedScene = previousScene; });
-        original(renderer, monitor, workspace, now);
+        original();
         return;
     }
     // Two workspaces can be queued in one frame during transitions. Never
@@ -541,32 +618,37 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
     queuedScene = scene;
     CScopeGuard restoreScene([&] { queuedScene = previousScene; });
     {
-        const auto savedData = renderer->m_renderData;
-        const bool snapshot = renderer->m_bRenderingSnapshot;
-        auto redirect = renderer->redirectPass(&capture->pass);
+        const auto savedData = HyprlandCompat::renderData();
+        const bool snapshot = HyprlandCompat::renderingSnapshot();
+        auto redirect = HyprlandCompat::redirectPass(&capture->pass);
         queuingBase = true;
-        renderer->m_bRenderingSnapshot = true;
+        HyprlandCompat::renderingSnapshot() = true;
         CScopeGuard restore([&] {
-            renderer->m_renderData = savedData;
-            renderer->m_bRenderingSnapshot = snapshot;
+            HyprlandCompat::renderData() = savedData;
+            HyprlandCompat::renderingSnapshot() = snapshot;
             queuingBase = false;
         });
         for (const auto& window : scene->windows) {
             // Only our glass plus the client's main surfaces. Popups, shadows
             // and other plugins' decorations belong to the normal scene pass.
             if (auto* decoration = decorationFor(window.lock())) {
-                if (scene->cacheBase || (scene->cacheTiledBase && !window->m_isFloating)) {
-                    auto baseRedirect = renderer->redirectPass(&capture->basePass);
+                if (scene->cacheBase || (scene->cacheTiledBase && !HyprlandCompat::floating(window))) {
+                    auto baseRedirect = HyprlandCompat::redirectPass(&capture->basePass);
                     decoration->draw(monitor, 1.0f);
                 } else decoration->draw(monitor, 1.0f);
             }
             if (!scene->local)
+#if HYPRLIQUID_RENDER_CONTEXT
+                renderWindow(renderer, ctx, window.lock(), monitor, window->presentation().renderPresentation(),
+                             now, false, Render::RENDER_PASS_MAIN, false, false);
+#else
                 renderWindow(renderer, window.lock(), monitor, now, false, Render::RENDER_PASS_MAIN, false, false);
+#endif
         }
     }
     auto key = scene->local || scene->cacheBackground ? localKey(*scene, monitor, workspace) : std::vector<uint64_t>{};
     if (scene->cacheBackground) scene->backgroundKey = key;
-    const auto source = renderer->m_renderData.currentFB;
+    const auto source = HyprlandCompat::renderData().currentFB;
     if (scene->regional && source) {
         uint64_t bytes = CRenderBuffers::bytes(source->m_size.x, source->m_size.y, source->m_drmFormat);
         size_t pairs = 1; // Auxiliary repair workspace.
@@ -588,24 +670,27 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
     // fractional scales. Cached glass bypasses live-blur expansion, so carry
     // the guarded surface damage into the actual framebuffer repaint too.
     for (const auto& change : scene->damage) {
-        renderer->m_renderData.damage.add(change.region);
-        renderer->m_renderData.finalDamage.add(change.region);
+        HyprlandCompat::renderData().damage.add(change.region);
+        HyprlandCompat::renderData().finalDamage.add(change.region);
         // The fractional-filter guard must survive buffer reuse as well.
         monitor->m_damage.damage(change.region);
     }
-    if (scene->cacheInputs && !scene->local) {
-        // Disjoint panes retain their inputs, but their optical output can
-        // change farther away than native blur's presentation damage reaches.
+    if (!scene->local && !scene->regional) {
+        // Neighbor reflections change beyond native blur's presentation damage
+        // even when finished-input caching is unavailable. Regional scenes
+        // propagate their ordered optical damage separately below.
         // Native render damage is larger than final transfer damage: having
         // rendered the reflection correctly does not ensure it gets displayed.
         for (const auto& window : scene->windows) {
+            const auto* decoration = decorationFor(window.lock());
+            if (!decoration || !decoration->usesGlass()) continue;
             CRegion input;
             for (const auto& change : scene->damage)
                 if (change.window != window) input.add(change.region);
             if (input.empty()) continue;
-            const auto output = decorationFor(window.lock())->affectedDamage(monitor, input);
-            renderer->m_renderData.damage.add(output);
-            renderer->m_renderData.finalDamage.add(output);
+            const auto output = decoration->affectedDamage(monitor, input);
+            HyprlandCompat::renderData().damage.add(output);
+            HyprlandCompat::renderData().finalDamage.add(output);
             // beginRender already rotated the damage ring. Keep these new
             // optical changes pending for the next buffer acquisition too,
             // so an older swapchain buffer cannot bring stale reflections
@@ -648,32 +733,37 @@ void renderWorkspace(Render::IHyprRenderer* renderer, PHLMONITOR monitor, PHLWOR
             beneath = CRegion(screen);
             scene->previousInputSerial = 0;
         }
-        renderer->m_renderData.damage.add(beneath);
-        renderer->m_renderData.finalDamage.add(beneath);
+        HyprlandCompat::renderData().damage.add(beneath);
+        HyprlandCompat::renderData().finalDamage.add(beneath);
         monitor->m_damage.damage(beneath);
     }
     if (!reuse && !capture->reuseScene) storage.cache->valid = false;
     storage.key = std::move(key);
     storage.inputKey = scene->inputKey;
     const bool reuseBackground = capture->reuseBackground;
-    renderer->addPassElement(std::move(capture));
+    HyprlandCompat::addPassElement(std::move(capture));
 
     // A fresh auxiliary background reads wallpaper across the monitor. Repaint
     // it completely on this already scheduled frame. A retained immutable
     // background needs no extra desktop damage, even when clients are changing.
     if (!reuse && !reuseBackground) {
-        renderer->m_renderData.damage.add(CBox{{}, monitor->m_transformedSize});
-        renderer->m_renderData.finalDamage.add(CBox{{}, monitor->m_transformedSize});
+        HyprlandCompat::renderData().damage.add(CBox{{}, monitor->m_transformedSize});
+        HyprlandCompat::renderData().finalDamage.add(CBox{{}, monitor->m_transformedSize});
     }
-    original(renderer, monitor, workspace, now);
+    original();
 }
 } // namespace
 
 bool initialize() {
-    renderWindow = reinterpret_cast<RenderWindow>(rendererSymbol(PHANDLE, "renderWindow", "IHyprRenderer::renderWindow("));
-    if (!renderWindow)
+    // If a future native implementation cannot be inspected, only dependent
+    // cache reuse becomes ineligible; the plugin and immutable caches still work.
+    NativeDecorationState::initialize();
+    renderWindow = reinterpret_cast<RenderWindow>(rendererSymbol(PHANDLE, "renderWindow"));
+    if (!renderWindow) {
+        destroy();
         return false;
-    if (const auto address = rendererSymbol(PHANDLE, "renderWorkspaceWindows", "IHyprRenderer::renderWorkspaceWindows(")) {
+    }
+    if (const auto address = rendererSymbol(PHANDLE, "renderWorkspaceWindows")) {
         workspaceHook = HyprlandAPI::createFunctionHook(PHANDLE, address, reinterpret_cast<void*>(renderWorkspace));
         if (workspaceHook && workspaceHook->hook())
             return true;
@@ -683,10 +773,11 @@ bool initialize() {
 }
 
 void destroy() {
-    g_pHyprRenderer->m_renderPass.removeAllOfType("CWindowScenePassElement");
+    HyprlandCompat::renderPass().removeAllOfType("CWindowScenePassElement");
     if (workspaceHook)
         HyprlandAPI::removeFunctionHook(PHANDLE, workspaceHook);
     workspaceHook = nullptr;
+    NativeDecorationState::destroy();
     renderWindow = nullptr;
     queuedScene.reset();
     buffers.clear();

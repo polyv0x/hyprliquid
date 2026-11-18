@@ -2,6 +2,7 @@
 #include "Globals.hpp"
 #include "GlassDecoration.hpp"
 #include "MaterialInfo.hpp"
+#include "HyprlandIPCCompat.hpp"
 
 #include <hyprland/src/state/MonitorState.hpp>
 #include <json-c/json.h>
@@ -13,7 +14,7 @@
 
 namespace {
 using Json = std::unique_ptr<json_object, decltype(&json_object_put)>;
-SP<SHyprCtlCommand> command;
+SP<HyprlandCompat::CCommand> command;
 constexpr auto COMMAND = "hyprliquid:control";
 constexpr int API = 1;
 
@@ -242,7 +243,7 @@ bool guard(json_object* request) {
     return text(get(request, "if_epoch")) == g_pGlobalState->runtimeControl.epoch &&
         static_cast<uint64_t>(json_object_get_int64(value)) == g_pGlobalState->runtimeControl.revision;
 }
-std::string dispatch(eHyprCtlOutputFormat, std::string request) {
+std::string dispatch(std::string request) {
     auto response = own(object());
     put(response.get(), "api", json_object_new_int(API));
     put(response.get(), "ok", json_object_new_boolean(false));
@@ -340,7 +341,7 @@ void runtimeBaselineChanged(bool reloaded) {
 }
 void registerRuntimeControl() {
     g_pGlobalState->runtimeControl.epoch = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-    command = HyprlandAPI::registerHyprCtlCommand(PHANDLE, {COMMAND, false, dispatch});
+    command = HyprlandCompat::registerCommand(PHANDLE, COMMAND, dispatch);
     if (!command) throw std::runtime_error("hyprliquid: could not register runtime control IPC");
 }
 void unregisterRuntimeControl() {
