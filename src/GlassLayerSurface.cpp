@@ -8,14 +8,14 @@
 #include <algorithm>
 #include <cmath>
 #include <json-c/json.h>
-#include <hyprland/src/desktop/Workspace.hpp>
+#include "HyprlandRenderCompat.hpp"
 #include <GLES3/gl32.h>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprutils/math/Misc.hpp>
 
 static CBox transformedLayerBox(CBox pixelBox, PHLMONITOR monitor) {
-    const auto transform = Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform));
+    const auto transform = HyprlandCompat::targetTransform(monitor);
     pixelBox.transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y).noNegativeSize().round();
     return pixelBox;
 }
@@ -136,7 +136,7 @@ void CGlassLayerSurface::damageIfMoved() {
     const bool isAnimating = layerSurface->positionAnimation()->isBeingAnimated() ||
                              layerSurface->sizeAnimation()->isBeingAnimated() ||
                              layerSurface->alpha()[Desktop::View::LS_ALPHA_FADE]->isBeingAnimated() ||
-                             !layerSurface->m_mapped;
+                             !HyprlandCompat::mapped(layerSurface);
 
     const bool moved = currentPosition != m_lastPosition || currentSize != m_lastSize;
 
@@ -199,7 +199,7 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
     if (!layerSurface)
         return;
 
-    auto source = g_pHyprRenderer->m_renderData.currentFB;
+    auto source = HyprlandCompat::renderData().currentFB;
     if (!source)
         return;
 
@@ -234,7 +234,7 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
                                    isAnimating || m_backgroundDirty || forceLive ||
                                    blurSigma != m_cachedBlurSigma || padding != m_cachedPadding || material.family != m_cachedFamily;
 
-    if (!layerSurface->m_mapped) {
+    if (!HyprlandCompat::mapped(layerSurface)) {
         // During fade-out, re-sampling captures stale pixels. Reuse cached sample.
         if (!m_hasCachedSample)
             return;
@@ -284,7 +284,7 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
 
     m_savedCurrentFB = source;
 
-    g_pHyprRenderer->m_renderData.currentFB = m_surfaceTempFramebuffer;
+    HyprlandCompat::renderData().currentFB = m_surfaceTempFramebuffer;
     glBindFramebuffer(GL_FRAMEBUFFER, dynamic_cast<Render::GL::CGLFramebuffer*>(m_surfaceTempFramebuffer.get())->getFBID());
 
     CBox clearBox = transformBox;
@@ -293,10 +293,10 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha) {
 
     if (std::isfinite(clearBox.x) && std::isfinite(clearBox.y) && std::isfinite(clearBox.w) && std::isfinite(clearBox.h) &&
         clearBox.w > 0.0 && clearBox.h > 0.0) {
-        g_pHyprOpenGL->scissor(clearBox, false);
+        HyprlandCompat::scissor(clearBox, false);
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT);
-        g_pHyprOpenGL->scissor(nullptr);
+        HyprlandCompat::scissor(nullptr);
     }
 }
 
@@ -307,7 +307,7 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
         return;
     // Restore the original currentFB before compositing
     if (m_savedCurrentFB) {
-        g_pHyprRenderer->m_renderData.currentFB = m_savedCurrentFB;
+        HyprlandCompat::renderData().currentFB = m_savedCurrentFB;
         glBindFramebuffer(GL_FRAMEBUFFER, dynamic_cast<Render::GL::CGLFramebuffer*>(m_savedCurrentFB.get())->getFBID());
         m_savedCurrentFB.reset();
     }
@@ -321,7 +321,7 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
     if (!layerSurface)
         return;
 
-    auto target = g_pHyprRenderer->m_renderData.currentFB;
+    auto target = HyprlandCompat::renderData().currentFB;
     if (!target)
         return;
 
@@ -396,7 +396,7 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
                 for (const auto& shape : m_shapes) {
                     CBox box{shape.x, shape.y, shape.w, shape.h};
                     box.scale(monitor->m_scale).translate(rawBox.pos());
-                    box.transform(Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform)),
+                    box.transform(HyprlandCompat::targetTransform(monitor),
                                   monitor->m_transformedSize.x, monitor->m_transformedSize.y);
                     const int i = maskInfo.shapeCount++;
                     maskInfo.shapeBounds[i] = {float(box.x - transformBox.x), float(box.y - transformBox.y), float(box.w), float(box.h)};
@@ -411,7 +411,7 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
             region.scale(static_cast<float>(monitor->m_scale));
             region.translate(rawBox.pos());
             region.intersect(rawBox.x, rawBox.y, rawBox.w, rawBox.h); // defensive
-            region.transform(Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform)),
+            region.transform(HyprlandCompat::targetTransform(monitor),
                               monitor->m_transformedSize.x, monitor->m_transformedSize.y);
 
             const auto rects = region.getRects();

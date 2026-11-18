@@ -1,3 +1,4 @@
+#include "HyprlandRenderCompat.hpp"
 #include "DamageRegion.hpp"
 #include "GlassRenderer.hpp"
 #include "Globals.hpp"
@@ -94,7 +95,7 @@ bool sampleBackground(SP<Render::IFramebuffer>& sampleFramebuffer, SP<Render::IF
         g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, true);
         damage->copy().intersect(CBox{0, 0, width, height}).forEachRect([&](const auto& r) {
             updateBox = CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
-            g_pHyprOpenGL->scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1), false);
+            HyprlandCompat::scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1), false);
             draw();
         });
         g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
@@ -204,7 +205,7 @@ bool prepareMaterialBackdrop(SP<Render::IFramebuffer> sample, SP<Render::IFrameb
         glBindFramebuffer(GL_FRAMEBUFFER, fbId(caller));
         g_pHyprOpenGL->setViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
         g_pHyprOpenGL->setCapStatus(GL_BLEND, blend);
-        g_pHyprOpenGL->scissor(CBox(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]), false);
+        HyprlandCompat::scissor(CBox(scissorBox[0], scissorBox[1], scissorBox[2], scissorBox[3]), false);
         g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, scissor);
         glActiveTexture(GL_TEXTURE0);
     });
@@ -243,7 +244,7 @@ bool prepareMaterialBackdrop(SP<Render::IFramebuffer> sample, SP<Render::IFrameb
         const auto region = DamageRegion::map(*damage, sample->m_size, halfSharp->m_size);
         g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, true);
         region.forEachRect([&](const auto& r) {
-            g_pHyprOpenGL->scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1), false);
+            HyprlandCompat::scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1), false);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         });
     } else glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -419,7 +420,7 @@ bool blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFram
             // draw can reuse its previous scissor immediately after this blur;
             // raw glScissor would silently leave it clipped to a scratch image.
             // These coordinates belong to the offscreen buffer, not the output.
-            g_pHyprOpenGL->scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1), false);
+            HyprlandCompat::scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1), false);
             draw();
         });
         else draw();
@@ -447,12 +448,11 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
     const auto& uniforms = shapedLayer ? manager.liquidLayerCommonUniforms : liquid ? manager.liquidCommonUniforms :
         liquidRim ? manager.glassRimCommonUniforms : manager.glassUniforms;
     const float extent = liquid && !mask && renderShadow ? std::ceil(materialOutputExtent(material) *
-        g_pHyprRenderer->m_renderData.pMonitor->m_scale * material.effect_scale) : 0.0f;
+        HyprlandCompat::renderData().pMonitor->m_scale * material.effect_scale) : 0.0f;
     CBox outputBox = rawBox;
     outputBox.expand(extent);
-    const auto transform = Math::wlTransformToHyprutils(
-        Math::invertTransform(g_pHyprRenderer->m_renderData.pMonitor->m_transform));
-    Mat3x3 matrix = g_pHyprRenderer->projectBoxToTarget(outputBox, transform);
+    const auto transform = HyprlandCompat::targetTransform();
+    Mat3x3 matrix = HyprlandCompat::projectBoxToTarget(outputBox, transform);
     matrix.transpose();
 
     glBindFramebuffer(GL_FRAMEBUFFER, fbId(targetFramebuffer));
@@ -496,7 +496,7 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
     glUniform1i(uniforms.useNeighborContribution, neighbors && (!liquid || neighbors->halfSharp) ? 1 : 0);
     glUniform1i(uniforms.underlayShapes, 5);
     glUniform1i(uniforms.underlayCount, underlayCount);
-    glUniform1f(uniforms.pixelScale, g_pHyprRenderer->m_renderData.pMonitor->m_scale * material.effect_scale);
+    glUniform1f(uniforms.pixelScale, HyprlandCompat::renderData().pMonitor->m_scale * material.effect_scale);
     glUniform1f(uniforms.fadeAlpha, std::clamp(alpha, 0.0f, 1.0f));
     glUniform2f(uniforms.uvPadding, paddingRatio.x, paddingRatio.y);
 #define GLASS_PARAM(name, value, lo, hi) glUniform1f(uniforms.name, material.name);
@@ -518,7 +518,7 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
             glUniform1i(u.backdrop, 6); glUniform1i(u.cleanBackdrop, 7);
             glUniform2f(u.outputExtent, extent, extent);
             glUniform1i(u.renderShadow, !mask && renderShadow);
-            glUniform1i(u.transparentTarget, !mask && g_pHyprRenderer->m_bRenderingSnapshot);
+            glUniform1i(u.transparentTarget, !mask && HyprlandCompat::renderingSnapshot());
         } else manager.glassRimUniforms.upload(effective.highlight, material.display_angle_degrees, basis);
     }
 
@@ -555,13 +555,13 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
     const bool rgba8 = targetFramebuffer->m_drmFormat == DRM_FORMAT_ARGB8888 || targetFramebuffer->m_drmFormat == DRM_FORMAT_XRGB8888 ||
                        targetFramebuffer->m_drmFormat == DRM_FORMAT_ABGR8888 || targetFramebuffer->m_drmFormat == DRM_FORMAT_XBGR8888;
     if (rgba8 && !mask && !neighbors) if (const auto inset = glassInteriorInset(material, cornerRadius,
-            g_pHyprRenderer->m_renderData.pMonitor->m_scale * material.effect_scale)) {
+            HyprlandCompat::renderData().pMonitor->m_scale * material.effect_scale)) {
         const double left = std::ceil(rawBox.x + *inset), top = std::ceil(rawBox.y + *inset);
         const double right = std::floor(rawBox.x + rawBox.w - *inset), bottom = std::floor(rawBox.y + rawBox.h - *inset);
         if (right > left && bottom > top) interior = CRegion(CBox{left, top, right - left, bottom - top}).intersect(output);
     }
     output.copy().subtract(interior).forEachRect([&](const auto& r) {
-        g_pHyprOpenGL->scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1));
+        HyprlandCompat::scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1), HyprlandCompat::renderData().transformDamage);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     });
     if (!interior.empty()) {
@@ -580,11 +580,11 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
 #undef GLASS_PARAM
         glBindVertexArray(center->getUniformLocation(SHADER_SHADER_VAO));
         interior.forEachRect([&](const auto& r) {
-            g_pHyprOpenGL->scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1));
+            HyprlandCompat::scissor(CBox(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1), HyprlandCompat::renderData().transformDamage);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         });
     }
-    g_pHyprOpenGL->scissor(nullptr);
+    HyprlandCompat::scissor(nullptr);
 }
 
 } // namespace GlassRenderer

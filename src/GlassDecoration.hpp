@@ -8,11 +8,11 @@ struct json_object;
 #include "PluginConfig.hpp"
 #include "WindowScene.hpp"
 
-#include <hyprland/src/desktop/view/Window.hpp>
+#include "HyprlandRenderCompat.hpp"
 #include <hyprland/src/render/decorations/IHyprWindowDecoration.hpp>
 #include <hyprland/src/render/Framebuffer.hpp>
 
-class CGlassDecoration : public IHyprWindowDecoration {
+class CGlassDecoration : public HyprlandCompat::CWindowDecoration {
   public:
     explicit CGlassDecoration(PHLWINDOW window);
     ~CGlassDecoration() override;

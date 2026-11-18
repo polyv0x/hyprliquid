@@ -10,15 +10,16 @@ for panels and other layer surfaces.
 For installation with `hyprpm` or a fresh source checkout, start with the
 [installation instructions](../README.md#installation).
 
-Targets **Hyprland 0.56.2**. Build against the headers for the running compositor;
+Supports **Hyprland 0.56.2 and 0.57.2**. Build against the headers for the running compositor;
 the plugin checks the full Hyprland build/ABI string when loaded.
 
 Requirements: a C++23 compiler compatible with your Hyprland build, GNU Make,
 Python 3, pkg-config, pixman, libdrm and json-c development files, Hyprland
 development headers, and their dependencies.
 `pkg-config --cflags hyprland pixman-1 libdrm json-c` must locate the correct
-headers. After updating Hyprland's headers, use `make -B -j4` to rebuild all
-objects.
+headers. After updating Hyprland's headers, run `make -j4`; the build automatically
+invalidates adapter objects when the selected headers, compiler flags, or ABI change.
+The [compatibility guide](compatibility.md) describes testing both supported versions.
 
 ```sh
 make -j4

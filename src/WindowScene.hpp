@@ -39,6 +39,7 @@ struct SWindowScene {
     uint64_t inputSerial = 0, previousInputSerial = 0;
     std::vector<uint64_t> backgroundKey;
     std::vector<uint64_t> inputKey;
+    std::vector<uint64_t> nativeDecorationKey;
     struct SDamage { PHLWINDOWREF window; CRegion region; };
     std::vector<SDamage> damage;
     struct SCache { bool valid = false; };

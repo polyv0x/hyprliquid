@@ -3,6 +3,7 @@
 from pathlib import Path
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -31,6 +32,9 @@ from tiny_tiles import verify_tiny_tiles, verify_tiny_shadows
 from surface_cache import verify_surface_cache
 from regional_damage import verify_regional_damage
 from noctalia_layers import verify_noctalia_layers
+from compatibility import verify_compatibility
+from workspace_capture import verify_workspace_capture
+from native_style import verify_native_style
 
 
 def wait_for(predicate, process, seconds=20):
@@ -64,6 +68,12 @@ def main():
         clients = []
         config_path = runtime / 'hyprland.lua'
         shutil.copyfile(ROOT / 'tests/nested.lua', config_path)
+        if '--workspace-capture-only' in sys.argv:
+            # Permissions are registered only during initial compositor setup.
+            binary = '^' + re.escape(str(FIXTURES / 'workspace-capture-test')) + '$'
+            with config_path.open('a') as config:
+                config.write('\nhl.permission({ binary = ' + json.dumps(binary) +
+                             ', type = "screencopy", mode = "allow" })\n')
         with (BUILD / 'nested.log').open('w') as log:
             compositor = subprocess.Popen(['Hyprland', '--config', str(config_path)], env=env, stdout=log, stderr=log)
             try:
@@ -123,11 +133,25 @@ def main():
                     verify_surface_cache(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES, PLUGIN,
                                          os.environ.get('HYPRLIQUID_TEST_BASELINE'))
                     return
+                if '--native-style-only' in sys.argv:
+                    verify_native_style(ctl, env, log, clients, BUILD,
+                                        lambda predicate: wait_for(predicate, compositor), FIXTURES, PLUGIN, config_path)
+                    return
                 if '--regional-damage-only' in sys.argv:
                     verify_regional_damage(ctl, env, log, clients, BUILD, lambda predicate: wait_for(predicate, compositor), FIXTURES, PLUGIN,
                                            os.environ.get('HYPRLIQUID_TEST_BASELINE'))
                     return
                 control = verify_control(ctl, config_path)
+                if '--workspace-capture-only' in sys.argv:
+                    verify_workspace_capture(ctl, env, log, clients, BUILD,
+                                             lambda predicate: wait_for(predicate, compositor),
+                                             FIXTURES, config_path, control)
+                    return
+                if '--compatibility-only' in sys.argv:
+                    verify_compatibility(ctl, env, log, clients, BUILD,
+                                         lambda predicate: wait_for(predicate, compositor),
+                                         FIXTURES, PLUGIN, config_path, control)
+                    return
                 security_override = os.environ.get('HYPRLIQUID_TEST_SECURITY_PLUGIN')
                 security_plugin = Path(security_override).resolve() if security_override else FIXTURES / 'security-test.so'
                 # The fault-injection fixture links the current checkout's library.
@@ -330,7 +354,8 @@ def main():
                         time.sleep(0.25)
                         subprocess.run(['grim', str(BUILD / f'nested-{preset}.png')], env=env, check=True, capture_output=True, timeout=10)
                     ctl('eval', 'hl.plugin.hyprliquid.config({ enabled = false })')
-                    assert json.loads(ctl('-j', 'getoption', 'plugin:hyprliquid:enabled')).get('int') == 0
+                    option = json.loads(ctl('-j', 'getoption', 'plugin:hyprliquid:enabled'))
+                    assert option.get('bool', option.get('int')) == 0, option
                     window_action(address, 'move', shifted)
                     window_action(address, 'move', position)
                     time.sleep(0.25)

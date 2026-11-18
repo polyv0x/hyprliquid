@@ -11,7 +11,7 @@
 #include <bit>
 #include <json-c/json.h>
 #include <GLES3/gl32.h>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include "HyprlandCompat.hpp"
 #include <hyprland/src/desktop/rule/windowRule/WindowRuleApplicator.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/plugins/PluginSystem.hpp>
@@ -21,7 +21,7 @@
 #include <hyprutils/utils/ScopeGuard.hpp>
 
 CGlassDecoration::CGlassDecoration(PHLWINDOW window)
-    : IHyprWindowDecoration(window), m_window(window) {
+    : HyprlandCompat::CWindowDecoration(window), m_window(window) {
 }
 
 CGlassDecoration::~CGlassDecoration() {
@@ -195,7 +195,7 @@ void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
 
     CGlassPassElement::SGlassPassData data{m_self, alpha, WindowScene::queuedFor(m_window.lock()), WindowScene::buildingBase()};
     if (!WindowScene::skipDecoration(owner))
-        g_pHyprRenderer->addPassElement(makeUnique<CGlassPassElement>(data));
+        HyprlandCompat::addPassElement(makeUnique<CGlassPassElement>(data));
 
     if (data.sceneBase)
         return;
@@ -204,7 +204,7 @@ void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
     if (window) {
         const auto workspace = window->m_workspace;
 
-        const bool wsAnimating = workspace && !window->m_pinned && workspace->m_renderOffset->isBeingAnimated();
+        const bool wsAnimating = workspace && !HyprlandCompat::pinned(window) && workspace->m_renderOffset->isBeingAnimated();
         if (wsAnimating)
             damageEntire();
 
@@ -262,7 +262,7 @@ void CGlassDecoration::appendCacheKey(std::vector<uint64_t>& key) const {
 CGlassDecoration::SRegionalInputCost CGlassDecoration::regionalInputCost(PHLMONITOR monitor, DRMFormat format) const {
     auto box = WindowGeometry::computeWindowBox(m_window.lock(), monitor);
     if (!box) return {CRenderBuffers::RETAINED_BYTES + 1, CRenderBuffers::RETAINED_PAIRS + 1};
-    box->transform(Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform)),
+    box->transform(HyprlandCompat::targetTransform(monitor),
                    monitor->m_transformedSize.x, monitor->m_transformedSize.y);
     const auto material = resolveMaterial({resolvePresetName(), resolveThemeIsDark(), g_pGlobalState->config,
                                           g_pGlobalState->customPresets, runtimeOverrides()});
@@ -317,7 +317,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     if (!window)
         return;
 
-    const auto source = g_pHyprRenderer->m_renderData.currentFB;
+    const auto source = HyprlandCompat::renderData().currentFB;
     if (!source)
         return;
 
@@ -328,11 +328,10 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     CBox windowBox    = *optBox;
     CBox transformBox = windowBox;
 
-    const auto transform = Math::wlTransformToHyprutils(
-        Math::invertTransform(g_pHyprRenderer->m_renderData.pMonitor->m_transform));
+    const auto transform = HyprlandCompat::targetTransform(monitor);
     transformBox.transform(transform,
-        g_pHyprRenderer->m_renderData.pMonitor->m_transformedSize.x,
-        g_pHyprRenderer->m_renderData.pMonitor->m_transformedSize.y);
+        HyprlandCompat::renderData().pMonitor->m_transformedSize.x,
+        HyprlandCompat::renderData().pMonitor->m_transformedSize.y);
 
     const bool isDark          = resolveThemeIsDark();
     const std::string preset   = resolvePresetName();
@@ -348,8 +347,8 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     // Hyprland renders internal-fullscreen windows unrounded (dontRound), we need to
     // match, or the glass would show rounded gaps at the screen corners
     const bool fsUnrounded = Fullscreen::controller()->getFullscreenModes(window).internal == Fullscreen::FSMODE_FULLSCREEN;
-    float cornerRadius  = fsUnrounded ? 0.0f : window->rounding() * monitorScale;
-    float roundingPower = window->roundingPower();
+    float cornerRadius  = fsUnrounded ? 0.0f : HyprlandCompat::rounding(window) * monitorScale;
+    float roundingPower = HyprlandCompat::roundingPower(window);
 
     // Base glass sees only the background; the final pass sees the completed
     // neighbouring panes outside its bounds and the true backdrop inside.
@@ -384,8 +383,8 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
             underlayShapes.push_back({static_cast<float>(box->x - transformBox.x),
                                      static_cast<float>(box->y - transformBox.y),
                                      static_cast<float>(box->width), static_cast<float>(box->height),
-                                     unrounded ? 0.0f : underneath->rounding() * monitor->m_scale,
-                                     underneath->roundingPower(), beneath ? 1.0f : 0.0f, shadowOccluder ? 1.0f : 0.0f});
+                                     unrounded ? 0.0f : HyprlandCompat::rounding(underneath) * monitor->m_scale,
+                                     HyprlandCompat::roundingPower(underneath), beneath ? 1.0f : 0.0f, shadowOccluder ? 1.0f : 0.0f});
         }
     }
     // Falloff only changes the sharp/blur mix; it needs no reference backdrop.
@@ -403,7 +402,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     // All blits/draws use the same GL context and are ordered before the next
     // lease can overwrite them; no CPU/GPU wait or cross-context reuse is needed.
     const bool cacheBackground = sceneBase && scene && scene->cacheBackground && !scene->cacheBase &&
-        !(scene->cacheTiledBase && !window->m_isFloating);
+        !(scene->cacheTiledBase && !HyprlandCompat::floating(window));
     const bool independent = scene && scene->independentWindow == window;
     const bool regional = !independent && !sceneBase && scene && scene->regionalInputs && scene->ready && !scene->failed;
     const bool cacheInputs = !sceneBase && scene && ((!liquid && scene->cacheInputs) || independent || regional) && scene->ready && !scene->failed;
@@ -445,7 +444,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     const bool retainedInput = samples->contentValid;
     auto captureDamage = inputDamage.copy();
     if (regional && retainedInput) {
-        auto valid = mapDamage(g_pHyprRenderer->m_renderData.damage);
+        auto valid = mapDamage(HyprlandCompat::renderData().damage);
         if (!liquid) {
             // Outside the owner Glass copies the complete auxiliary scene,
             // independently of the native target's current damage.
@@ -518,7 +517,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
         samples->contentValid = !samples->cacheOwner.empty();
     }
     if (cacheInputs && !retainedInput) {
-        auto valid = g_pHyprRenderer->m_renderData.damage.copy().transform(transform,
+        auto valid = HyprlandCompat::renderData().damage.copy().transform(transform,
             monitor->m_transformedSize.x, monitor->m_transformedSize.y);
         const auto& bounds = geometry->owner;
         auto required = CRegion(CBox(bounds[0], bounds[1], bounds[2] - bounds[0], bounds[3] - bounds[1]))
@@ -557,18 +556,22 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha,
     // not the active/inactive dimming or opacity rules: those make the surface
     // more translucent — revealing more glass — and shouldn't wash out the
     // glass pane itself. Rebuild the fade-only alpha from its components.
-    float glassAlpha = window->alphaTotalWithout(Desktop::View::WINDOW_ALPHA_ACTIVE);
-    if (const auto workspace = window->m_workspace; workspace && !window->m_pinned)
+#if HYPRLIQUID_WINDOW_PRESENTATION
+    const float glassAlpha = HyprlandCompat::windowPresentation(window).fadeAlpha;
+#else
+    float glassAlpha = HyprlandCompat::alphaWithout(window, Desktop::View::WINDOW_ALPHA_ACTIVE);
+    if (const auto workspace = window->m_workspace; workspace && !HyprlandCompat::pinned(window))
         glassAlpha *= workspace->m_alpha->value();
+#endif
 
     std::optional<CRegion> visible;
     const auto surface = window->wlSurface();
     const auto resource = window->resource();
-    if (!sceneBase && !liquid && resource && surface && window->m_transformers.empty() &&
-        resource->m_subsurfaces.empty() && resource->m_current.size == window->getReportedSize() &&
-        window->effectiveAlpha() == 1.0f && surface->m_alphaModifier == 1.0f && surface->m_overallOpacity == 1.0f &&
+    if (!sceneBase && !liquid && resource && surface && !HyprlandCompat::hasTransformers(window) &&
+        resource->m_subsurfaces.empty() && resource->m_current.size == HyprlandCompat::reportedSize(window) &&
+        HyprlandCompat::alpha(window) == 1.0f && surface->m_alphaModifier == 1.0f && surface->m_overallOpacity == 1.0f &&
         surface->m_visibleRegion.empty() && !window->positionAnimation()->isBeingAnimated() &&
-        !window->sizeAnimation()->isBeingAnimated() && g_pHyprRenderer->m_renderData.projectionType == Render::RPT_MONITOR) {
+        !window->sizeAnimation()->isBeingAnimated() && HyprlandCompat::renderData().projectionType == Render::RPT_MONITOR) {
         auto opaque = resource->m_current.opaque.copy().intersect(CBox{{}, resource->m_current.size});
         if (!opaque.empty() && resource->m_current.size.x > 0 && resource->m_current.size.y > 0) {
             opaque.scale(windowBox.size() / resource->m_current.size).translate(windowBox.pos()).expand(-std::ceil(cornerRadius + 2));
@@ -778,9 +781,9 @@ void CGlassDecoration::damageEntire() {
     const auto workspace = window->m_workspace;
     auto surfaceBox = window->getWindowMainSurfaceBox();
 
-    if (workspace && workspace->m_renderOffset->isBeingAnimated() && !window->m_pinned)
+    if (workspace && workspace->m_renderOffset->isBeingAnimated() && !HyprlandCompat::pinned(window))
         surfaceBox.translate(workspace->m_renderOffset->value());
-    surfaceBox.translate(window->m_floatingOffset);
+    surfaceBox.translate(HyprlandCompat::floatingOffset(window));
 
     // Expand damage by our sampling padding so the render pass re-renders
     // background content (wallpaper, other windows) in the padded margin.
