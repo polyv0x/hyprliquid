@@ -132,7 +132,7 @@ optional `animate_display_angle = true` setting sweeps 0° → configured angle 
 
 ## Examples
 
-Browse the [screenshots](screenshots/antialiased/) for all seven built-in
+Browse the [screenshot gallery](docs/examples.md) for all seven built-in
 presets, including the two Liquid variants and side-by-side comparisons.
 
 `make demo` renders the ten example scenes in a nested Hyprland session.
