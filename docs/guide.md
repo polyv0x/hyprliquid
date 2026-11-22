@@ -100,25 +100,26 @@ with `frosted-glass`, followed by `frosted-glass-clear-edge`; remaining entries
 are alphabetical. Select `frosted` for an even blur with no added rim,
 aberration, or refraction.
 
-`frosted-glass` uses the same screen-pixel outline antialiasing as Liquid,
-including at fractional display scales. Its `coverage_width = 0` selects this
-automatic width, with `coverage_offset = 0` aligning it to the native outline.
+`frosted-glass` and `frosted-glass-clear-edge` use the same screen-pixel outline
+antialiasing as Liquid, including at fractional display scales.
+`coverage_width = 0` selects the automatic width, and `coverage_offset = 0`
+aligns it to the native outline.
 Positive coverage widths use an explicit width in logical pixels; the other
 Glass presets retain their existing coverage settings.
 
-Its rim also uses Liquid's directional key/fill highlights, theme colors, and
+Their rims use Liquid's directional key/fill highlights, theme colors, and
 blending. `rim_width` and `rim_opacity` both default to `1`.
 Both presets integrate the rim's brightness over each pixel, keeping thin
 highlights smooth through corners and fractional pixel positions.
 `display_angle_degrees` rotates the rim from -180° to 180° (default `0`), and
 the `animate_display_angle` and `animate_hover_angle` toggles apply to it.
-These settings are inherited by custom presets and the `frosted-full` alias.
+Custom presets and aliases inherit these settings from their parent preset.
 The legacy `rim_soft` setting is inactive for this rim model.
 
 | Preset | Appearance |
 | --- | --- |
 | `frosted-glass` | Strong lens refraction, full-pane blur and Liquid key/fill rim lighting; default |
-| `frosted-glass-clear-edge` | Frosted center with a clear, strongly refractive border |
+| `frosted-glass-clear-edge` | Frosted center, clear refractive border, and Liquid key/fill rim lighting |
 | `clear-glass` | Sharp backdrop with strong refraction and color fringes |
 | `frosted` | Soft, even blur without added refraction or rim lighting |
 | `frosted-liquid` | Liquid refraction, five-stop frost at blur sigma 19, directional key/fill highlights and a material shadow |
@@ -226,8 +227,9 @@ glass.preset("tilting-liquid", {
 glass.config({ default_preset = "tilting-liquid", animate_display_angle = true })
 ```
 
-The toggle is global for Liquid and `frosted-glass` windows, including inherited and explicitly tagged presets;
-each window uses its own resolved angle as the sweep's peak. The default 0°
+The toggle applies to windows with Liquid rim lighting, including inherited
+and explicitly tagged presets. Each window uses its resolved angle as the
+sweep's peak. The default 0°
 angle and disabled toggle preserve existing rendering.
 
 The remaining legacy color, bleed, aberration, coverage, rim-softness, and
@@ -374,7 +376,7 @@ Common settings:
 | --- | --- | --- |
 | `enabled` | `true` | Apply glass to windows |
 | `manage_window_blur` | `true` | Suppress Hyprland's separate blur on managed windows |
-| `animate_display_angle` | `false` | Sweep Liquid and frosted-glass rim highlights during native window size transitions |
+| `animate_display_angle` | `false` | Sweep Liquid rim highlights during native window size transitions |
 | `default_preset` | `frosted-glass` | Material preset |
 | `glass_opacity` | `1` | Mix the material with the original backdrop |
 | `effect_scale` | `1` | Scale the material's pixel distances |

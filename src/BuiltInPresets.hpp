@@ -64,20 +64,26 @@ inline std::unordered_map<std::string, SCustomPreset> getAll() {
     presets.at("clear-glass").light.rim_opacity = lens.rim_opacity * 0.85f;
     alias("lens", "clear-glass");
 
+    const auto useThinLiquidRim = [&](const std::string& name) {
+        auto& preset = presets.at(name);
+        preset.rimModel = ERimModel::LIQUID;
+        preset.shared.rim_width = 1.0f;
+        preset.shared.rim_opacity = 1.0f;
+        // Match Liquid's screen-pixel coverage at the native window outline.
+        preset.shared.coverage_offset = 0.0f;
+        preset.shared.coverage_width = 0.0f;
+    };
+
     auto& frostedGlass = add("frosted-glass", "lens");
-    presets.at("frosted-glass").rimModel = ERimModel::LIQUID;
     frostedGlass.blur_alpha0 = 0.96f;
     frostedGlass.blur_alpha3 = 1.0f;
-    frostedGlass.rim_width = 1.0f;
-    frostedGlass.rim_opacity = 1.0f;
-    // Match Liquid's screen-pixel coverage at the native window outline.
-    frostedGlass.coverage_offset = 0.0f;
-    frostedGlass.coverage_width = 0.0f;
+    useThinLiquidRim("frosted-glass");
 
     auto& clearEdge = add("frosted-glass-clear-edge", "lens");
     clearEdge.blur_alpha0 = 0.02f;
     clearEdge.blur_alpha3 = 1.0f;
     clearEdge.blur_dist3 = 38.4f;
+    useThinLiquidRim("frosted-glass-clear-edge");
     alias("frosted-full", "frosted-glass");
     alias("clear-edge", "frosted-glass-clear-edge");
     alias("frosted-clear-edge", "frosted-glass-clear-edge");

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Capture real native glass windows over a rendered primitive scene.
 
-All generated images stay in ignored directories. A separate compositor renders
+The default output stays in an ignored directory. A separate compositor renders
 the 1920x1200 logical scene at twice the pixel density, then grim resolves it to
 1920x1200 for antialiased borders. The desktop's renderer/settings are untouched.
 """
@@ -35,7 +35,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--supersample', type=int, choices=(1, 2, 3, 4), default=2,
                         help='Render density before resolving to 1920x1200 (default: 2; 1 disables supersampling)')
-    parser.add_argument('--output', type=Path, default=OUTPUT, help='Directory for the eight PNG captures')
+    parser.add_argument('--output', type=Path, default=OUTPUT, help='Directory for the PNG captures')
     args = parser.parse_args()
     output = args.output.resolve()
     BUILD.mkdir(parents=True, exist_ok=True)
@@ -130,9 +130,15 @@ def main():
                 ('07-frosted-glass-clear-edge', 'dark', [('frosted-glass-clear-edge', 510, 365, 900, 540)], 'FROSTED GLASS CLEAR EDGE / 07'),
                 ('08-frosted-materials', 'dark', [('soft-glass', 105, 345, 530, 600), ('frosted-glass', 695, 345, 530, 600),
                                               ('frosted-glass-clear-edge', 1285, 345, 530, 600)], 'FROSTED MATERIALS / 08'),
+                ('09-frosted-liquid', 'dark', [('frosted-liquid', 510, 365, 900, 540)], 'FROSTED LIQUID / 09'),
+                ('10-frosted-liquid-medium', 'dark', [('frosted-liquid-medium', 510, 365, 900, 540)], 'FROSTED LIQUID MEDIUM / 10'),
             ]
             for filename, scene, panes, label in shots:
                 theme = ['--dark'] if scene == 'dark' else []
+                # The stock gray shadow reads as a light halo over the dark backdrop.
+                color, radius, offset = ('00000088', 24, 6) if theme else ('1a1a1aee', 36, 0)
+                ctl('eval', f'hl.config({{ decoration = {{ shadow = {{ range = {radius}, '
+                    f'color = "rgba({color})", color_inactive = "rgba({color})", offset = "0 {offset}" }} }} }})')
                 scene_clients = [launch('backdrop', 0, 0, 1920, 1200, '--image', str(BUILD / (scene + '.ppm')),
                                         '--label', label, *theme)]
                 for role, x, y, width, height in panes:

@@ -41,8 +41,9 @@ def verify_control(ctl, config_path):
 
     # Every public preset must resolve the previewed tones without scalar
     # overrides. A theme switch changes tone, not blur/refraction geometry.
+    liquid_rim_presets = {'frosted-glass', 'frosted-glass-clear-edge'}
     for preset, rim in [('frosted', 0), ('soft-glass', 0.92), ('clear-glass', 1.2),
-                        ('frosted-glass', 1.2), ('frosted-glass-clear-edge', 1.2)]:
+                        ('frosted-glass', 1), ('frosted-glass-clear-edge', 1)]:
         materials = {}
         for theme in ('dark', 'light'):
             themed = request('apply', profile={'base_preset': preset, 'theme': theme})
@@ -58,9 +59,10 @@ def verify_control(ctl, config_path):
             assert 'use_measured_face' not in material
             assert math.isclose(material['face_slope'], 0.72 if theme == 'dark' else 0.68, abs_tol=1e-6)
             assert math.isclose(material['face_intercept'], 0.06 if theme == 'dark' else 0.30, abs_tol=1e-6)
-            if preset == 'frosted-glass':
+            if preset in liquid_rim_presets:
                 assert state['rim_model'] == 'liquid'
-                assert material['rim_width'] == 1 and material['rim_opacity'] == 1
+                assert material['rim_width'] == 1 and material['rim_opacity'] == rim
+                assert material['coverage_offset'] == 0 and material['coverage_width'] == 0
                 assert 'display_angle_degrees' in state['applicable_parameters']
                 assert 'rim_soft' not in state['applicable_parameters']
             else:
@@ -68,7 +70,7 @@ def verify_control(ctl, config_path):
                 assert 'display_angle_degrees' not in state['applicable_parameters']
                 assert math.isclose(material['rim_opacity'], rim * (0.65 if theme == 'dark' else 0.85), abs_tol=1e-6)
         changed = {key for key in materials['dark'] if materials['dark'][key] != materials['light'][key]}
-        assert changed == {'face_slope', 'face_intercept'} | ({'rim_opacity'} if rim and preset != 'frosted-glass' else set()), (preset, changed)
+        assert changed == {'face_slope', 'face_intercept'} | ({'rim_opacity'} if rim and preset not in liquid_rim_presets else set()), (preset, changed)
     assert request('reset')['ok']
 
     # Structured material data stays outside the compatible scalar contract.

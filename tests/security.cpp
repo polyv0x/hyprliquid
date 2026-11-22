@@ -144,7 +144,8 @@ void materialFamilies() {
     presets["custom-glass"].inherits = "frosted-full";
     assert(resolveMaterialFamily("custom-glass", presets) == EMaterialFamily::LEGACY);
     assert(resolveRimModel("custom-glass", presets) == ERimModel::LIQUID);
-    assert(resolveRimModel("frosted-glass-clear-edge", presets) == ERimModel::LEGACY);
+    assert(resolveRimModel("frosted-glass-clear-edge", presets) == ERimModel::LIQUID);
+    assert(resolveRimModel("frosted-clear-edge", presets) == ERimModel::LIQUID);
     SMaterial glass;
     assert(!materialParameter(glass, "display_angle_degrees"));
     assert(materialParameter(glass, "rim_soft"));

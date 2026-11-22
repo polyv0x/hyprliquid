@@ -1,0 +1,11 @@
+{
+  "supersample": 2,
+  "render_size": [
+    3840,
+    2400
+  ],
+  "image_size": [
+    1920,
+    1200
+  ]
+}

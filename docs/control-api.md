@@ -44,14 +44,14 @@ deleted or repaired by the control API.
 | `generation` | Configuration reload count within this epoch |
 | `revision` | Increases on accepted mutations, reloads, and dynamic `config()` writes |
 | `enabled`, `base_preset`, `theme` | Effective window defaults; theme is `dark` or `light` |
-| `animate_display_angle` | Boolean; sweep Liquid and frosted-glass rim highlights during native window size transitions, default `false` |
+| `animate_display_angle` | Boolean that sweeps Liquid rim highlights during native window size transitions, default `false` |
 | `active` | Whether any panel override exists |
 | `panel` | Sparse explicit `enabled`, `animate_display_angle`, `base_preset`, `theme`, and `overrides` |
 | `inherited` | Resolved selected base material/theme before scalar panel overrides |
 | `material` | Actual resolved/sanitized material after panel overrides |
 | `baseline` | Configured enabled/preset/theme and resolved configured material |
 | `model` | Resolved material family: `legacy` or `liquid`, inherited through custom presets |
-| `rim_model` | Resolved rim lighting: `legacy` or `liquid`; frosted-glass uses a Liquid rim with the legacy material body |
+| `rim_model` | Resolved rim lighting (`legacy` or `liquid`). Both Frosted Glass presets pair a Liquid rim with the legacy material body. |
 | `applicable_parameters` | Scalar names that affect the effective model |
 | `effective_blur_sigma` | Resolved logical blur sigma, including fixed material values |
 | `model_data` | Liquid environment, base `parameters`, resolved `effective_parameters`, rendering assumptions, shadow owner and output extent |
@@ -111,8 +111,8 @@ The additive `display_angle_animation` capability advertises the boolean
 180, default 0). With the toggle off, the angle stays fixed. With it on, each
 native size transition sweeps 0° → configured angle → 0° using the window's
 eased resize progress. Idle windows remain at 0°; interrupted resizes continue
-from the last drawn angle. The boolean applies to all Liquid and frosted-glass
-windows, including inherited and tagged presets, while their own resolved angle
+from the last drawn angle. The boolean applies to all windows with Liquid rim
+lighting, including inherited and tagged presets. Each window's resolved angle
 supplies the peak. The same presets support `animate_hover_angle`. Layers keep
 their static angle. A profile omission or patch null relinquishes ownership of
 the boolean; `reset_fields` remains for scalar controls only.

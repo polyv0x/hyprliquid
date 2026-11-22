@@ -9,8 +9,12 @@ build/
 __pycache__/
 *.py[cod]
 
-# Local demo captures;
-/screenshots/
+# Local demo captures and archives
+/screenshots/*
+!/screenshots/antialiased/
+/screenshots/antialiased/*
+!/screenshots/antialiased/*.png
+!/screenshots/antialiased/capture-settings.json
 
 # Local profiling output
 profiling/

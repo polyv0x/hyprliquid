@@ -10,6 +10,8 @@ custom profiles.
 
 https://github.com/user-attachments/assets/5d078786-1cad-4b21-af75-1c751e7cec3f
 
+[Examples](#examples)
+
 ## Installation
 
 Supports **Hyprland 0.56.2 and 0.57.2** from the same source. Build the plugin
@@ -121,19 +123,30 @@ Liquid settings with sigma 6. See the
 [Liquid material contract](docs/guide.md#liquid-material) for controls, theme
 mapping, and rendering behavior.
 
-`display_angle_degrees` rotates the edge highlights of `frosted-glass` and
-Liquid presets (default `0`). Frosted-glass uses Liquid's key/fill rim with
-width and strength both set to `1`. The
+`display_angle_degrees` rotates the edge highlights of both Frosted Glass
+presets and the Liquid presets (default `0`). Both Frosted Glass presets use
+Liquid's key/fill rim with width and strength set to `1`. The
 optional `animate_display_angle = true` setting sweeps 0° → configured angle →
 0° during native window size animations, following the window's easing. See the
 [Liquid configuration example](docs/guide.md#liquid-material).
 
-## Tests
+## Examples
 
-`make demo` renders the eight example scenes. Demo captures render at 2× pixel
-density and resolve to 1920×1200 for smoother window borders. Use
-`python3 scripts/capture-demo.py --supersample 1` for native-resolution captures,
-or `--output <directory>` to keep a separate set. This affects demo capture only.
+Browse the [screenshots](screenshots/antialiased/) for all seven built-in
+presets, including the two Liquid variants and side-by-side comparisons.
+
+`make demo` renders the ten example scenes in a nested Hyprland session.
+Run it from an active Wayland session with PySide6 and `grim` installed.
+Captures render at 2× pixel density and resolve to 1920×1200 for smoother
+window borders. Use `python3 scripts/capture-demo.py --supersample 1` for
+native-resolution captures. To regenerate the gallery:
+
+```sh
+make -j4 hyprliquid.so build/demo-scene
+python3 scripts/capture-demo.py --output screenshots/antialiased
+```
+
+## Tests
 
 From a source checkout:
 

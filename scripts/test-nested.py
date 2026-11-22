@@ -308,31 +308,36 @@ def main():
                     assert public_presets <= listed, listed
                     assert not listed & {'default', 'measured', 'platform', 'lens', 'lighter', 'darker', 'ultra_darker', 'no_bleed', 'liquid-medium', 'clear-edge', 'frosted-clear-edge'}, listed
                     # Compatibility names preserve the presets they alias.
-                    # Frosted Glass now intentionally uses a different rim
-                    # from a saved lens profile with matching blur settings.
                     equivalents = [
-                        ('measured', 'frosted', {}),
-                        ('platform', 'soft-glass', {}),
-                        ('lens', 'clear-glass', {}),
-                        ('lens', 'frosted-glass-clear-edge', {'blur_alpha0': 0.02, 'blur_alpha3': 1, 'blur_dist3': 38.4}),
-                        ('clear-edge', 'frosted-glass-clear-edge', {}),
-                        ('frosted-clear-edge', 'frosted-glass-clear-edge', {}),
-                        ('liquid-medium', 'frosted-liquid', {}),
+                        ('measured', 'frosted'),
+                        ('platform', 'soft-glass'),
+                        ('lens', 'clear-glass'),
+                        ('clear-edge', 'frosted-glass-clear-edge'),
+                        ('frosted-clear-edge', 'frosted-glass-clear-edge'),
+                        ('liquid-medium', 'frosted-liquid'),
                     ]
-                    for legacy, preset, overrides in equivalents:
-                        before = control('apply', profile={'base_preset': legacy, 'overrides': overrides})
+                    for legacy, preset in equivalents:
+                        before = control('apply', profile={'base_preset': legacy})
                         assert before['ok'], before
                         pixels = capture('nested-legacy-' + preset)
                         after = control('apply', profile={'base_preset': preset})
                         assert after['ok'] and after['state']['base_preset'] == preset, after
                         assert before['state']['material'] == after['state']['material'], preset
                         assert capture('nested-renamed-' + preset) == pixels, preset
-                    before = control('apply', profile={'base_preset': 'lens', 'overrides': {'blur_alpha0': 0.96, 'blur_alpha3': 1}})
-                    assert before['ok'] and before['state']['rim_model'] == 'legacy', before
-                    old_frost = capture('nested-legacy-frosted-glass', inset=0)
-                    after = control('apply', profile={'base_preset': 'frosted-glass'})
-                    assert after['ok'] and after['state']['model'] == 'legacy' and after['state']['rim_model'] == 'liquid', after
-                    assert capture('nested-liquid-rim-frosted-glass', inset=0) != old_frost, 'Frosted Glass did not select its new rim'
+                    # With the same blur, both Frosted Glass presets switch the
+                    # lens profile's legacy rim to Liquid lighting.
+                    for preset, blur in (
+                        ('frosted-glass', {'blur_alpha0': 0.96, 'blur_alpha3': 1}),
+                        ('frosted-glass-clear-edge', {'blur_alpha0': 0.02, 'blur_alpha3': 1, 'blur_dist3': 38.4}),
+                    ):
+                        before = control('apply', profile={'base_preset': 'lens', 'overrides': blur})
+                        assert before['ok'] and before['state']['rim_model'] == 'legacy', before
+                        old_frost = capture('nested-lens-rim-' + preset, inset=0)
+                        after = control('apply', profile={'base_preset': preset})
+                        assert after['ok'] and after['state']['model'] == 'legacy' and after['state']['rim_model'] == 'liquid', after
+                        for key in blur:
+                            assert before['state']['material'][key] == after['state']['material'][key], (preset, key)
+                        assert capture('nested-liquid-rim-' + preset, inset=0) != old_frost, preset
                     assert control('reset')['ok']
                     print('PASS: compatibility presets preserve pixels and Frosted Glass selects its Liquid rim', flush=True)
                     for preset in sorted(public_presets):
